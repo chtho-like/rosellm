@@ -2,3 +2,5 @@ torch
 nltk
 torchtext==0.6.0
 spacy
+rouge
+jiwer
