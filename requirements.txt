@@ -4,3 +4,5 @@ torchtext==0.6.0
 spacy
 rouge
 jiwer
+scipy==1.8.0
+gensim>=4.3.0
