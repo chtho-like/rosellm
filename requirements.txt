@@ -1,9 +1,2 @@
 torch==2.5.1
-nltk
-torchtext==0.6.0
-spacy
-rouge
-jiwer
-scipy==1.8.0
-gensim>=4.3.0
 huggingface-hub==0.26.2
