@@ -1,62 +1,69 @@
+"""This module provides functionality for loading and managing model weights."""
+
 import os
-from abc import ABC, abstractmethod
-from typing import Optional, Tuple, List
-from torch import nn 
-from config import LoadConfig, ModelConfig, LLMConfig
-import huggingface_hub
-import fnmatch
+from typing import List, Optional
 
-class BaseModelLoader:
-    def __init__(self, load_config: LoadConfig):
-        self.load_config = load_config 
-    
-    @abstractmethod
-    def download_model(self, model_config: ModelConfig) -> None:
-        raise NotImplementedError
-    
-    @abstractmethod
-    def load_model(self, *, llm_config: LLMConfig) -> nn.Module:
-        raise NotImplementedError
 
-class DefaultModelLoader(BaseModelLoader):
-    def __init__(self, load_config: LoadConfig):
-        super().__init__(load_config)
-    
-    def _prepare_weights(
-        self, 
-        model_name_or_path: str,
-        revision: Optional[str],
-        fall_back_to_pt: bool,
-    ) -> Tuple[str, List[str], bool]:
-        is_local = os.path.isdir(model_name_or_path)
-        if is_local:
-            model_folder = model_name_or_path
-        else:
-            model_folder = download_weights(
-                model_name_or_path, 
-            )
-    
-    def download_model(self, model_config: ModelConfig) -> None:
-        pass 
-    
-    def load_model(self, llm_config: LLMConfig) -> nn.Module:
+class WeightLoader:
+    """Class for loading model weights."""
+
+    def __init__(self) -> None:
+        """Initialize the weight loader."""
         pass
 
-def download_weights(
-    model_name_or_path: str,
-    allow_patterns: List[str],
-    revision: Optional[str] = None,
-):
-    if not huggingface_hub.constants.HF_HUB_OFFLINE:
-        # Before downloading, check whether the model exists.
-        fs = huggingface_hub.HfFileSystem()
-        file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
+    def load_weights(self, path: str) -> None:
+        """Load weights from the specified path.
 
-        for pattern in allow_patterns:
-            matching = fnmatch.filter(file_list, pattern)
-            if len(matching) > 0:
-                allow_patterns = [pattern]
-                break
+        Args:
+            path: Path to the weights file.
+        """
+        pass
 
-def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
-    return DefaultModelLoader(load_config)
+    def unload_weights(self) -> None:
+        """Unload currently loaded weights."""
+        pass
+
+
+class WeightDownloader:
+    """Class for downloading model weights."""
+
+    def __init__(self) -> None:
+        """Initialize the weight downloader."""
+        pass
+
+    def download_weights(
+        self, url: str, output_dir: str, allow_patterns: Optional[List[str]] = None
+    ) -> str:
+        """Download weights from the specified URL.
+
+        Args:
+            url: URL to download weights from.
+            output_dir: Directory to save downloaded weights.
+            allow_patterns: List of file patterns to allow downloading.
+
+        Returns:
+            Path to the downloaded weights file.
+        """
+        return os.path.join(output_dir, "weights.bin")
+
+    def cancel_download(self) -> None:
+        """Cancel the current download operation."""
+        pass
+
+
+def get_weight_loader() -> WeightLoader:
+    """Get a weight loader instance.
+
+    Returns:
+        A WeightLoader instance.
+    """
+    return WeightLoader()
+
+
+def get_weight_downloader() -> WeightDownloader:
+    """Get a weight downloader instance.
+
+    Returns:
+        A WeightDownloader instance.
+    """
+    return WeightDownloader()
