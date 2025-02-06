@@ -5,33 +5,37 @@ from dataclasses import dataclass, field
 class DecodingParams:
     def __init__(
         self,
-        max_gen_len: int,
-        max_seq_len: int,
-        top_k: int,
-        top_p: float,
-        temperature: float,
-        repetition_penalty: float,
-        max_new_tokens: int,
-        max_time: float,
-        stop_token_ids: List[int],
-        stop_token_ids_include: bool,
-        stop_token_ids_include_eos: bool,
-        stop_token_ids_include_pad: bool,
-        stop_token_ids_include_bos: bool,
+        # Number of tokens to sample.
+        n: int = 1,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        use_beam_search: bool = False,
+        stop_token_ids: List[int] = [],
     ) -> None:
-        self.max_gen_len = max_gen_len
-        self.max_seq_len = max_seq_len
-        self.top_k = top_k
-        self.top_p = top_p
+        assert n >= 1
+        assert temperature >= 0.0
+        assert 0.0 < top_p <= 1.0
+        if use_beam_search:
+            # When using beam search, we need to sample more than one token.
+            assert n > 1
+            # When using beam search, temperature must be greater than 0.0
+            # to provide diversity to the beam paths.
+            assert temperature > 0.0
+            # When using beam search, top_p must be 1.0 to ensure that
+            # all beam paths are considered.
+            assert top_p == 1.0
+        elif temperature == 0.0:
+            # Zero temperature means greedy decoding.
+            assert n == 1
+            # When using greedy decoding, top_p must be 1.0 to ensure that
+            # the most likely token will not be filtered out.
+            assert top_p == 1.0
+        
+        self.n = n
         self.temperature = temperature
-        self.repetition_penalty = repetition_penalty
-        self.max_new_tokens = max_new_tokens
-        self.max_time = max_time
+        self.top_p = top_p
+        self.use_beam_search = use_beam_search
         self.stop_token_ids = stop_token_ids
-        self.stop_token_ids_include = stop_token_ids_include
-        self.stop_token_ids_include_eos = stop_token_ids_include_eos
-        self.stop_token_ids_include_pad = stop_token_ids_include_pad
-        self.stop_token_ids_include_bos = stop_token_ids_include_bos
 
 TaskOption = Literal[
     "auto",
