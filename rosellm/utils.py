@@ -1,6 +1,17 @@
-from enum import Enum
+import enum
 
-class Device(Enum):
-    CPU = "cpu"
-    GPU = "cuda"
+class Device(enum.Enum):
+    CPU = enum.auto()
+    GPU = enum.auto()
     
+class Counter:
+    def __init__(self, start: int = 0) -> None:
+        self.counter = start
+    
+    def next(self) -> int:
+        id = self.counter
+        self.counter += 1
+        return id
+    
+    def reset(self) -> None:
+        self.counter = 0
