@@ -1,6 +1,37 @@
 import enum
-from typing import Literal 
+from typing import Literal, List
 from dataclasses import dataclass, field
+
+class DecodingParams:
+    def __init__(
+        self,
+        max_gen_len: int,
+        max_seq_len: int,
+        top_k: int,
+        top_p: float,
+        temperature: float,
+        repetition_penalty: float,
+        max_new_tokens: int,
+        max_time: float,
+        stop_token_ids: List[int],
+        stop_token_ids_include: bool,
+        stop_token_ids_include_eos: bool,
+        stop_token_ids_include_pad: bool,
+        stop_token_ids_include_bos: bool,
+    ) -> None:
+        self.max_gen_len = max_gen_len
+        self.max_seq_len = max_seq_len
+        self.top_k = top_k
+        self.top_p = top_p
+        self.temperature = temperature
+        self.repetition_penalty = repetition_penalty
+        self.max_new_tokens = max_new_tokens
+        self.max_time = max_time
+        self.stop_token_ids = stop_token_ids
+        self.stop_token_ids_include = stop_token_ids_include
+        self.stop_token_ids_include_eos = stop_token_ids_include_eos
+        self.stop_token_ids_include_pad = stop_token_ids_include_pad
+        self.stop_token_ids_include_bos = stop_token_ids_include_bos
 
 TaskOption = Literal[
     "auto",
