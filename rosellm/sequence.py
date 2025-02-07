@@ -12,6 +12,9 @@ class SequenceStatus(enum.Enum):
 
 
 class Sequence:
+    """
+    A sequence is a list of token ids.
+    """
     def __init__(
         self,
         seq_id: int,
@@ -58,6 +61,10 @@ class Sequence:
 
 
 class SequenceGroup:
+    """
+    A group of sequences.
+    Question: What is the relationship between the sequences in the same group?
+    """
     def __init__(
         self,
         group_id: int,
