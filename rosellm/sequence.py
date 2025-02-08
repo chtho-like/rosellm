@@ -81,3 +81,8 @@ class SequenceGroup:
         else:
             return len([seq for seq in self.seqs if seq.status == status])
 
+    def find(self, seq_id: int) -> Sequence:
+        for seq in self.seqs:
+            if seq.seq_id == seq_id:
+                return seq
+        raise ValueError(f'Sequence {seq_id} not found.')

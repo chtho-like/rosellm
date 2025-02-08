@@ -156,7 +156,10 @@ class BlockSpaceManager:
     
     def can_swap_in(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
-        return len(blocks) <= self.gpu_allocator.get_num_free_blocks()
+        # For serving sequences, reverve additional physical blocks.
+        num_serving_seqs = seq_group.num_seqs(status=SequenceStatus.SERVING)
+        num_free_blocks = self.gpu_allocator.get_num_free_blocks()
+        return len(blocks) + num_serving_seqs <= num_free_blocks
 
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # src_block_number => dst_block_number
