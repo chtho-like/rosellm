@@ -134,10 +134,10 @@ class BlockSpaceManager:
             self.gpu_allocator.free(last_block)
             return last_block.block_number, block.block_number
         
-    def fork(self, src_seq: Sequence, child_seq: Sequence) -> None:
+    def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # fork does not allocate a new physical block.
         # It only increases the ref_count.
-        src_block_table = self.block_tables[src_seq.seq_id]
+        src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.copy()
         for block in src_block_table:
             block.ref_count += 1
