@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 import torch
 
@@ -31,15 +31,13 @@ class CacheEngine:
         self.gpu_cache = self.allocate_gpu_cache()
         self.cpu_cache = self.allocate_cpu_cache()
         
-        # Initialize the streams.
-        self.copy_stream = torch.cuda.Stream(device=gpu_id)
-        self.swap_stream = torch.cuda.Stream(device=gpu_id)
-        assert self.copy_stream != self.swap_stream
+        # Initialize the streams for caching.
+        self.cache_stream = torch.cuda.Stream(device=gpu_id)
         current_stream = torch.cuda.current_stream(device=gpu_id)
-        assert self.copy_stream != current_stream
-        assert self.swap_stream != current_stream
+        assert self.cache_stream != current_stream
 
-        # Initialize the events for synchronization.
+        # Initialize the events for stream synchronization.
+        self.events = [torch.cuda.Event() for _ in range(self.num_layers)]
     
     def allocate_gpu_cache(self) -> List[List[KVCache]]:
         gpu_cache: List[List[KVCache]] = []
@@ -81,27 +79,22 @@ class CacheEngine:
     
     def copy(
         self,
-        src_block_numbers: List[int],
-        dst_block_numbers: List[int],
+        src_to_dst: Dict[int, int],
     ) -> None:
-        for layer in range(self.num_layers):
-            # TODO: call the COPY op.
+        for event in self.events:
             pass
     
     def swap_out(
         self,
-        gpu_block_numbers: List[int],
-        cpu_block_numbers: List[int],
+        src_to_dst: Dict[int, int],
     ) -> None:
-        for layer in range(self.num_layers):
-            # TODO: call the SWAP_OUT op on the swap stream.
+        for event in self.events:
             pass
     
     def swap_in(
         self,
-        gpu_block_numbers: List[int],
-        cpu_block_numbers: List[int],
+        src_to_dst: Dict[int, int],
     ) -> None:
-        for layer in range(self.num_layers):
-            # TODO: call the SWAP_IN op on the swap stream.
+        for event in self.events:
             pass
+    
