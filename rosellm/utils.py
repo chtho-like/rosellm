@@ -8,7 +8,7 @@ class Counter:
     def __init__(self, start: int = 0) -> None:
         self.counter = start
     
-    def next(self) -> int:
+    def __next__(self) -> int:
         id = self.counter
         self.counter += 1
         return id
