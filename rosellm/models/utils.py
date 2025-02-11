@@ -7,7 +7,9 @@ MODEL_CLASSES = {
 }
 
 def get_model(model_name: str) -> nn.Module:
-    if model_name not in MODEL_CLASSES:
-        raise ValueError(f"Model {model_name} not found.")
-    return MODEL_CLASSES[model_name].from_pretrained(model_name)
+    for name, cls in MODEL_CLASSES.items():
+        if name in model_name:
+            return cls.from_pretrained(model_name)
+    raise ValueError(f"Model {model_name} not found.")
+
 
