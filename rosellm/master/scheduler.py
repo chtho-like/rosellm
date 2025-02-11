@@ -8,10 +8,16 @@ from rosellm.sequence import SequenceStatus
 class Scheduler:
     def __init__(
         self,
+        controller: List,
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
     ) -> None:
+        self.controller = controller
+        self.block_size = block_size
+        self.num_gpu_blocks = num_gpu_blocks
+        self.num_cpu_blocks = num_cpu_blocks
+        # Initialize the block manager.
         self.block_manager = BlockSpaceManager(
             block_size=block_size,
             num_gpu_blocks=num_gpu_blocks,
@@ -32,6 +38,11 @@ class Scheduler:
         # Pending sequence groups (FIFO).
         self.queue: List[SequenceGroup] = []
 
+        # Maps src_block_number to dst_block_number.
+        self.blocks_to_swap_in: Dict[int, int] = {}
+        self.blocks_to_swap_out: Dict[int, int] = {}
+        self.blocks_to_copy: Dict[int, int] = {}
+
     def _free_seq(self, seq: Sequence) -> None:
         seq.status = SequenceStatus.FINISHED
         self.block_manager.free(seq)
@@ -49,12 +60,11 @@ class Scheduler:
             ret = self.block_manager.append(seq)
             if ret is not None:
                 src_block, dst_block = ret
-                # TODO: Issue COPY commands to the workers.
+                self.blocks_to_copy[src_block] = dst_block
 
     def _swap_in(self, seq_group: SequenceGroup) -> None:
-        # TODO: Issue SWAP_IN commands to the workers.
-        self.block_manager.swap_in(seq_group)
-        self.block_manager.append(seq_group)
+        mapping = self.block_manager.swap_in(seq_group)
+        self.blocks_to_swap_in.update(mapping)
         for seq in seq_group.seqs:
             if seq.status == SequenceStatus.SWAPPED:
                 seq.status = SequenceStatus.SERVING
@@ -62,14 +72,14 @@ class Scheduler:
     
     def _swap_out(self, seq_group: SequenceGroup) -> None:
         assert self.block_manager.can_swap_out(seq_group)
-        # TODO: Issue SWAP_OUT commands to the workers.
-        self.block_manager.swap_out(seq_group)
+        mapping = self.block_manager.swap_out(seq_group)
+        self.blocks_to_swap_out.update(mapping)
         for seq in seq_group.seqs:
             if seq.status == SequenceStatus.SERVING:
                 seq.status = SequenceStatus.SWAPPED
         self.swapped.append(seq_group)
     
-    def step(self) -> None:
+    def prepare(self) -> None:
         # 1. Prepare new slots for the serving sequences.
         # NOTE: Here we implicitly assume FCFS scheduling.
         # That is, the most recently added sequence group 
@@ -96,6 +106,7 @@ class Scheduler:
         for i, seq_group in enumerate(reversed(self.swapped)):
             if self.block_manager.can_swap_in(seq_group):
                 self._swap_in(seq_group)
+                self._append(seq_group)
             else:
                 # OOM. Stop swapping.
                 self.swapped = self.swapped[:len(self.swapped) - i]
@@ -114,7 +125,18 @@ class Scheduler:
                     # TODO: Consider race condition.
                     self.queue = self.queue[i:]
                     break
-    
+    def step(self) -> None:
+        assert self.blocks_to_swap_in is not None or self.blocks_to_swap_out is not None
+        # Execute the first stage.
+        self.controllers[0].execute_stage(
+            self.blocks_to_swap_in.copy(),
+            self.blocks_to_swap_out.copy(),
+            self.blocks_to_copy.copy(),
+        )
+        self.blocks_to_swap_in.clear()
+        self.blocks_to_swap_out.clear()
+        self.blocks_to_copy.clear()
+
     def post_step(
         self,
         next_tokens: Dict[int, Tuple[int, int]],
