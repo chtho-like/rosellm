@@ -36,7 +36,7 @@ class Scheduler:
         self.swapped: List[SequenceGroup] = []
         
         # Pending sequence groups (FIFO).
-        self.queue: List[SequenceGroup] = []
+        self.pending: List[SequenceGroup] = []
 
         # Maps src_block_number to dst_block_number.
         self.blocks_to_swap_in: Dict[int, int] = {}
@@ -52,6 +52,7 @@ class Scheduler:
         for seq in seq_group.seqs:
             seq.status = SequenceStatus.SERVING
         self.serving.append(seq_group)
+        self.num_steps[seq_group.group_id] = 0
     
     def _append(self, seq_group: SequenceGroup) -> None:
         for seq in seq_group.seqs:
@@ -118,13 +119,16 @@ class Scheduler:
         # NOTE: Here we implicitly assume FCFS scheduling.
         # TODO: Add a heuristic to control the maximum batch size.
         if not self.swapped:
-            for i, seq_group in enumerate(self.queue):
+            for i, seq_group in enumerate(self.pending):
                 if self.block_manager.can_allocate(seq_group):
                     self._allocate(seq_group)
                 else:
                     # TODO: Consider race condition.
-                    self.queue = self.queue[i:]
+                    self.pending = self.pending[i:]
                     break
+        else:
+            self.pending.clear()
+
     def step(self) -> None:
         assert self.blocks_to_swap_in is not None or self.blocks_to_swap_out is not None
         # Execute the first stage.
@@ -172,7 +176,7 @@ class Scheduler:
         # Update the serving status.
         serving: List[SequenceGroup] = []
         for seq_group in self.serving:
-            if seq_group.num_seqs(status=SequenceStatus.SERVING) == 0:
+            if seq_group.num_seqs(status=SequenceStatus.FINISHED) == len(seq_group.seqs):
                 del self.num_steps[seq_group.group_id]
                 del self.max_num_steps[seq_group.group_id]
                 del self.stop_token_ids[seq_group.group_id]
