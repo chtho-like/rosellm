@@ -1,0 +1,5 @@
+training:
+  seed: 42
+
+model:
+  name: "gpt2"

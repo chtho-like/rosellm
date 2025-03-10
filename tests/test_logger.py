@@ -12,7 +12,7 @@ import logging
 
 import pytest
 
-from rosellm.logger import NewLineFormatter, init
+from rosellm.logging.logger import NewLineFormatter, init
 
 """
 This module contains tests for the logger functionality.

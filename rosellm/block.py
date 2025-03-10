@@ -1,6 +1,6 @@
 from typing import List
 
-from rosellm.utils import Device
+from rosellm.utils.utils import Device
 
 BLANK_TOKEN_ID = -1
 

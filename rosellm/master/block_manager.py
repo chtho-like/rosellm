@@ -2,7 +2,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from rosellm.block import PhysicalTokenBlock
 from rosellm.sequence import Sequence, SequenceGroup, SequenceStatus
-from rosellm.utils import Device
+from rosellm.utils.utils import Device
 
 class BlockAllocator:
     def __init__(
