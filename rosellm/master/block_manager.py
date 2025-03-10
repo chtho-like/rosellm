@@ -4,6 +4,7 @@ from rosellm.block import PhysicalTokenBlock
 from rosellm.sequence import Sequence, SequenceGroup, SequenceStatus
 from rosellm.utils.utils import Device
 
+
 class BlockAllocator:
     def __init__(
         self,
@@ -12,9 +13,9 @@ class BlockAllocator:
         num_blocks: int,
     ) -> None:
         # Optimal block_size = 16 according to paper:
-        # In practice, we find that the block size 16 is large enough 
-        # to efficiently utilize the GPU and small enough to avoid 
-        # significant internal fragmentation in most workloads. 
+        # In practice, we find that the block size 16 is large enough
+        # to efficiently utilize the GPU and small enough to avoid
+        # significant internal fragmentation in most workloads.
         # Accordingly, vLLM sets its default block size as 16.
         assert block_size in [8, 16, 32]
         self.device = device
@@ -30,28 +31,28 @@ class BlockAllocator:
             )
             for i in range(num_blocks)
         ]
-    
+
     def allocate(self) -> PhysicalTokenBlock:
         if not self.free_blocks:
-            raise ValueError('Out of memory! '
-                             'No more free blocks are available.')
+            raise ValueError("Out of memory! " "No more free blocks are available.")
         block = self.free_blocks.pop()
         block.ref_count = 1
         return block
-    
+
     def free(self, block: PhysicalTokenBlock) -> None:
         if block.ref_count == 0:
-            raise ValueError('Double free! '
-                             f'The block {block} is already freed.')
+            raise ValueError("Double free! " f"The block {block} is already freed.")
         block.ref_count -= 1
         if block.ref_count == 0:
             self.free_blocks.append(block)
-    
+
     def get_num_free_blocks(self) -> int:
         return len(self.free_blocks)
 
+
 # Mapping: logical block number => physical block.
 BlockTable = List[PhysicalTokenBlock]
+
 
 class BlockSpaceManager:
     def __init__(
@@ -65,21 +66,25 @@ class BlockSpaceManager:
         self.num_total_cpu_blocks = num_cpu_blocks
 
         self.gpu_allocator = BlockAllocator(
-            Device.GPU, block_size, num_gpu_blocks,
+            Device.GPU,
+            block_size,
+            num_gpu_blocks,
         )
         self.cpu_allocator = BlockAllocator(
-            Device.CPU, block_size, num_cpu_blocks,
+            Device.CPU,
+            block_size,
+            num_cpu_blocks,
         )
         # Mapping: seq_id => BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
-    
+
     def can_allocate(self, seq_group: SequenceGroup) -> bool:
         # Question: Why only access the first sequence in the group?
         seq = seq_group.seqs[0]
         num_required_blocks = len(seq.logical_token_blocks)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
         return num_required_blocks <= num_free_gpu_blocks
-    
+
     def allocate(self, seq_group: SequenceGroup) -> None:
         # Assume all sequences in the group have the same prompt.
         # Question: Does that mean every sequence in the same group
@@ -94,20 +99,20 @@ class BlockSpaceManager:
             block.ref_count = seq_group.num_seqs()
             # Logical block number => physical block.
             block_table.append(block)
-        
+
         # Assign the block table for each sequence.
         # Question: Does that mean every sequence in the group
         # shares the same underlying physical block?
         for seq in seq_group.seqs:
             self.block_tables[seq.seq_id] = block_table.copy()
-    
+
     def can_append(self, seq_group: SequenceGroup) -> bool:
-        # If there is at least one free block for each sequence, 
+        # If there is at least one free block for each sequence,
         # we can append.
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
         num_seqs = seq_group.num_seqs(status=SequenceStatus.SERVING)
         return num_seqs <= num_free_gpu_blocks
-        
+
     def append(self, seq: Sequence) -> Optional[Tuple[int, int]]:
         """Allocate a physical slot for the new token."""
         logical_blocks = seq.logical_token_blocks
@@ -133,7 +138,7 @@ class BlockSpaceManager:
             # Question: Why last_block is freed?
             self.gpu_allocator.free(last_block)
             return last_block.block_number, block.block_number
-        
+
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # fork does not allocate a new physical block.
         # It only increases the ref_count.
@@ -141,11 +146,13 @@ class BlockSpaceManager:
         self.block_tables[child_seq.seq_id] = src_block_table.copy()
         for block in src_block_table:
             block.ref_count += 1
-    
-    def _get_physical_blocks(self, seq_group: SequenceGroup) -> List[PhysicalTokenBlock]:
+
+    def _get_physical_blocks(
+        self, seq_group: SequenceGroup
+    ) -> List[PhysicalTokenBlock]:
         # Assume that the physical blocks are only shared by
         # the sequences in the same group.
-        blocks: Set[PhysicalTokenBlock] = set() 
+        blocks: Set[PhysicalTokenBlock] = set()
         for seq in seq_group.seqs:
             if seq.status == SequenceStatus.FINISHED:
                 continue
@@ -153,7 +160,7 @@ class BlockSpaceManager:
             for block in block_table:
                 blocks.add(block)
         return list(blocks)
-    
+
     def can_swap_in(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
         # For serving sequences, reserve additional physical blocks.
@@ -184,11 +191,11 @@ class BlockSpaceManager:
             for cpu_block, gpu_block in mapping.items()
         }
         return block_number_mapping
-    
+
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
         return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
-    
+
     def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # GPU block => CPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
@@ -212,19 +219,19 @@ class BlockSpaceManager:
             for gpu_block, cpu_block in mapping.items()
         }
         return block_number_mapping
-    
+
     def _free_blocks(self, blocks: Iterable[PhysicalTokenBlock]) -> None:
         for block in blocks:
             if block.device == Device.GPU:
                 self.gpu_allocator.free(block)
             else:
                 self.cpu_allocator.free(block)
-    
+
     def free(self, seq: Sequence) -> None:
         block_table = self.block_tables[seq.seq_id]
         self._free_blocks(block_table)
         del self.block_tables[seq.seq_id]
-    
+
     def reset(self) -> None:
         for block_table in self.block_tables.values():
             self._free_blocks(block_table)

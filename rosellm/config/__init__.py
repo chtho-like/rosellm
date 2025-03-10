@@ -1,4 +1,5 @@
-from .config import Args, Config, GlobalConfig, ModelConfig, Parser, TrainingConfig
+from .config import (Args, Config, GlobalConfig, ModelConfig, Parser,
+                     TrainingConfig)
 
 __all__ = [
     "Config",
