@@ -8,6 +8,7 @@ import yaml
 @dataclass
 class TrainingConfig:
     seed: int = 42
+    logging_level: str = "DEBUG"
 
 
 @dataclass
@@ -16,15 +17,23 @@ class ModelConfig:
 
 
 @dataclass
+class DatasetConfig:
+    path: str = "DigitalLearningGmbH/MATH-lighteval"
+    name: str = "default"
+
+
+@dataclass
 class GlobalConfig:
     training: TrainingConfig
     model: ModelConfig
+    dataset: DatasetConfig
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "GlobalConfig":
         return cls(
             training=TrainingConfig(**config_dict["training"]),
             model=ModelConfig(**config_dict["model"]),
+            dataset=DatasetConfig(**config_dict["dataset"]),
         )
 
 
@@ -81,6 +90,10 @@ class Args:
     @property
     def model(self) -> ModelConfig:
         return self.global_config.model
+
+    @property
+    def dataset(self) -> DatasetConfig:
+        return self.global_config.dataset
 
 
 class ArgumentParser(argparse.ArgumentParser):

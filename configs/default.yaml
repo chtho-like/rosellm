@@ -1,5 +1,11 @@
 training:
   seed: 42
+  logging_level: DEBUG
 
 model:
   name: "gpt2"
+
+dataset:
+  # https://huggingface.co/datasets/DigitalLearningGmbH/MATH-lighteval
+  path: DigitalLearningGmbH/MATH-lighteval
+  name: default
