@@ -1,5 +1,5 @@
 import torch
-from datasets import load_dataset
+from datasets import DatasetDict, load_dataset
 
 from rosellm.config import Args, Parser
 from rosellm.logging.logger import logger
@@ -41,12 +41,26 @@ def main(args: Args):
         if args.model.torch_dtype in ["auto", None]
         else getattr(torch, args.model.torch_dtype)
     )
+
+    if isinstance(dataset, DatasetDict):
+        # For DatasetDict, access by split name.
+        train_dataset = dataset[args.dataset.train_split]
+        eval_dataset = dataset[args.dataset.eval_split]
+    else:
+        # For single dataset, use the same dataset for train and eval.
+        logger.warning(
+            "Dataset is not a DatasetDict, using same dataset for train and eval."
+        )
+        train_dataset = dataset
+        eval_dataset = dataset
+
+    logger.info(f"initializing GRPOTrainer")
     trainer = GRPOTrainer(
         model_path=args.model.path,
         reward_funcs=["accuracy"],
-        args=args.training,
-        train_dataset=dataset[args.dataset.train_split],
-        eval_dataset=dataset[args.dataset.eval_split],
+        args=args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
     )
 
 

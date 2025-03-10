@@ -1,3 +1,6 @@
+from rosellm.models import CausalModel
+
+
 class GRPOTrainer:
     def __init__(
         self,
@@ -12,3 +15,8 @@ class GRPOTrainer:
         self.args = args
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
+
+        self.model = self._init_model()
+
+    def _init_model(self):
+        return CausalModel.from_pretrained(self.model_path, self.args.model)

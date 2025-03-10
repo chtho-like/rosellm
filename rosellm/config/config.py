@@ -9,7 +9,6 @@ import yaml
 class TrainingConfig:
     seed: int = 42
     logging_level: str = "DEBUG"
-    gradient_checkpointing: bool = False
 
 
 @dataclass
@@ -17,6 +16,9 @@ class ModelConfig:
     path: str = "Qwen/Qwen2.5-0.5B"
     revision: str = "main"
     torch_dtype: str = "bfloat16"
+    attn_implementation: str = "flash_attention_2"
+    gradient_checkpointing: bool = True
+    trust_remote_code: bool = True
 
 
 @dataclass
