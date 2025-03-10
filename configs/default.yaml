@@ -1,11 +1,16 @@
 training:
   seed: 42
   logging_level: DEBUG
+  gradient_checkpointing: false
 
 model:
-  name: "gpt2"
+  path: Qwen/Qwen2.5-0.5B
+  revision: main
+  torch_dtype: bfloat16
 
 dataset:
   # https://huggingface.co/datasets/DigitalLearningGmbH/MATH-lighteval
   path: DigitalLearningGmbH/MATH-lighteval
   name: default
+  train_split: train
+  eval_split: test

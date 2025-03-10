@@ -9,17 +9,22 @@ import yaml
 class TrainingConfig:
     seed: int = 42
     logging_level: str = "DEBUG"
+    gradient_checkpointing: bool = False
 
 
 @dataclass
 class ModelConfig:
-    name: str = "gpt2"
+    path: str = "Qwen/Qwen2.5-0.5B"
+    revision: str = "main"
+    torch_dtype: str = "bfloat16"
 
 
 @dataclass
 class DatasetConfig:
     path: str = "DigitalLearningGmbH/MATH-lighteval"
     name: str = "default"
+    train_split: str = "train"
+    eval_split: str = "test"
 
 
 @dataclass
@@ -138,4 +143,8 @@ if __name__ == "__main__":
     args = parser.parse_args_and_config()
     print(args.config_path)
     print(args.training.seed)
-    print(args.model.name)
+    print(args.model.path)
+    print(args.model.revision)
+    print(args.model.torch_dtype)
+    print(args.dataset.path)
+    print(args.dataset.name)

@@ -1,7 +1,9 @@
+import torch
 from datasets import load_dataset
 
 from rosellm.config import Args, Parser
 from rosellm.logging.logger import logger
+from rosellm.r1zero.trainer.grpo_trainer import GRPOTrainer
 from rosellm.utils import set_seed
 
 SYSTEM_PROMPT = (
@@ -26,16 +28,26 @@ def main(args: Args):
     # Load dataset.
     dataset = load_dataset(args.dataset.path, args.dataset.name)
     logger.info(f"dataset: {dataset}")
-
-    def make_conversation(example):
-        return {
-            "prompt": [
+    dataset = dataset.map(
+        lambda example: {
+            "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": example["problem"]},
             ]
         }
-
-    dataset = dataset.map(make_conversation)
+    )
+    torch_dtype = (
+        args.model.torch_dtype
+        if args.model.torch_dtype in ["auto", None]
+        else getattr(torch, args.model.torch_dtype)
+    )
+    trainer = GRPOTrainer(
+        model_path=args.model.path,
+        reward_funcs=["accuracy"],
+        args=args.training,
+        train_dataset=dataset[args.dataset.train_split],
+        eval_dataset=dataset[args.dataset.eval_split],
+    )
 
 
 if __name__ == "__main__":
