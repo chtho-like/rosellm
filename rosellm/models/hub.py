@@ -6,6 +6,7 @@ from typing import Optional
 
 from huggingface_hub import hf_hub_download
 
+from rosellm.logging.logger import logger
 from rosellm.models.envs import CACHE_DIR, SESSION_ID, _torch_version
 
 REGEX_COMMIT_HASH = re.compile(r"^[0-9a-f]{40}$")
@@ -89,6 +90,12 @@ def resolve_file(
             return resolved_file
     user_agent = get_user_agent()
     try:
+        logger.info(
+            f"downloading {model_path} {filename} from hub, "
+            + f"cache_dir: {cache_dir}, "
+            + f"force_download: {force_download}, "
+            + f"user_agent: {user_agent}"
+        )
         resolved_file = hf_hub_download(
             repo_id=model_path,
             filename=filename,
@@ -98,3 +105,10 @@ def resolve_file(
         )
     except Exception as e:
         raise e
+
+
+if __name__ == "__main__":
+    model_path = "Qwen/Qwen2.5-0.5B"
+    filename = "config.json"
+    resolved_file = resolve_file(model_path, filename)
+    print(resolved_file)

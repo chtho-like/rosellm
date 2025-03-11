@@ -1,10 +1,13 @@
 import torch
 from datasets import DatasetDict, load_dataset
+from datasets import logging as datasets_logging
 
 from rosellm.config import Args, Parser
 from rosellm.logging.logger import logger
 from rosellm.r1zero.trainer.grpo_trainer import GRPOTrainer
 from rosellm.utils import set_seed
+
+datasets_logging.set_verbosity_info()
 
 SYSTEM_PROMPT = (
     "A conversation between User and Assistant. "
@@ -26,8 +29,14 @@ def main(args: Args):
     logger.info(f"set seed: {args.training.seed}")
 
     # Load dataset.
-    dataset = load_dataset(args.dataset.path, args.dataset.name)
-    logger.info(f"dataset: {dataset}")
+    # E.g. args.dataset.path = "DigitalLearningGmbH/MATH-lighteval"
+    # E.g. args.dataset.name = "default"
+    logger.info(f"loading dataset: {args.dataset.path} {args.dataset.name}")
+    dataset = load_dataset(
+        args.dataset.path,
+        args.dataset.name,
+    )
+    logger.info(f"mapping dataset to system prompt")
     dataset = dataset.map(
         lambda example: {
             "messages": [
