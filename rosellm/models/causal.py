@@ -11,26 +11,9 @@ from torch import nn
 
 from rosellm.config import ModelConfig
 from rosellm.models.auto_config import AutoConfig
-from rosellm.models.lazy_mapping import _LazyAutoMapping
-
-CACHE_DIR = os.getenv("HF_HUB_CACHE", os.path.expanduser("~/.cache/huggingface/hub"))
-SESSION_ID = uuid.uuid4()
-REGEX_COMMIT_HASH = re.compile(r"^[0-9a-f]{40}$")
-
-_torch_version = torch.__version__
-
-CONFIG_MAPPING_NAMES = {
-    "qwen2": "Qwen2Config",
-}
-
-MODEL_FOR_CAUSAL_LM_MAPPING_NAMES = {
-    "qwen2": "Qwen2ForCausalLM",
-}
-
-MODEL_FOR_CAUSAL_LM_MAPPING = _LazyAutoMapping(
-    CONFIG_MAPPING_NAMES,
-    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
-)
+from rosellm.models.envs import CACHE_DIR, SESSION_ID
+from rosellm.models.hub import extract_commit_hash, resolve_file
+from rosellm.models.mappings import MODEL_FOR_CAUSAL_LM_MAPPING
 
 
 class CausalModel(nn.Module):
@@ -41,121 +24,24 @@ class CausalModel(nn.Module):
         self.config = config
 
     @classmethod
-    def _try_to_load_from_cache(
-        cls,
-        repo_id: str,
-        filename: str,
-        cache_dir: str = CACHE_DIR,
-        repo_type: str = "model",
-        revision: str = "main",
-    ):
-        if cache_dir is None:
-            cache_dir = CACHE_DIR
-        if repo_type is None:
-            repo_type = "model"
-        object_id = repo_id.replace("/", "--")
-        repo_cache = os.path.join(cache_dir, f"{repo_type}s--{object_id}")
-        if not os.path.isdir(repo_cache):
-            return None
-        refs_dir = os.path.join(repo_cache, "refs")
-        snapshots_dir = os.path.join(repo_cache, "snapshots")
-        no_exist_dir = os.path.join(repo_cache, ".no_exist")
-        if os.path.isdir(refs_dir):
-            revision_file = os.path.join(refs_dir, revision)
-            if os.path.isfile(revision_file):
-                with open(revision_file) as f:
-                    revision = f.read()
-        if os.path.isfile(os.path.join(no_exist_dir, revision, filename)):
-            return None
-        if not os.path.exists(snapshots_dir):
-            return None
-        cached_shas = os.listdir(snapshots_dir)
-        if revision not in cached_shas:
-            return None
-        cached_file = os.path.join(snapshots_dir, revision, filename)
-        return cached_file if os.path.isfile(cached_file) else None
-
-    @classmethod
-    def _get_user_agent(cls):
-        ua = (
-            f"transformers/4.48.2; "  # Hardcoded.
-            + f"python/{sys.version.split()[0]}; "
-            + f"session_id/{SESSION_ID}; "
-            + f"torch/{_torch_version}"
-        )
-        return ua
-
-    @classmethod
-    def _resolve_file(
-        cls,
-        model_path: str,
-        filename: str,
-        cache_dir: Optional[str] = CACHE_DIR,
-        force_download: bool = False,
-        _commit_hash: Optional[str] = None,
-    ):
-        if os.path.isdir(model_path):
-            resolved_file = os.path.join(model_path, filename)
-            if not os.path.isfile(resolved_file):
-                raise FileNotFoundError(f"File {filename} not found in {model_path}")
-            return resolved_file
-        if cache_dir is None:
-            cache_dir = CACHE_DIR
-        if _commit_hash is not None and not force_download:
-            resolved_file = cls._try_to_load_from_cache(
-                model_path,
-                filename,
-                cache_dir=cache_dir,
-                revision=_commit_hash,
-            )
-            if resolved_file is not None:
-                return resolved_file
-        user_agent = cls._get_user_agent()
-        try:
-            resolved_file = hf_hub_download(
-                repo_id=model_path,
-                filename=filename,
-                cache_dir=cache_dir,
-                user_agent=user_agent,
-                force_download=force_download,
-            )
-        except Exception as e:
-            raise e
-
-    @classmethod
-    def _extract_commit_hash(cls, resolved_file: str):
-        if resolved_file is None:
-            return None
-        resolved_file = str(Path(resolved_file).as_posix())
-        search = re.search(r"snapshots/([^/]+)/", resolved_file)
-        if search is None:
-            return None
-        commit_hash = search.groups()[0]
-        return commit_hash if REGEX_COMMIT_HASH.match(commit_hash) else None
-
-    @classmethod
     def _load_config(
         cls,
         model_path: str,
         args: Optional[ModelConfig] = None,
     ):
-        resolved_config_file = cls._resolve_file(
+        resolved_config_file = resolve_file(
             model_path,
             "config.json",
         )
         if resolved_config_file is None:
             raise ValueError(f"Config file not found: {model_path}/config.json")
-        commit_hash = cls._extract_commit_hash(resolved_config_file)
+        commit_hash = extract_commit_hash(resolved_config_file)
         if commit_hash is None:
             raise ValueError(f"Invalid commit hash: {commit_hash}")
-        config = AutoConfig.from_pretrained(
+        return AutoConfig.from_pretrained(
             model_path,
             _commit_hash=commit_hash,
         )
-
-    @classmethod
-    def _get_model_class(cls, config):
-        pass
 
     @classmethod
     def from_pretrained(
@@ -164,7 +50,10 @@ class CausalModel(nn.Module):
         args: Optional[ModelConfig] = None,
     ):
         config = cls._load_config(model_path, args)
-        model_class = cls._get_model_class(config)
+        model_class = cls._model_mapping[type(config)]
+        if model_class is None:
+            raise ValueError(f"{type(config)} is not a valid model type.")
+        return model_class._from_config(config, args)
 
     def forward(self, input_ids: torch.LongTensor, positions: torch.LongTensor):
         pass

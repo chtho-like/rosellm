@@ -2,6 +2,38 @@ import importlib
 from collections import OrderedDict
 
 
+class _LazyConfigMapping(OrderedDict):
+    def __init__(self, mapping):
+        self._mapping = mapping
+        self._modules = {}
+
+    def __getitem__(self, key):
+        if key not in self._mapping:
+            raise KeyError(key)
+        value = self._mapping[key]
+        module_name = key
+        if module_name not in self._modules:
+            self._modules[module_name] = importlib.import_module(
+                f".{module_name}", "rosellm.models"
+            )
+        return getattr(self._modules[module_name], value)
+
+    def keys(self):
+        return list(self._mapping.keys())
+
+    def values(self):
+        return [self[key] for key in self._mapping.keys()]
+
+    def items(self):
+        return [(key, self[key]) for key in self._mapping.keys()]
+
+    def __iter__(self):
+        return iter(self.keys())
+
+    def __contains__(self, item):
+        return item in self._mapping
+
+
 class _LazyAutoMapping(OrderedDict):
     def __init__(self, config_mapping, model_mapping):
         # E.g. config_mapping = {"qwen2": "Qwen2Config"}
