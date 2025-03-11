@@ -18,7 +18,6 @@ class ModelConfig:
     torch_dtype: str = "bfloat16"
     attn_implementation: str = "flash_attention_2"
     gradient_checkpointing: bool = True
-    trust_remote_code: bool = True
 
 
 @dataclass

@@ -8,7 +8,6 @@ model:
   torch_dtype: bfloat16
   attn_implementation: flash_attention_2
   gradient_checkpointing: true
-  trust_remote_code: true
 
 dataset:
   # https://huggingface.co/datasets/DigitalLearningGmbH/MATH-lighteval

@@ -10,6 +10,8 @@ from huggingface_hub import hf_hub_download
 from torch import nn
 
 from rosellm.config import ModelConfig
+from rosellm.models.auto_config import AutoConfig
+from rosellm.models.lazy_mapping import _LazyAutoMapping
 
 CACHE_DIR = os.getenv("HF_HUB_CACHE", os.path.expanduser("~/.cache/huggingface/hub"))
 SESSION_ID = uuid.uuid4()
@@ -17,8 +19,23 @@ REGEX_COMMIT_HASH = re.compile(r"^[0-9a-f]{40}$")
 
 _torch_version = torch.__version__
 
+CONFIG_MAPPING_NAMES = {
+    "qwen2": "Qwen2Config",
+}
+
+MODEL_FOR_CAUSAL_LM_MAPPING_NAMES = {
+    "qwen2": "Qwen2ForCausalLM",
+}
+
+MODEL_FOR_CAUSAL_LM_MAPPING = _LazyAutoMapping(
+    CONFIG_MAPPING_NAMES,
+    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+)
+
 
 class CausalModel(nn.Module):
+    _model_mapping = MODEL_FOR_CAUSAL_LM_MAPPING
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -131,6 +148,10 @@ class CausalModel(nn.Module):
         commit_hash = cls._extract_commit_hash(resolved_config_file)
         if commit_hash is None:
             raise ValueError(f"Invalid commit hash: {commit_hash}")
+        config = AutoConfig.from_pretrained(
+            model_path,
+            _commit_hash=commit_hash,
+        )
 
     @classmethod
     def _get_model_class(cls, config):
