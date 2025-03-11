@@ -58,7 +58,7 @@ class _LazyAutoMapping(OrderedDict):
             # E.g. model_name = "Qwen2ForCausalLM"
             model_name = self._model_mapping[model_type]
             return self._load_attr_from_module(model_type, model_name)
-        return KeyError(key)
+        raise KeyError(key)
 
     def _load_attr_from_module(self, model_type, attr):
         module_name = model_type

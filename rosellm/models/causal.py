@@ -50,10 +50,10 @@ class CausalModel(nn.Module):
         args: Optional[ModelConfig] = None,
     ):
         config = cls._load_config(model_path, args)
-        model_class = cls._model_mapping[type(config)]
-        if model_class is None:
-            raise ValueError(f"{type(config)} is not a valid model type.")
-        return model_class._from_config(config, args)
+        if type(config) in cls._model_mapping.keys():
+            model_class = cls._model_mapping[type(config)]
+            return model_class._from_config(config, args)
+        raise ValueError(f"{type(config)} is not a valid model type.")
 
     def forward(self, input_ids: torch.LongTensor, positions: torch.LongTensor):
         pass
