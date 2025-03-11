@@ -1,12 +1,21 @@
 import os
+import re
+import sys
+import uuid
+from pathlib import Path
 from typing import Optional
 
 import torch
+from huggingface_hub import hf_hub_download
 from torch import nn
 
 from rosellm.config import ModelConfig
 
 CACHE_DIR = os.getenv("HF_HUB_CACHE", os.path.expanduser("~/.cache/huggingface/hub"))
+SESSION_ID = uuid.uuid4()
+REGEX_COMMIT_HASH = re.compile(r"^[0-9a-f]{40}$")
+
+_torch_version = torch.__version__
 
 
 class CausalModel(nn.Module):
@@ -50,6 +59,16 @@ class CausalModel(nn.Module):
         return cached_file if os.path.isfile(cached_file) else None
 
     @classmethod
+    def _get_user_agent(cls):
+        ua = (
+            f"transformers/4.48.2; "  # Hardcoded.
+            + f"python/{sys.version.split()[0]}; "
+            + f"session_id/{SESSION_ID}; "
+            + f"torch/{_torch_version}"
+        )
+        return ua
+
+    @classmethod
     def _resolve_file(
         cls,
         model_path: str,
@@ -72,7 +91,30 @@ class CausalModel(nn.Module):
                 cache_dir=cache_dir,
                 revision=_commit_hash,
             )
-        return resolved_file
+            if resolved_file is not None:
+                return resolved_file
+        user_agent = cls._get_user_agent()
+        try:
+            resolved_file = hf_hub_download(
+                repo_id=model_path,
+                filename=filename,
+                cache_dir=cache_dir,
+                user_agent=user_agent,
+                force_download=force_download,
+            )
+        except Exception as e:
+            raise e
+
+    @classmethod
+    def _extract_commit_hash(cls, resolved_file: str):
+        if resolved_file is None:
+            return None
+        resolved_file = str(Path(resolved_file).as_posix())
+        search = re.search(r"snapshots/([^/]+)/", resolved_file)
+        if search is None:
+            return None
+        commit_hash = search.groups()[0]
+        return commit_hash if REGEX_COMMIT_HASH.match(commit_hash) else None
 
     @classmethod
     def _load_config(
@@ -84,6 +126,11 @@ class CausalModel(nn.Module):
             model_path,
             "config.json",
         )
+        if resolved_config_file is None:
+            raise ValueError(f"Config file not found: {model_path}/config.json")
+        commit_hash = cls._extract_commit_hash(resolved_config_file)
+        if commit_hash is None:
+            raise ValueError(f"Invalid commit hash: {commit_hash}")
 
     @classmethod
     def _get_model_class(cls, config):
