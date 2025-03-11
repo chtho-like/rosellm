@@ -28,3 +28,21 @@ class AutoConfig:
                 if pattern in str(pretrained_model_name_or_path):
                     config_class = CONFIG_MAPPING[pattern]
         return config_class.from_dict(config_dict)
+
+
+if __name__ == "__main__":
+    config = AutoConfig.from_pretrained(
+        "Qwen/Qwen2.5-0.5B",
+        _commit_hash="060db6499f32faf8b98477b0a26969ef7d8b9987",
+    )
+    print(config)
+    """
+$ python rosellm/models/auto_config.py 
+Qwen2Config(
+    path='Qwen/Qwen2.5-0.5B',
+    revision='main',
+    torch_dtype='bfloat16',
+    attn_implementation='flash_attention_2',
+    gradient_checkpointing=True
+)
+    """

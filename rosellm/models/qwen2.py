@@ -1,17 +1,27 @@
 from typing import Optional
 
+import torch.nn as nn
+
 from rosellm.config import ModelConfig
-from rosellm.models.causal import CausalModel
 
 
-class Qwen2ForCausalLM(CausalModel):
+class Qwen2ForCausalLM(nn.Module):
+    def __init__(
+        self,
+        config: "Qwen2Config",
+        args: Optional[ModelConfig] = None,
+    ):
+        super().__init__()
+        self.config = config
+        self.args = args
+
     @classmethod
     def _from_config(
         cls,
-        config,
+        config: "Qwen2Config",
         args: Optional[ModelConfig] = None,
     ):
-        pass
+        return cls(config, args)
 
 
 class Qwen2Config(ModelConfig):

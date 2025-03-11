@@ -57,3 +57,11 @@ class CausalModel(nn.Module):
 
     def forward(self, input_ids: torch.LongTensor, positions: torch.LongTensor):
         pass
+
+
+if __name__ == "__main__":
+    config = CausalModel.from_pretrained(
+        "Qwen/Qwen2.5-0.5B",
+    )
+    print(type(config))
+    print(config)
