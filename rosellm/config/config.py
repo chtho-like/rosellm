@@ -16,7 +16,8 @@ class ModelConfig:
     path: str = "Qwen/Qwen2.5-0.5B"
     revision: str = "main"
     torch_dtype: str = "bfloat16"
-    attn_implementation: str = "flash_attention_2"
+    # Can be: eager, flash_attention_2, sdpa
+    attn_implementation: str = "eager"
     gradient_checkpointing: bool = True
 
 

@@ -3,6 +3,7 @@ from typing import Optional
 import torch.nn as nn
 
 from rosellm.config import ModelConfig
+from rosellm.loss import causal_lm_loss
 
 
 class Qwen2ForCausalLM(nn.Module):
@@ -14,6 +15,7 @@ class Qwen2ForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.args = args
+        self.loss_type = causal_lm_loss
 
     @classmethod
     def _from_config(
