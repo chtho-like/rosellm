@@ -263,6 +263,8 @@ class Qwen2Attention(nn.Module):
             # [batch_size, num_key_value_heads, seq_len, head_dim]
             .transpose(1, 2)
         )
+        # [batch_size, seq_len, head_dim]
+        # E.g. [2, 1024, 64] for Qwen2-0.5B
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(
             query_states,
