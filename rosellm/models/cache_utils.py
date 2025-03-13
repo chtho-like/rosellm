@@ -7,6 +7,14 @@ class Cache(torch.nn.Module):
     def __init__(self):
         super().__init__()
 
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
 
 class DynamicCache(Cache):
     def __init__(self):

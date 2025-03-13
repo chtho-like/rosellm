@@ -1,10 +1,11 @@
-from typing import Optional, Tuple, Unpack
+from typing import Callable, Optional, Tuple, Unpack
 
 import torch
 import torch.nn as nn
 
 from rosellm.config import ModelConfig
 from rosellm.loss import causal_lm_loss
+from rosellm.models.attention_utils import ALL_ATTENTION_FUNCTIONS
 from rosellm.models.cache_utils import Cache
 from rosellm.models.flash_attention_utils import FlashAttentionKwargs
 from rosellm.models.rope_utils import ROPE_INIT_FUNCTIONS
@@ -167,6 +168,120 @@ def apply_rotary_pos_emb(
     return q_embed, k_embed
 
 
+def repeat_kv(
+    # [batch_size, num_key_value_heads, seq_len, head_dim]
+    hidden_states: torch.Tensor,
+    # num_key_value_groups
+    n_rep: int,
+) -> (
+    # [batch_size, num_attention_heads, seq_len, head_dim]
+    torch.Tensor
+):
+    if n_rep == 1:
+        return hidden_states
+    (
+        batch,
+        num_key_value_heads,
+        seq_len,
+        head_dim,
+    ) = hidden_states.shape
+    # [batch_size, num_key_value_heads, seq_len, head_dim]
+    # =>
+    # [batch_size, num_key_value_heads, 1, seq_len, head_dim]
+    # =>
+    # [batch_size, num_key_value_heads, n_rep, seq_len, head_dim]
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch,
+        num_key_value_heads,
+        n_rep,
+        seq_len,
+        head_dim,
+    )
+    # [batch_size, num_key_value_heads, n_rep, seq_len, head_dim]
+    # =>
+    # [batch_size, num_key_value_heads * n_rep, seq_len, head_dim]
+    # [batch_size, num_attention_heads, seq_len, head_dim]
+    # E.g. [2, 2, 1024, 64] for Qwen2-0.5B
+    return hidden_states.reshape(
+        batch,
+        num_key_value_heads * n_rep,
+        seq_len,
+        head_dim,
+    )
+
+
+def eager_attention_forward(
+    module: nn.Module,
+    # [batch_size, num_attention_heads, seq_len, head_dim]
+    query: torch.Tensor,
+    # [batch_size, num_key_value_heads, seq_len, head_dim]
+    key: torch.Tensor,
+    # [batch_size, num_key_value_heads, seq_len, head_dim]
+    value: torch.Tensor,
+    # [batch_size, 1, seq_len, seq_len]
+    attention_mask: Optional[torch.Tensor],
+    # a.k.a \frac{1}{\sqrt{d}}
+    # E.g. 64**-0.5 = 0.125 for Qwen2-0.5B
+    scaling: float,
+    dropout: float = 0.0,
+    sliding_window: Optional[int] = None,
+):
+    # Ensure num_key_value_groups is treated as an integer
+    num_key_value_groups = getattr(module, "num_key_value_groups", 1)
+    if not isinstance(num_key_value_groups, int):
+        num_key_value_groups = int(num_key_value_groups)
+
+    # [batch_size, num_attention_heads, seq_len, head_dim]
+    key_states = repeat_kv(key, num_key_value_groups)
+    # [batch_size, num_attention_heads, seq_len, head_dim]
+    value_states = repeat_kv(value, num_key_value_groups)
+
+    # [batch_size, num_attention_heads, seq_len, head_dim]
+    # @ [batch_size, num_attention_heads, head_dim, seq_len]
+    # =>
+    # [batch_size, num_attention_heads, seq_len, seq_len]
+    # E.g. [2, 14, 1024, 1024] for Qwen2-0.5B
+    attn_weights = query @ key_states.transpose(2, 3) * scaling
+    if attention_mask is not None:
+        # [batch_size, 1, seq_len, seq_len]
+        # E.g. [2, 1, 1024, 1024] for Qwen2-0.5B
+        # The mask is like:
+        # [
+        #     [
+        #         [0, -inf, -inf, -inf],
+        #         [0, 0, -inf, -inf],
+        #         [0, 0, 0, -inf],
+        #         [0, 0, 0, 0],
+        #     ]
+        # ]
+        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        # [batch_size, num_attention_heads, seq_len, seq_len]
+        # E.g. [2, 14, 1024, 1024] for Qwen2-0.5B
+        attn_weights = attn_weights + causal_mask
+
+    # [batch_size, num_attention_heads, seq_len, seq_len]
+    # E.g. [2, 14, 1024, 1024] for Qwen2-0.5B
+    attn_weights = nn.functional.softmax(
+        attn_weights,
+        dim=-1,
+        dtype=torch.float32,
+    ).to(query.dtype)
+    # [batch_size, num_attention_heads, seq_len, seq_len]
+    # E.g. [2, 14, 1024, 1024] for Qwen2-0.5B
+    attn_weights = nn.functional.dropout(
+        attn_weights,
+        p=dropout,
+        training=module.training,
+    )
+    # [batch_size, num_attention_heads, seq_len, head_dim]
+    # E.g. [2, 14, 1024, 64] for Qwen2-0.5B
+    attn_output = attn_weights @ value_states
+    # [batch_size, seq_len, num_attention_heads, head_dim]
+    # E.g. [2, 1024, 14, 64] for Qwen2-0.5B
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    return attn_output, attn_weights
+
+
 class Qwen2Attention(nn.Module):
     def __init__(
         self,
@@ -266,17 +381,63 @@ class Qwen2Attention(nn.Module):
         # [batch_size, seq_len, head_dim]
         # E.g. [2, 1024, 64] for Qwen2-0.5B
         cos, sin = position_embeddings
+        # query_states:
+        # [batch_size, num_attention_heads, seq_len, head_dim]
+        # E.g. [2, 14, 1024, 64] for Qwen2-0.5B
+        # key_states:
+        # [batch_size, num_key_value_heads, seq_len, head_dim]
+        # E.g. [2, 2, 1024, 64] for Qwen2-0.5B
         query_states, key_states = apply_rotary_pos_emb(
             query_states,
             key_states,
             cos,
             sin,
         )
-        return (
-            torch.tensor(0.0),
-            None,
-            None,
+        if past_key_value is not None:
+            key_states, value_states = past_key_value.update(
+                key_states,
+                value_states,
+                self.layer_idx,
+            )
+        sliding_window = None
+        if (
+            self.config.use_sliding_window
+            and self.config.sliding_window is not None
+            and self.layer_idx >= self.config.max_window_layers
+        ):
+            sliding_window = self.config.sliding_window
+
+        attention_interface: Callable = eager_attention_forward
+        if self.config.attn_implementation != "eager":
+            attention_interface = ALL_ATTENTION_FUNCTIONS[
+                self.config.attn_implementation
+            ]
+        # attn_output:
+        # [batch_size, seq_len, num_attention_heads, head_dim]
+        # E.g. [2, 1024, 14, 64] for Qwen2-0.5B
+        # attn_weights:
+        # [batch_size, num_attention_heads, seq_len, seq_len]
+        # E.g. [2, 14, 1024, 1024] for Qwen2-0.5B
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            scaling=self.scaling,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            sliding_window=sliding_window,
         )
+        # [batch_size, seq_len, num_attention_heads, head_dim]
+        # E.g. [2, 1024, 14, 64] for Qwen2-0.5B
+        # =>
+        # [batch_size, seq_len, hidden_size]
+        # E.g. [2, 1024, 896] for Qwen2-0.5B
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        # [batch_size, seq_len, hidden_size]
+        # E.g. [2, 1024, 896] for Qwen2-0.5B
+        attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights, None
 
 
 class Qwen2MLP(nn.Module):
