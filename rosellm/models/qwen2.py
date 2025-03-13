@@ -7,6 +7,7 @@ from rosellm.config import ModelConfig
 from rosellm.loss import causal_lm_loss
 from rosellm.models.cache_utils import Cache
 from rosellm.models.flash_attention_utils import FlashAttentionKwargs
+from rosellm.models.rope_utils import ROPE_INIT_FUNCTIONS
 
 
 class Qwen2Config(ModelConfig):
@@ -79,6 +80,45 @@ class Qwen2Config(ModelConfig):
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
         self.rope_theta = rope_theta
+        """
+        Possible structure in json config:
+        "rope_scaling": {
+            "rope_type": "default"
+        }
+        or
+        "rope_scaling": {
+            "rope_type": "linear",
+            "factor": 2.0
+        }
+        or
+        "rope_scaling": {
+            "rope_type": "dynamic",
+            "factor": 2.0,
+            "original_max_position_embeddings": 4096
+        }
+        or
+        "rope_scaling": {
+            "rope_type": "yarn",
+            "factor": 4.0,
+            "original_max_position_embeddings": 4096,
+            "beta_fast": 32.0,
+            "beta_slow": 1.0,
+            "attention_factor": 1.0
+        }
+        or
+        "rope_scaling": {
+            "rope_type": "longrope",
+            "factor": 4.0
+        }
+        or
+        "rope_scaling": {
+            "rope_type": "llama3",
+            "factor": 8.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192
+        }
+        """
         self.rope_scaling = rope_scaling
         self.attention_dropout = attention_dropout
         self.tie_word_embeddings = tie_word_embeddings
@@ -98,16 +138,31 @@ def rotate_half(x):
 
 
 def apply_rotary_pos_emb(
+    # [batch_size, num_attention_heads, seq_len, head_dim]
+    # E.g. [2, 14, 1024, 64] for Qwen2-0.5B
     q: torch.Tensor,
+    # [batch_size, num_key_value_heads, seq_len, head_dim]
+    # E.g. [2, 2, 1024, 64] for Qwen2-0.5B
     k: torch.Tensor,
+    # [batch_size, seq_len, head_dim]
+    # E.g. [2, 1024, 64] for Qwen2-0.5B
     cos: torch.Tensor,
+    # [batch_size, seq_len, head_dim]
+    # E.g. [2, 1024, 64] for Qwen2-0.5B
     sin: torch.Tensor,
-    position_ids=None,
     unsqueeze_dim=1,
 ):
+    # [batch_size, 1, seq_len, head_dim]
+    # E.g. [2, 1, 1024, 64] for Qwen2-0.5B
     cos = cos.unsqueeze(unsqueeze_dim)
+    # [batch_size, 1, seq_len, head_dim]
+    # E.g. [2, 1, 1024, 64] for Qwen2-0.5B
     sin = sin.unsqueeze(unsqueeze_dim)
+    # [batch_size, num_attention_heads, seq_len, head_dim]
+    # E.g. [2, 14, 1024, 64] for Qwen2-0.5B
     q_embed = (q * cos) + (rotate_half(q) * sin)
+    # [batch_size, num_key_value_heads, seq_len, head_dim]
+    # E.g. [2, 2, 1024, 64] for Qwen2-0.5B
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
@@ -263,11 +318,85 @@ class Qwen2DecoderLayer(nn.Module):
 
 
 class Qwen2RotaryEmbedding(nn.Module):
+    inv_freq: torch.Tensor
+
     def __init__(
         self,
         config: Qwen2Config,
     ):
         super().__init__()
+        if config.rope_scaling is not None:
+            self.rope_type = config.rope_scaling.get("rope_type", "default")
+        else:
+            self.rope_type = "default"
+        # E.g. 32768 for Qwen2-0.5B
+        self.max_seq_len_cached = config.max_position_embeddings
+        self.original_max_seq_len = config.max_position_embeddings
+        self.config = config
+        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        # shape of inv_freq:
+        # [head_dim/2]
+        # E.g. [32] for Qwen2-0.5B
+        inv_freq, self.attention_scaling = self.rope_init_fn(
+            # E.g. 1000000.0 for Qwen2-0.5B
+            config.rope_theta,
+            # E.g. 896 // 14 = 64 for Qwen2-0.5B
+            config.hidden_size // config.num_attention_heads,
+        )
+        self.register_buffer(
+            "inv_freq",
+            inv_freq,
+            # The buffer will not be saved in state_dict().
+            # Each time the model is loaded, the buffer will be
+            # recomputed.
+            persistent=False,
+        )
+        self.original_inv_freq = self.inv_freq
+
+    @torch.no_grad()
+    def forward(
+        self,
+        # [batch_size, seq_len, hidden_size]
+        # E.g. [2, 1024, 896] for Qwen2-0.5B
+        x,
+        # [batch_size, seq_len]
+        # E.g. [2, 1024] for Qwen2-0.5B
+        position_ids,
+    ):
+        inv_freq_expanded = (
+            # [head_dim/2] => [1, head_dim/2, 1]
+            # E.g. [32] => [1, 32, 1] for Qwen2-0.5B
+            self.inv_freq[None, :, None].float()
+            # [batch_size, head_dim/2, 1]
+            # E.g. [2, 32, 1] for Qwen2-0.5B
+            .expand(position_ids.shape[0], -1, 1)
+        )
+        # [batch_size, 1, seq_len]
+        # E.g. [2, 1, 1024] for Qwen2-0.5B
+        position_ids_expanded = position_ids[:, None, :].float()
+        device_type = x.device.type
+        with torch.autocast(device_type=device_type, enabled=False):
+            # [batch_size, head_dim/2, 1]
+            # @ [batch_size, 1, seq_len]
+            # => [batch_size, head_dim/2, seq_len]
+            # => [batch_size, seq_len, head_dim/2]
+            # E.g. [2, 1024, 32] for Qwen2-0.5B
+            freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
+            # [batch_size, seq_len, head_dim]
+            # E.g. [2, 1024, 64] for Qwen2-0.5B
+            emb = torch.cat((freqs, freqs), dim=-1)
+            # [batch_size, seq_len, head_dim]
+            # E.g. [2, 1024, 64] for Qwen2-0.5B
+            cos = emb.cos()
+            # [batch_size, seq_len, head_dim]
+            # E.g. [2, 1024, 64] for Qwen2-0.5B
+            sin = emb.sin()
+
+        # Advanced RoPE types (e.g. yarn)
+        # will apply a post-processing scaling factor.
+        cos = cos * self.attention_scaling
+        sin = sin * self.attention_scaling
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 class Qwen2Model(nn.Module):
