@@ -9,3 +9,6 @@ ALL_ATTENTION_FUNCTIONS.update(
         "flash_attention_2": flash_attention_forward,
     }
 )
+
+if __name__ == "__main__":
+    print(ALL_ATTENTION_FUNCTIONS)
