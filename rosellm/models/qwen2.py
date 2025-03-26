@@ -23,7 +23,7 @@ class Qwen2Config(ModelConfig):
       "hidden_act": "silu",
       "hidden_size": 896,
       "initializer_range": 0.02,
-      "intermediate_size": 4864,
+      "intermediate_size": 4864, # 256 * 19
       "max_position_embeddings": 32768,
       "max_window_layers": 24,
       "model_type": "qwen2",
@@ -446,7 +446,28 @@ class Qwen2MLP(nn.Module):
         config: Qwen2Config,
     ):
         super().__init__()
-
+        self.config = config
+        # E.g. 896 for Qwen2-0.5B
+        self.hidden_size = config.hidden_size
+        # E.g. 4846 for Qwen2-0.5B
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = nn.Linear(
+            self.hidden_size,
+            self.intermediate_size,
+            bias=False,
+        )
+        self.up_proj = nn.Linear(
+            self.hidden_size,
+            self.intermediate_size,
+            bias=False,
+        )
+        self.down_proj = nn.Linear(
+            self.intermediate_size,
+            self.hidden_size,
+            bias=False,
+        )
+        # E.g. "silu" for Qwen2-0.5B
+        self.act_fn = ACT2FN[config.hidden_act]
 
 class Qwen2RMSNorm(nn.Module):
     def __init__(
