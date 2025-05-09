@@ -1,2 +1,0 @@
-class SamplingParams:
-    pass
