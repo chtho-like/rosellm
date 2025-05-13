@@ -167,3 +167,10 @@ cython_debug/
 *.ipynb
 !notebooks/**
 **/__pycache__/**
+
+**/*.pt
+**/*.bpe
+**/*.json
+**/edu_fineweb10B
+**/wandb
+notebooks/gpt2/input.txt
