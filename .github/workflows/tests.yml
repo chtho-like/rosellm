@@ -1,13 +1,52 @@
-name: Tests
-on: [push, pull_request]
+name: Run Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.8, 3.9]
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.8'
-      - run: pip install torch==2.5.1 --extra-index-url https://download.pytorch.org/whl/cpu
-      - run: pip install -e ".[test]"
-      - run: pytest
+    - uses: actions/checkout@v2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest
+        pip install -e .
+    
+    - name: Run CPU tests
+      run: |
+        python -m unittest discover -s tests
+
+  cuda-test:
+    runs-on: ubuntu-latest
+    if: false  # Disabled until GPU runners are available
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.8
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest
+        pip install torch==1.10.0+cu113 -f https://download.pytorch.org/whl/cu113/torch_stable.html
+        pip install -e .
+    
+    - name: Run CUDA tests
+      run: |
+        python -m unittest discover -s tests

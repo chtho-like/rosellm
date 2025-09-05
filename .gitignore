@@ -174,3 +174,4 @@ cython_debug/
 **/edu_fineweb10B
 **/wandb
 notebooks/gpt2/input.txt
+notes.md
