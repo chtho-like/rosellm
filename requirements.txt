@@ -1,3 +1,22 @@
+# requirements.txt - Pinned versions for reproducible environments
+# 
+# This file contains exact versions for CI/CD and development.
+# The canonical dependency list is in pyproject.toml
+#
+# To regenerate this file:
+#   pip-compile pyproject.toml -o requirements.txt
+#
+# To install for development:
+#   pip install -r requirements.txt
+#   pip install -e ".[dev,test]"
+
+# Core dependencies
 torch==2.6.0
+transformers==4.20.0
 huggingface-hub==0.26.2
+psutil==5.9.8
+pydantic==2.5.0
+
+# Testing dependencies (optional, installed with [test])
 pytest==7.4.0
+pytest-cov==4.1.0

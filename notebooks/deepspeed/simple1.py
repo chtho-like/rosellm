@@ -10,7 +10,7 @@ class SimpleModel(nn.Module):
         self.linear = nn.Linear(10, 1)
         # Move the model to CUDA if available
         if torch.cuda.is_available():
-            self.linear.to('cuda')
+            self.linear.to("cuda")
 
     def forward(self, x):
         # Ensure input is on the same device as model
@@ -29,12 +29,12 @@ def main():
 
     # Create model
     model = SimpleModel()
-    
+
     # Create optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    
+
     # Get device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
     # Training loop
@@ -44,10 +44,10 @@ def main():
             # Move data to the same device as the model
             data = data.to(device)
             target = target.to(device)
-            
+
             # Zero gradients
             optimizer.zero_grad()
-            
+
             # Forward pass
             outputs = model(data)
             loss = torch.nn.functional.mse_loss(outputs, target)

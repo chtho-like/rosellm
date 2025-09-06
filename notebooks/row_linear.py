@@ -34,17 +34,18 @@
 # torchrun --nproc-per-node=2 row_linear.py
 import torch
 import torch.distributed as dist
+
 dist.init_process_group(backend="nccl")
 rank, world_size = dist.get_rank(), dist.get_world_size()
 torch.cuda.set_device(rank)
 if rank == 0:
-  XX = torch.tensor([i for i in range(8)], dtype=torch.float).view(4, 2).cuda(rank)
-  ls = [XX[:, i].clone().contiguous().view(4, 1) for i in range(2)]
+    XX = torch.tensor([i for i in range(8)], dtype=torch.float).view(4, 2).cuda(rank)
+    ls = [XX[:, i].clone().contiguous().view(4, 1) for i in range(2)]
 else:
-  ls = None
+    ls = None
 X = torch.zeros((4, 1), dtype=torch.float, device=torch.device("cuda", rank))
 dist.scatter(X, scatter_list=ls, src=0)
-W = torch.tensor([10 * (rank+1) + 20*i for i in range(2)], dtype=torch.float)
+W = torch.tensor([10 * (rank + 1) + 20 * i for i in range(2)], dtype=torch.float)
 W = W.view(1, 2).to(torch.device("cuda", rank))
 Y = X @ W
 dist.all_reduce(Y, op=dist.ReduceOp.SUM)

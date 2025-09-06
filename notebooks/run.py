@@ -30,11 +30,13 @@ def run_nonblocking_p2p(rank, size):
         req.wait()
     print(f"Rank {rank} has data {tensor[0]}")
 
+
 def run(rank, size):
     group = dist.new_group([0, 1])
     tensor = torch.ones(1)
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=group)
     print(f"Rank {rank} has data {tensor[0]}")
+
 
 def init_process(rank, size, fn, backend="gloo"):
     os.environ["MASTER_ADDR"] = "127.0.0.1"

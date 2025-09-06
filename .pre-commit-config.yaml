@@ -1,9 +1,19 @@
+# Pre-commit hooks to prevent files from showing red in IDE
 repos:
+  # Check for syntax errors first
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-ast  # Verify Python syntax
+      - id: check-merge-conflict
+      - id: debug-statements  # Check for debugger imports
+      
   - repo: https://github.com/psf/black
     rev: 23.12.1
     hooks:
       - id: black
         language_version: python3.11
+        exclude: ^notebooks/
 
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
@@ -11,16 +21,19 @@ repos:
       - id: isort
         name: isort (python)
         stages: [pre-commit]
+        exclude: ^notebooks/
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.8.0
     hooks:
       - id: mypy
-        additional_dependencies: []
+        additional_dependencies: [types-requests]
         args: [--ignore-missing-imports]
+        exclude: ^(notebooks/|scripts/)
 
   - repo: https://github.com/pycqa/flake8
     rev: 7.0.0
     hooks:
       - id: flake8
         additional_dependencies: [flake8-docstrings]
+        exclude: ^notebooks/

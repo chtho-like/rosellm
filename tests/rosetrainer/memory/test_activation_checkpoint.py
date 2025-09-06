@@ -52,6 +52,7 @@ class TestActivationCheckpointing(unittest.TestCase):
         self.model = SimpleTransformer()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
+        self.checkpoint_manager = ActivationCheckpointing()
 
     def test_apply_to_transformer_layers(self):
         """Test applying checkpointing to transformer layers."""
@@ -67,7 +68,7 @@ class TestActivationCheckpointing(unittest.TestCase):
         model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
 
         # Apply checkpointing
-        model_with_checkpoints = ActivationCheckpointing.apply_to_transformer_layers(
+        model_with_checkpoints = self.checkpoint_manager.apply_to_transformer_layers(
             self.model, use_reentrant=True, layer_attr="layers"
         )
 
@@ -101,7 +102,7 @@ class TestActivationCheckpointing(unittest.TestCase):
         input_tensor = torch.randn(batch_size, seq_len, 10, device=self.device)
 
         # Apply checkpointing to only specific modules to avoid shape mismatch
-        model_with_checkpoints = ActivationCheckpointing.apply_to_modules(
+        model_with_checkpoints = self.checkpoint_manager.apply_to_modules(
             model,
             module_types=[nn.Sequential],  # Only apply to Sequential modules
             use_reentrant=True,
@@ -125,7 +126,7 @@ class TestActivationCheckpointing(unittest.TestCase):
 
         # Run with and without checkpointing
         result_orig = func(x)
-        result_checkpointed = ActivationCheckpointing.apply_to_custom_function(func, x)
+        result_checkpointed = self.checkpoint_manager.apply_to_custom_function(func, x)
 
         # Results should be identical - only check if result is not None
         if result_checkpointed is not None:

@@ -1,14 +1,15 @@
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import Callable, Dict, Optional, cast
 
 import torch
 import torch.distributed as dist
 
 # References:
-# [1] PyTorch DistributedDataParallel: https://pytorch.org/docs/stable/nn.html#torch.nn.parallel.DistributedDataParallel
+# [1] PyTorch DistributedDataParallel:
+#     https://pytorch.org/docs/stable/nn.html#torch.nn.parallel.DistributedDataParallel
 # [2] Goyal, P. et al. "Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour."
 #     arXiv:1706.02677 (2017)
-# [3] Li, S. et al. "PyTorch Distributed: Experiences on Accelerating Data Parallel Training."
-#     arXiv:2006.15704 (2020)
+# [3] Li, S. et al. "PyTorch Distributed: Experiences on Accelerating
+#     Data Parallel Training." arXiv:2006.15704 (2020)
 # [4] Ott, M. et al. "fairseq: A Fast, Extensible Toolkit for Sequence Modeling."
 #     NAACL-HLT (2019)
 

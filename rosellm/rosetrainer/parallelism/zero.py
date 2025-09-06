@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -171,7 +171,9 @@ class ZeROOptimizer:
                 dist.broadcast(param.data, rank, group=self.dp_group)
 
     def disable_grad_sync(self) -> None:
-        """Disable gradient synchronization for the next step (used for gradient accumulation)."""
+        """Disable gradient synchronization for the next step.
+        It is used for gradient accumulation.
+        """
         self.require_grad_sync = False
 
     def enable_grad_sync(self) -> None:
@@ -224,7 +226,8 @@ class ZeROStateDict:
         # Check consistency
         if optimizer.world_size != world_size:
             print(
-                f"Warning: Loading state with different world size: {world_size} vs {optimizer.world_size}"
+                f"Warning: Loading state with different world size: "
+                "{world_size} vs {optimizer.world_size}"
             )
 
         # Only load optimizer states for parameters assigned to this rank

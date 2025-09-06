@@ -1,6 +1,6 @@
 from collections import deque
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
+from typing import Callable, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -10,9 +10,9 @@ import torch.distributed as dist
 #     Pipeline Parallelism." NeurIPS (2019)
 # [2] Narayanan, D. et al. "Memory-Efficient Pipeline-Parallel DNN Training."
 #     ICML (2021)
-# [3] Narayanan, D. et al. "Efficient Large-Scale Language Model Training on GPU Clusters
-#     Using Megatron-LM." arXiv:2104.04473 (2021)
-# [4] DeepSpeed PipeDream implementation: 
+# [3] Narayanan, D. et al. "Efficient Large-Scale Language Model Training on GPU
+#     Clusters Using Megatron-LM." arXiv:2104.04473 (2021)
+# [4] DeepSpeed PipeDream implementation:
 #     https://github.com/microsoft/DeepSpeed/tree/master/deepspeed/runtime/pipe
 # [5] Megatron-LM implementation:
 #     https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/p2p/

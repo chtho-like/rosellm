@@ -14,7 +14,7 @@ class SimpleModel(nn.Module):
         super(SimpleModel, self).__init__()
         self.linear = nn.Linear(10, 1)
         # Move the model to CUDA
-        self.linear.to('cuda')
+        self.linear.to("cuda")
 
     def forward(self, x):
         # Ensure input is on the same device as model
@@ -78,7 +78,7 @@ def main():
             # Move data to the same device as the model
             data = data.to(model_engine.device)
             target = target.to(model_engine.device)
-            
+
             # Forward pass
             outputs = model_engine(data)
             loss = torch.nn.functional.mse_loss(outputs, target)
