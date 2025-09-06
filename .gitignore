@@ -175,3 +175,5 @@ cython_debug/
 **/wandb
 notebooks/gpt2/input.txt
 notes.md
+.claude/
+CLAUDE.md

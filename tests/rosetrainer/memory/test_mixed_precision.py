@@ -3,11 +3,9 @@ import unittest
 import torch
 import torch.nn as nn
 
-from rosellm.rosetrainer.memory.mixed_precision import (
-    DynamicLossScaler,
-    check_overflow,
-    convert_model_to_fp16,
-)
+from rosellm.rosetrainer.memory.mixed_precision import (DynamicLossScaler,
+                                                        check_overflow,
+                                                        convert_model_to_fp16)
 
 
 class SimpleModel(nn.Module):

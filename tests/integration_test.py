@@ -5,11 +5,10 @@ import torch.nn as nn
 import torch.optim as optim
 
 from rosellm.rosetrainer.engine import RoseTrainer
-from rosellm.rosetrainer.memory.activation_checkpoint import ActivationCheckpointing
-from rosellm.rosetrainer.memory.mixed_precision import (
-    DynamicLossScaler,
-    convert_model_to_fp16,
-)
+from rosellm.rosetrainer.memory.activation_checkpoint import \
+    ActivationCheckpointing
+from rosellm.rosetrainer.memory.mixed_precision import (DynamicLossScaler,
+                                                        convert_model_to_fp16)
 
 
 class SimpleModel(nn.Module):

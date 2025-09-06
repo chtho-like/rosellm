@@ -6,10 +6,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from rosellm.rosetrainer.parallelism.model_parallel import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-    TensorParallelism,
-)
+    ColumnParallelLinear, RowParallelLinear, TensorParallelism)
 
 
 # Create a subclass of TensorParallelism that doesn't require distributed initialization

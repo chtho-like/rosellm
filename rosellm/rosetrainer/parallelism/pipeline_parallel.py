@@ -12,7 +12,7 @@ import torch.distributed as dist
 #     ICML (2021)
 # [3] Narayanan, D. et al. "Efficient Large-Scale Language Model Training on GPU Clusters
 #     Using Megatron-LM." arXiv:2104.04473 (2021)
-# [4] DeepSpeed PipeDream implementation: 
+# [4] DeepSpeed PipeDream implementation:
 #     https://github.com/microsoft/DeepSpeed/tree/master/deepspeed/runtime/pipe
 # [5] Megatron-LM implementation:
 #     https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/p2p/

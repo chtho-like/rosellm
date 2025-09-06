@@ -3,13 +3,13 @@
 import os
 
 import torch
-import torch.nn as nn
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
 # Import RoseTrainer components
 from rosellm.rosetrainer.engine import RoseTrainer
-from rosellm.rosetrainer.memory.activation_checkpoint import ActivationCheckpointing
+from rosellm.rosetrainer.memory.activation_checkpoint import \
+    ActivationCheckpointing
 
 
 def main():
@@ -35,7 +35,7 @@ def main():
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
     # Load a model (e.g., a pretrained LLM)
-    print(f"Loading model...")
+    print("Loading model...")
     model_name = "EleutherAI/pythia-70m"  # A small model for this example
     model = AutoModelForCausalLM.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -49,7 +49,8 @@ def main():
     if model_name.lower().startswith("eleutherai/pythia"):
         # Find the correct path for transformer layers
         # For pythia models, the layers are under gpt_neox.layers
-        model = ActivationCheckpointing.apply_to_transformer_layers(
+        checkpoint_manager = ActivationCheckpointing()
+        model = checkpoint_manager.apply_to_transformer_layers(
             model,
             layer_attr="gpt_neox.layers",
             use_reentrant=False,  # Using False to avoid warnings
@@ -72,7 +73,7 @@ def main():
         world_size=world_size,
     )
 
-    print(f"Starting training loop...")
+    print("Starting training loop...")
     # Example training loop with a single batch
     for step in range(5):  # Just a few steps for the example
         # Create a dummy batch

@@ -42,7 +42,7 @@ class CPUOffloadOptimizer:
         self.param_groups = self.optimizer.param_groups
 
         # Maps from parameters to their device before offloading
-        self.param_to_device = {}
+        self.param_to_device: Dict[nn.Parameter, torch.device] = {}
 
         # Initialize CPU/GPU parameter buffers for each parameter
         self._init_param_buffers()
