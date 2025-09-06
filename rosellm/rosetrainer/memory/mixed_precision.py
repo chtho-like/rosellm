@@ -5,7 +5,8 @@ from typing import Any, Dict, List, Union
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp.autocast_mode import autocast
+from torch.amp.grad_scaler import GradScaler
 
 from ..config import PrecisionType
 
@@ -158,6 +159,7 @@ class MixedPrecisionManager:
             if self.precision == PrecisionType.FP16:
                 self.autocast_dtype = torch.float16
                 self.scaler = GradScaler(
+                    'cuda',
                     init_scale=init_scale,
                     growth_factor=growth_factor,
                     backoff_factor=backoff_factor,
@@ -169,7 +171,7 @@ class MixedPrecisionManager:
             elif self.precision == PrecisionType.BF16:
                 self.autocast_dtype = torch.bfloat16
                 # BF16 doesn't need loss scaling
-                self.scaler = GradScaler(enabled=False)
+                self.scaler = GradScaler('cuda', enabled=False)
                 logger.info("Initialized BF16 mixed precision training")
 
             elif self.precision == PrecisionType.FP8:
@@ -181,21 +183,21 @@ class MixedPrecisionManager:
                     )
                     self.precision = PrecisionType.FP16
                     self.autocast_dtype = torch.float16
-                    self.scaler = GradScaler(enabled=True)
+                    self.scaler = GradScaler('cuda', enabled=True)
                 else:
                     self.autocast_dtype = torch.float8_e4m3fn
-                    self.scaler = GradScaler(enabled=True)
+                    self.scaler = GradScaler('cuda', enabled=True)
                     logger.info("Initialized experimental FP8 mixed precision training")
 
             elif self.precision == PrecisionType.MIXED:
                 # Auto-detect best precision based on hardware
                 if torch.cuda.is_bf16_supported():
                     self.autocast_dtype = torch.bfloat16
-                    self.scaler = GradScaler(enabled=False)
+                    self.scaler = GradScaler('cuda', enabled=False)
                     logger.info("Auto-selected BF16 for mixed precision")
                 else:
                     self.autocast_dtype = torch.float16
-                    self.scaler = GradScaler(enabled=True)
+                    self.scaler = GradScaler('cuda', enabled=True)
                     logger.info("Auto-selected FP16 for mixed precision")
 
     @contextmanager
