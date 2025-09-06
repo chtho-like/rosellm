@@ -227,3 +227,52 @@ This implementation is based on the algorithm description in the original paper 
 
 - [FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness](https://arxiv.org/abs/2205.14135)
 - [Tri Dao's Flash Attention implementation](https://github.com/HazyResearch/flash-attention)
+
+
+## Code Quality & Development
+
+### Automatic Code Fixing
+
+The project includes comprehensive auto-fixing capabilities:
+
+```bash
+# Auto-fix a specific file after editing
+python scripts/autofix_ide.py path/to/file.py
+
+# Auto-fix all recently modified files
+python scripts/autofix_ide.py
+
+# Auto-fix all Python files in the project
+python scripts/autofix_ide.py --all
+```
+
+### Pre-commit Hooks
+
+The project uses pre-commit hooks to maintain code quality:
+
+```bash
+# Install pre-commit hooks
+pre-commit install
+
+# Run hooks manually
+pre-commit run --all-files
+```
+
+### GitHub Actions
+
+- **Auto-fix workflow**: Automatically fixes common issues on pull requests
+- **CI/CD**: Runs tests, linting, and type checking on all commits
+
+### Type Safety
+
+This package is fully typed and includes a `py.typed` marker for PEP 561 compliance.
+
+## Contributing
+
+Contributions are welcome! Please ensure:
+1. All tests pass (`make test`)
+2. Code is formatted (`make format`)
+3. Type hints are present
+4. Pre-commit hooks pass
+
+Please feel free to submit a Pull Request.

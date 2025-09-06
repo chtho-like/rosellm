@@ -1,12 +1,13 @@
 import logging
 import warnings
 from contextlib import contextmanager
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union, cast
+from typing import Any, Dict, List, Union
 
 import torch
 import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
+
+from ..config import PrecisionType
 
 logger = logging.getLogger(__name__)
 
@@ -20,16 +21,6 @@ logger = logging.getLogger(__name__)
 # [4] Shoeybi, M. et al. "Megatron-LM: Training Multi-Billion Parameter Language Models
 #     Using Model Parallelism." arXiv:1909.08053 (2019)
 # [5] FP8 Training: https://arxiv.org/abs/2209.05433
-
-
-class PrecisionType(Enum):
-    """Supported precision types for training."""
-
-    FP32 = "fp32"  # Full precision
-    FP16 = "fp16"  # Half precision
-    BF16 = "bf16"  # BFloat16
-    FP8 = "fp8"  # 8-bit floating point (experimental)
-    MIXED = "mixed"  # Automatic mixed precision
 
 
 class DynamicLossScaler:
@@ -99,7 +90,8 @@ class DynamicLossScaler:
                 self.cur_scale = min(self.cur_scale * self.scale_factor, self.max_scale)
                 self.consecutive_successful_steps = 0
                 logger.info(
-                    f"No overflow for {self.scale_window} steps, increasing loss scale to {self.cur_scale}"
+                    f"No overflow for {self.scale_window} steps, "
+                    f"increasing loss scale to {self.cur_scale}"
                 )
 
     def get_scale(self) -> float:
@@ -184,7 +176,8 @@ class MixedPrecisionManager:
                 # FP8 support is experimental
                 if not hasattr(torch, "float8_e4m3fn"):
                     warnings.warn(
-                        "FP8 not supported in current PyTorch version, falling back to FP16"
+                        "FP8 not supported in current PyTorch version, "
+                        "falling back to FP16"
                     )
                     self.precision = PrecisionType.FP16
                     self.autocast_dtype = torch.float16

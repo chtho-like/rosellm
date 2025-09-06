@@ -4,7 +4,8 @@ Advanced Parallel State Management System
 This module implements a comprehensive multi-dimensional parallelism state manager
 inspired by Megatron-LM's parallel state architecture. It provides:
 - Global process group registry with hierarchical organization
-- Support for TP (Tensor), PP (Pipeline), DP (Data), CP (Context), and EP (Expert) parallelism
+- Support for TP (Tensor), PP (Pipeline), DP (Data), CP (Context),
+  and EP (Expert) parallelism
 - Orthogonal rank group generation for non-overlapping process groups
 - NCCL optimization configuration support
 - Dynamic parallelism reconfiguration capabilities
@@ -20,9 +21,8 @@ import warnings
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-import torch
 import torch.distributed as dist
 
 
@@ -377,7 +377,6 @@ def _create_combined_groups() -> None:
     # Create TP+DP group (commonly used for gradient all-reduce)
     tp_dp_size = _TENSOR_MODEL_PARALLEL_SIZE * _DATA_PARALLEL_SIZE
     if tp_dp_size > 1:
-        groups: List[List[int]] = []
         for pp in range(_PIPELINE_MODEL_PARALLEL_SIZE):
             for cp in range(_CONTEXT_PARALLEL_SIZE):
                 for ep in range(_EXPERT_MODEL_PARALLEL_SIZE):
@@ -395,7 +394,6 @@ def _create_combined_groups() -> None:
         _TENSOR_MODEL_PARALLEL_SIZE * _DATA_PARALLEL_SIZE * _CONTEXT_PARALLEL_SIZE
     )
     if tp_dp_cp_size > 1:
-        groups = []
         for pp in range(_PIPELINE_MODEL_PARALLEL_SIZE):
             for ep in range(_EXPERT_MODEL_PARALLEL_SIZE):
                 ranks = []
@@ -411,7 +409,6 @@ def _create_combined_groups() -> None:
     # Create TP+PP model parallel group
     model_parallel_size = _TENSOR_MODEL_PARALLEL_SIZE * _PIPELINE_MODEL_PARALLEL_SIZE
     if model_parallel_size > 1:
-        groups = []
         for dp in range(_DATA_PARALLEL_SIZE):
             for cp in range(_CONTEXT_PARALLEL_SIZE):
                 for ep in range(_EXPERT_MODEL_PARALLEL_SIZE):

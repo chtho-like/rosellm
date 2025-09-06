@@ -2,12 +2,7 @@
 Tests for Advanced Parallel State Management System
 """
 
-import os
 from unittest.mock import MagicMock, patch
-
-import pytest
-import torch
-import torch.distributed as dist
 
 from rosellm.rosetrainer.parallelism import parallel_state
 from rosellm.rosetrainer.parallelism.parallel_state import (
@@ -167,7 +162,7 @@ class TestParallelState:
         retrieved_config = parallel_state.get_nccl_config()
 
         assert retrieved_config is not None
-        assert retrieved_config.enable_sharp == True
+        assert retrieved_config.enable_sharp is True
         assert retrieved_config.cta_size == 8
         assert retrieved_config.min_nchannels == 4
         assert retrieved_config.tree_threshold == 1000

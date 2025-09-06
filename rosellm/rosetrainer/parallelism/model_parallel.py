@@ -1,19 +1,19 @@
-import math
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Optional
 
 import torch
 import torch.distributed as dist
 
 # References:
-# [1] Shoeybi, M. et al. "Megatron-LM: Training Multi-Billion Parameter Language Models
-#     Using Model Parallelism." arXiv:1909.08053 (2019)
-# [2] Narayanan, D. et al. "Efficient Large-Scale Language Model Training on GPU Clusters
-#     Using Megatron-LM." arXiv:2104.04473 (2021)
-# [3] Lepikhin, D. et al. "GShard: Scaling Giant Models with Conditional Computation
-#     and Automatic Sharding." arXiv:2006.16668 (2020)
-# [4] DeepSpeed implementation: https://github.com/microsoft/DeepSpeed/tree/master/deepspeed/runtime/pipe
-# [5] Korthikanti, V. et al. "Reducing Activation Recomputation in Large Transformer Models."
-#     arXiv:2205.05198 (2022)
+# [1] Shoeybi, M. et al. "Megatron-LM: Training Multi-Billion Parameter
+#     Language Models Using Model Parallelism." arXiv:1909.08053 (2019)
+# [2] Narayanan, D. et al. "Efficient Large-Scale Language Model Training
+#     on GPU Clusters Using Megatron-LM." arXiv:2104.04473 (2021)
+# [3] Lepikhin, D. et al. "GShard: Scaling Giant Models with Conditional
+#     Computation and Automatic Sharding." arXiv:2006.16668 (2020)
+# [4] DeepSpeed implementation:
+#     https://github.com/microsoft/DeepSpeed/tree/master/deepspeed/runtime/pipe
+# [5] Korthikanti, V. et al. "Reducing Activation Recomputation in
+#     Large Transformer Models." arXiv:2205.05198 (2022)
 
 
 class TensorParallelism:
@@ -150,7 +150,8 @@ class TensorParallelism:
 
         Args:
             layer: The layer to parallelize.
-            tp_type: Type of tensor parallelism to apply ('row', 'column', or 'attention').
+            tp_type: Type of tensor parallelism to apply
+                    ('row', 'column', or 'attention').
 
         Returns:
             The parallelized layer.

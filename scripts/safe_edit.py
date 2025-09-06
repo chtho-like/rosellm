@@ -5,14 +5,17 @@ This script validates files before and after editing to prevent IDE errors.
 """
 
 import ast
-import difflib
-import json
+import logging
 import subprocess
 import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# Configure logging
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
 
 
 class SafeEditValidator:
@@ -41,15 +44,16 @@ class SafeEditValidator:
                     # Check for relative imports that might fail
                     if node.level > 0:
                         issues.append(
-                            f"Line {node.lineno}: Relative import '{node.module}' - verify context"
+                            f"Line {node.lineno}: Relative import '{node.module}' "
+                            "- verify context"
                         )
 
                     # Check for specific names
                     if node.names:
-                        for alias in node.names:
-                            # We'll validate these with actual import test
-                            pass
-        except:
+                        # We'll validate these with actual import test
+                        pass
+        except (SyntaxError, ValueError) as e:
+            logger.debug(f"Ignoring parse error in import checking: {e}")
             pass
         return issues
 
@@ -77,7 +81,7 @@ class SafeEditValidator:
                     if node.id not in defined_vars and node.id not in __builtins__:
                         # Common globals we can ignore
                         ignore_list = {
-                            "self",
+                            "sel",
                             "cls",
                             "__name__",
                             "__file__",
@@ -121,7 +125,8 @@ class SafeEditValidator:
 
                             if not is_import:
                                 issues.append(f"Potentially undefined: '{node.id}'")
-        except:
+        except (SyntaxError, ValueError) as e:
+            logger.debug(f"Ignoring parse error in import checking: {e}")
             pass
 
         return list(set(issues))[:5]  # Return first 5 unique issues
@@ -140,13 +145,9 @@ class SafeEditValidator:
             # Check for Optional without None check
             if "Optional[" in line and "->" in line:
                 # This is a function signature with Optional
-                func_name = (
-                    line.split("def ")[-1].split("(")[0]
-                    if "def " in line
-                    else "function"
-                )
                 # Check if there's a None check in the function
                 # (This is simplified - real implementation would be more sophisticated)
+                pass
 
         return issues[:5]
 
@@ -164,9 +165,11 @@ class SafeEditValidator:
                         has_return = self._has_return_in_all_paths(node)
                         if not has_return:
                             issues.append(
-                                f"Function '{node.name}' may be missing return statement"
+                                f"Function '{node.name}' "
+                                "may be missing return statement"
                             )
-        except:
+        except (SyntaxError, ValueError) as e:
+            logger.debug(f"Ignoring parse error in import checking: {e}")
             pass
 
         return issues
@@ -257,15 +260,15 @@ class SafeEditValidator:
         Safely edit a file with validation
         Returns: (success, message)
         """
-        filepath = Path(filepath)
+        file_path = Path(filepath)
 
         # Step 1: Validate old content
-        print(f"\n🔍 Validating original content...")
-        before_validation = self.validate_content(old_content, str(filepath))
+        print("\n🔍 Validating original content...")
+        before_validation = self.validate_content(old_content, filepath)
 
         # Step 2: Validate new content
-        print(f"🔍 Validating new content...")
-        after_validation = self.validate_content(new_content, str(filepath))
+        print("🔍 Validating new content...")
+        after_validation = self.validate_content(new_content, filepath)
 
         # Step 3: Compare validations
         comparison = self.compare_validations(before_validation, after_validation)
@@ -310,7 +313,7 @@ class SafeEditValidator:
         # Save backup
         backup_path = (
             self.temp_dir
-            / f"{filepath.name}.{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
+            / f"{file_path.name}.{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
         )
         with open(backup_path, "w") as f:
             f.write(old_content)
@@ -330,7 +333,8 @@ class SafeEditValidator:
                 [
                     sys.executable,
                     "-c",
-                    f"import sys; sys.path.insert(0, '.'); exec(open('{filepath}').read())",
+                    f"import sys; sys.path.insert(0, '.'); "
+                    "exec(open('{filepath}').read())",
                 ],
                 capture_output=True,
                 text=True,
@@ -342,7 +346,7 @@ class SafeEditValidator:
                 return False
 
             return result.returncode == 0
-        except:
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
             return True  # Assume OK if we can't test
 
 
@@ -366,7 +370,7 @@ def safe_edit_wrapper(filepath: str, old_string: str, new_string: str) -> bool:
     new_content = content.replace(old_string, new_string, 1)
 
     # Perform safe edit
-    success, message = validator.safe_edit_file(filepath, content, new_content)
+    success, _ = validator.safe_edit_file(filepath, content, new_content)
 
     if success:
         # Additional validation: try to import
@@ -407,7 +411,7 @@ def example_function(value: Optional[int]) -> int:
         validator = SafeEditValidator()
 
         print("Testing safe edit validation...")
-        success, msg = validator.safe_edit_file(
+        success, _ = validator.safe_edit_file(
             str(test_file), test_content, fixed_content
         )
 
@@ -455,7 +459,8 @@ def example_function(value: Optional[int]) -> int:
         # Validate current state
         current_validation = validator.validate_file(filepath)
         print(
-            f"Current state: {'✅ Valid' if current_validation['valid'] else '❌ Has errors'}"
+            f"Current state: "
+            "{'✅ Valid' if current_validation['valid'] else '❌ Has errors'}"
         )
 
         if current_validation["errors"]:
@@ -489,7 +494,7 @@ def example_function(value: Optional[int]) -> int:
             print(f"\n✅ Edit applied successfully to {filepath}")
             print("File will not show red in IDE!")
         else:
-            print(f"\n❌ Edit rejected to prevent IDE errors")
+            print("\n❌ Edit rejected to prevent IDE errors")
 
 
 if __name__ == "__main__":

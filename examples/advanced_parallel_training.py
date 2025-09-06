@@ -87,7 +87,7 @@ def setup_multi_dimensional_parallelism():
 
     # Print parallelism configuration
     if get_data_parallel_rank() == 0 and get_tensor_model_parallel_rank() == 0:
-        print(f"Initialized multi-dimensional parallelism:")
+        print("Initialized multi-dimensional parallelism:")
         print(f"  World Size: {world_size}")
         print(f"  Tensor Parallel Size: {tp_size}")
         print(f"  Pipeline Parallel Size: {pp_size}")
@@ -107,14 +107,14 @@ def create_model_with_parallelism(model_name: str = "EleutherAI/pythia-70m"):
         Model configured for multi-dimensional parallelism
     """
     # Get parallelism configuration
-    tp_size = get_tensor_model_parallel_size()
-    pp_size = get_pipeline_model_parallel_size()
+    _ = get_tensor_model_parallel_size()  # tp_size (for debugging)
+    _ = get_pipeline_model_parallel_size()  # pp_size (for debugging)
     dp_size = get_data_parallel_size()
-    cp_size = get_context_parallel_size()
+    _ = get_context_parallel_size()  # cp_size (for debugging)
 
-    tp_rank = get_tensor_model_parallel_rank()
-    pp_rank = get_pipeline_model_parallel_rank()
-    dp_rank = get_data_parallel_rank()
+    _ = get_tensor_model_parallel_rank()  # tp_rank (for debugging)
+    _ = get_pipeline_model_parallel_rank()  # pp_rank (for debugging)
+    _ = get_data_parallel_rank()  # dp_rank (for debugging)
 
     # Load model on appropriate device
     device = torch.cuda.current_device()
@@ -192,20 +192,22 @@ def main():
     )
 
     # Initialize RoseTrainer with advanced parallelism
-    trainer = RoseTrainer(
+    _ = RoseTrainer(  # trainer (not used in this example)
         model=model,
         optimizer=optimizer,
         config=training_config,
     )
 
     # Print current process information
-    print(f"Process Info:")
+    print("Process Info:")
     print(f"  Global Rank: {dist.get_rank()}")
     print(
-        f"  TP Rank: {get_tensor_model_parallel_rank()}/{get_tensor_model_parallel_size()}"
+        f"  TP Rank: {get_tensor_model_parallel_rank()}/"
+        f"{get_tensor_model_parallel_size()}"
     )
     print(
-        f"  PP Rank: {get_pipeline_model_parallel_rank()}/{get_pipeline_model_parallel_size()}"
+        f"  PP Rank: {get_pipeline_model_parallel_rank()}/"
+        f"{get_pipeline_model_parallel_size()}"
     )
     print(f"  DP Rank: {get_data_parallel_rank()}/{get_data_parallel_size()}")
 

@@ -5,11 +5,11 @@ import time
 from contextlib import contextmanager
 
 import torch
-import torch.nn as nn
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
 from rosellm.rosetrainer.config import PrecisionType, TrainingConfig
+from rosellm.rosetrainer.constants import DEFAULT_GROWTH_INTERVAL, DEFAULT_INIT_SCALE
 
 # Import RoseTrainer components with new improvements
 from rosellm.rosetrainer.engine import RoseTrainer
@@ -77,11 +77,12 @@ def main():
         checkpoint_dir="./checkpoints_advanced",
     )
 
-    print(f"✓ Configuration validated successfully")
+    print("✓ Configuration validated successfully")
     print(f"  Precision: {config.precision.value}")
     print(f"  Learning rate: {config.optimizer.learning_rate}")
     print(
-        f"  Gradient clipping: {config.gradient.clip_type} @ {config.gradient.clip_value}"
+        f"  Gradient clipping: {config.gradient.clip_type} @ "
+        f"{config.gradient.clip_value}"
     )
 
     # 2. Initialize parallel state with thread safety (IMPROVED)
@@ -132,7 +133,7 @@ def main():
             use_reentrant=False,
             profile=True,  # Profile memory savings
         )
-        print(f"✓ Activation checkpointing applied with profiling")
+        print("✓ Activation checkpointing applied with profiling")
 
     # 5. Set up mixed precision training (NEW)
     print("\n" + "=" * 60)
@@ -141,8 +142,8 @@ def main():
 
     precision_manager = MixedPrecisionManager(
         precision=config.precision,
-        init_scale=2**16,
-        growth_interval=1000,
+        init_scale=DEFAULT_INIT_SCALE,
+        growth_interval=DEFAULT_GROWTH_INTERVAL,
     )
 
     if precision_manager.enabled:
@@ -170,11 +171,11 @@ def main():
         world_size=world_size,
     )
 
-    print(f"✓ RoseTrainer initialized with:")
-    print(f"  - Error recovery mechanisms")
-    print(f"  - Performance tracking")
-    print(f"  - Memory monitoring")
-    print(f"  - Checksum validation")
+    print("✓ RoseTrainer initialized with:")
+    print("  - Error recovery mechanisms")
+    print("  - Performance tracking")
+    print("  - Memory monitoring")
+    print("  - Checksum validation")
 
     # 8. Training loop with performance tracking
     print("\n" + "=" * 60)
@@ -218,18 +219,21 @@ def main():
     if config.memory.activation_checkpointing:
         memory_report = checkpoint_manager.get_profiling_report()
         print(
-            f"Memory saved by checkpointing: {memory_report['total_memory_saved_gb']:.3f} GB"
+            "Memory saved by checkpointing: "
+            f"{memory_report['total_memory_saved_gb']:.3f} GB"
         )
         print(
-            f"Average recompute time: {memory_report['average_recompute_time_ms']:.1f} ms"
+            "Average recompute time: "
+            f"{memory_report['average_recompute_time_ms']:.1f} ms"
         )
 
     # Get performance report (NEW)
     perf_report = trainer.get_performance_report()
-    print(f"\nPerformance Summary:")
+    print("\nPerformance Summary:")
     print(f"  Total samples processed: {perf_report['performance']['total_samples']}")
     print(
-        f"  Average throughput: {perf_report['performance']['samples_per_second']:.1f} samples/sec"
+        "  Average throughput: "
+        f"{perf_report['performance']['samples_per_second']:.1f} samples/sec"
     )
     print(f"  Peak memory usage: {perf_report['memory']['peak_memory_gb']:.2f} GB")
 
@@ -241,18 +245,18 @@ def main():
     if local_rank == 0:
         checkpoint_path = "advanced_model.pt"
         trainer.save_checkpoint(checkpoint_path, compute_checksum=True)
-        print(f"✓ Checkpoint saved with checksum validation")
+        print("✓ Checkpoint saved with checksum validation")
 
         # Test loading with validation
         trainer.load_checkpoint(checkpoint_path, validate_checksum=True)
-        print(f"✓ Checkpoint loaded and validated successfully")
+        print("✓ Checkpoint loaded and validated successfully")
 
     # 11. Graceful cleanup with timeout (NEW)
     print("\n" + "=" * 60)
     print("10. Graceful cleanup with timeout")
     print("=" * 60)
 
-    trainer.cleanup(timeout=30)  # Graceful shutdown with 30s timeout
+    trainer.cleanup()  # Graceful shutdown
 
     if world_size > 1:
         destroy_model_parallel()  # Thread-safe cleanup

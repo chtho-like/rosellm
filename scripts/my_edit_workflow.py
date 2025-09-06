@@ -8,7 +8,6 @@ import ast
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
 
 
 class MyEditWorkflow:
@@ -38,7 +37,7 @@ class MyEditWorkflow:
         self, filepath: str, old_string: str, new_string: str
     ) -> bool:
         """Step 2: Validate the planned edit"""
-        print(f"\n📋 STEP 2: Validating planned edit")
+        print("\n📋 STEP 2: Validating planned edit")
 
         # Read file
         with open(filepath, "r") as f:
@@ -46,11 +45,11 @@ class MyEditWorkflow:
 
         # Check old string exists
         if old_string not in content:
-            print(f"  ❌ Old string not found in file")
+            print("  ❌ Old string not found in file")
             self.checks_failed.append("old_string_exists")
             return False
 
-        print(f"  ✅ Old string found")
+        print("  ✅ Old string found")
 
         # Create new content
         new_content = content.replace(old_string, new_string, 1)
@@ -58,7 +57,7 @@ class MyEditWorkflow:
         # Check new syntax
         try:
             ast.parse(new_content)
-            print(f"  ✅ New syntax will be valid")
+            print("  ✅ New syntax will be valid")
             self.checks_passed.append("new_syntax")
         except SyntaxError as e:
             print(f"  ❌ New syntax will have error: {e}")
@@ -69,7 +68,7 @@ class MyEditWorkflow:
 
     def step3_check_imports(self, filepath: str, new_content: str) -> bool:
         """Step 3: Verify imports will resolve"""
-        print(f"\n📋 STEP 3: Checking imports")
+        print("\n📋 STEP 3: Checking imports")
 
         try:
             tree = ast.parse(new_content)
@@ -93,12 +92,12 @@ class MyEditWorkflow:
             self.checks_passed.append("imports")
             return True
 
-        except:
+        except (SyntaxError, ValueError):
             return True  # Continue anyway
 
     def step4_check_type_safety(self, new_content: str) -> bool:
         """Step 4: Check for type safety issues"""
-        print(f"\n📋 STEP 4: Checking type safety")
+        print("\n📋 STEP 4: Checking type safety")
 
         issues = []
         lines = new_content.split("\n")
@@ -121,14 +120,14 @@ class MyEditWorkflow:
                 print(f"     - {issue}")
             self.checks_failed.append("type_safety")
         else:
-            print(f"  ✅ No obvious type safety issues")
+            print("  ✅ No obvious type safety issues")
             self.checks_passed.append("type_safety")
 
         return True  # Non-blocking
 
     def step5_apply_edit(self, filepath: str, old_string: str, new_string: str) -> bool:
         """Step 5: Apply the edit"""
-        print(f"\n📋 STEP 5: Applying edit")
+        print("\n📋 STEP 5: Applying edit")
 
         with open(filepath, "r") as f:
             content = f.read()
@@ -144,20 +143,20 @@ class MyEditWorkflow:
         with open(filepath, "w") as f:
             f.write(new_content)
 
-        print(f"  ✅ Edit applied")
+        print("  ✅ Edit applied")
         print(f"  📁 Backup saved to {backup_path}")
 
         return True
 
     def step6_verify_result(self, filepath: str) -> bool:
         """Step 6: Verify file is not red after edit"""
-        print(f"\n📋 STEP 6: Verifying result")
+        print("\n📋 STEP 6: Verifying result")
 
         # Check syntax one more time
         try:
             with open(filepath, "r") as f:
                 ast.parse(f.read())
-            print(f"  ✅ Final syntax: Valid")
+            print("  ✅ Final syntax: Valid")
 
             # Try to import if it's a module
             if "/rosellm/" in filepath:
@@ -171,8 +170,8 @@ class MyEditWorkflow:
                         timeout=2,
                     )
                     if result.returncode == 0:
-                        print(f"  ✅ Module imports successfully")
-                except:
+                        print("  ✅ Module imports successfully")
+                except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
                     pass
 
             return True

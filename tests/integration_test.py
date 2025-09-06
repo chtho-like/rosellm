@@ -6,10 +6,6 @@ import torch.optim as optim
 
 from rosellm.rosetrainer.engine import RoseTrainer
 from rosellm.rosetrainer.memory.activation_checkpoint import ActivationCheckpointing
-from rosellm.rosetrainer.memory.mixed_precision import (
-    DynamicLossScaler,
-    convert_model_to_fp16,
-)
 
 
 class SimpleModel(nn.Module):
@@ -136,7 +132,7 @@ class IntegrationTest(unittest.TestCase):
         batch = {"input_ids": input_ids}
 
         # Perform initial training step
-        initial_result = trainer.train_step(batch)
+        _ = trainer.train_step(batch)  # initial_result (not used)
 
         # Save checkpoint to temporary file
         import os

@@ -9,7 +9,19 @@ from enum import Enum
 from typing import Literal, Optional, Union
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .constants import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_CHECKPOINT_DIR,
+    DEFAULT_CHECKPOINT_INTERVAL,
+    DEFAULT_GRADIENT_ACCUMULATION_STEPS,
+    DEFAULT_GRADIENT_CLIP_VALUE,
+    DEFAULT_LEARNING_RATE,
+    DEFAULT_SEED,
+    DEFAULT_WARMUP_STEPS,
+    DEFAULT_WEIGHT_DECAY,
+)
 
 
 class PrecisionType(str, Enum):
@@ -36,8 +48,10 @@ class OptimizerConfig(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
     name: Literal["adam", "adamw", "sgd", "rmsprop"] = "adamw"
-    learning_rate: float = Field(1e-4, gt=0, le=1.0, description="Learning rate")
-    weight_decay: float = Field(0.01, ge=0, le=1.0)
+    learning_rate: float = Field(
+        DEFAULT_LEARNING_RATE, gt=0, le=1.0, description="Learning rate"
+    )
+    weight_decay: float = Field(DEFAULT_WEIGHT_DECAY, ge=0, le=1.0)
     betas: tuple[float, float] = (0.9, 0.999)
     eps: float = Field(1e-8, gt=0)
 
@@ -55,8 +69,14 @@ class GradientConfig(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
     clip_type: GradientClipType = GradientClipType.NORM
-    clip_value: Optional[float] = Field(None, gt=0, description="Gradient clip value")
-    accumulation_steps: int = Field(1, ge=1, description="Gradient accumulation steps")
+    clip_value: Optional[float] = Field(
+        DEFAULT_GRADIENT_CLIP_VALUE, gt=0, description="Gradient clip value"
+    )
+    accumulation_steps: int = Field(
+        DEFAULT_GRADIENT_ACCUMULATION_STEPS,
+        ge=1,
+        description="Gradient accumulation steps",
+    )
 
     @field_validator("clip_value")
     def validate_clip_value(cls, v, info):
@@ -95,32 +115,73 @@ class ParallelismConfig(BaseModel):
         return v
 
 
+# Factory functions for cleaner default configurations
+def _default_optimizer() -> OptimizerConfig:
+    """Create default optimizer configuration.
+
+    Returns:
+        OptimizerConfig: Default optimizer settings with learning_rate=1e-4,
+                        weight_decay=0.01, eps=1e-8, betas=(0.9, 0.999)
+    """
+    return OptimizerConfig()  # type: ignore[call-arg]
+
+
+def _default_gradient() -> GradientConfig:
+    """Create default gradient configuration.
+
+    Returns:
+        GradientConfig: Default gradient settings with clip_type='norm',
+                       clip_value=1.0, accumulation_steps=1
+    """
+    return GradientConfig()  # type: ignore[call-arg]
+
+
+def _default_memory() -> MemoryConfig:
+    """Create default memory configuration.
+
+    Returns:
+        MemoryConfig: Default memory settings with all optimizations disabled
+    """
+    return MemoryConfig()  # type: ignore[call-arg]
+
+
+def _default_parallelism() -> ParallelismConfig:
+    """Create default parallelism configuration.
+
+    Returns:
+        ParallelismConfig: Default parallelism settings with no model parallelism
+    """
+    return ParallelismConfig()  # type: ignore[call-arg]
+
+
 class TrainingConfig(BaseModel):
     """Main training configuration with validation."""
 
     model_config = ConfigDict(use_enum_values=True, arbitrary_types_allowed=True)
 
     # Basic training parameters
-    batch_size: int = Field(32, ge=1, description="Batch size per device")
-    num_epochs: int = Field(3, ge=1)
+    batch_size: int = Field(
+        DEFAULT_BATCH_SIZE, ge=1, description="Batch size per device"
+    )
+    num_epochs: Optional[int] = Field(None, ge=1)
     max_steps: Optional[int] = Field(None, ge=1)
-    warmup_steps: int = Field(0, ge=0)
-    seed: int = Field(42, ge=0)
+    warmup_steps: int = Field(DEFAULT_WARMUP_STEPS, ge=0)
+    seed: int = Field(DEFAULT_SEED, ge=0)
 
     # Precision and performance
     precision: PrecisionType = PrecisionType.FP32
     compile_model: bool = False
     use_cuda_graphs: bool = False
 
-    # Sub-configurations
-    optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
-    gradient: GradientConfig = Field(default_factory=GradientConfig)
-    memory: MemoryConfig = Field(default_factory=MemoryConfig)
-    parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
+    # Sub-configurations with clean factory functions
+    optimizer: OptimizerConfig = Field(default_factory=_default_optimizer)
+    gradient: GradientConfig = Field(default_factory=_default_gradient)
+    memory: MemoryConfig = Field(default_factory=_default_memory)
+    parallelism: ParallelismConfig = Field(default_factory=_default_parallelism)
 
     # Checkpointing
-    checkpoint_interval: int = Field(1000, ge=1)
-    checkpoint_dir: str = "./checkpoints"
+    checkpoint_interval: int = Field(DEFAULT_CHECKPOINT_INTERVAL, ge=1)
+    checkpoint_dir: str = DEFAULT_CHECKPOINT_DIR
     resume_from_checkpoint: Optional[str] = None
 
     # Logging and monitoring
@@ -137,9 +198,18 @@ class TrainingConfig(BaseModel):
     @field_validator("max_steps")
     def validate_max_steps(cls, v, info):
         if v is not None and "num_epochs" in info.data:
-            if v > 0 and info.data["num_epochs"] > 0:
+            num_epochs = info.data.get("num_epochs")
+            if v > 0 and num_epochs is not None and num_epochs > 0:
                 raise ValueError("Cannot specify both max_steps and num_epochs")
         return v
+
+    @model_validator(mode="after")
+    def validate_training_duration(self):
+        """Ensure at least one of max_steps or num_epochs is specified."""
+        if self.max_steps is None and self.num_epochs is None:
+            # Set default num_epochs if neither is specified
+            self.num_epochs = 3
+        return self
 
     @field_validator("precision")
     def validate_precision_support(cls, v):
@@ -194,20 +264,47 @@ class TrainingConfig(BaseModel):
 
 def validate_config(config: Union[dict, TrainingConfig]) -> TrainingConfig:
     """
-    Validate and convert configuration to TrainingConfig.
+    Validate and convert configuration to TrainingConfig with recursive validation.
 
     Args:
         config: Dictionary or TrainingConfig object
 
     Returns:
-        Validated TrainingConfig object
+        Validated TrainingConfig object with all sub-configs validated
 
     Raises:
         ValidationError: If configuration is invalid
+        TypeError: If config is not dict or TrainingConfig
     """
+    # Convert to TrainingConfig if needed
     if isinstance(config, dict):
-        return TrainingConfig.from_dict(config)
+        validated = TrainingConfig.from_dict(config)
     elif isinstance(config, TrainingConfig):
-        return config
+        validated = config
     else:
         raise TypeError(f"Config must be dict or TrainingConfig, got {type(config)}")
+
+    # Recursively validate sub-configurations
+    try:
+        # Validate optimizer config
+        if hasattr(validated, "optimizer"):
+            validated.optimizer = OptimizerConfig(**validated.optimizer.model_dump())
+
+        # Validate gradient config
+        if hasattr(validated, "gradient"):
+            validated.gradient = GradientConfig(**validated.gradient.model_dump())
+
+        # Validate memory config
+        if hasattr(validated, "memory"):
+            validated.memory = MemoryConfig(**validated.memory.model_dump())
+
+        # Validate parallelism config
+        if hasattr(validated, "parallelism"):
+            validated.parallelism = ParallelismConfig(
+                **validated.parallelism.model_dump()
+            )
+
+    except Exception as e:
+        raise ValueError(f"Sub-configuration validation failed: {e}")
+
+    return validated

@@ -2,7 +2,6 @@ import hashlib
 import logging
 import os
 import time
-from datetime import timedelta
 from typing import Any, Dict, Optional, Union, cast
 
 import psutil
@@ -14,7 +13,8 @@ from .config import TrainingConfig, validate_config
 # References:
 # [1] Shoeybi, M. et al. "Megatron-LM: Training Multi-Billion Parameter Language Models
 #     Using Model Parallelism." arXiv:1909.08053 (2019)
-# [2] PyTorch DistributedDataParallel: https://pytorch.org/docs/stable/nn.html#torch.nn.parallel.DistributedDataParallel
+# [2] PyTorch DistributedDataParallel:
+#     https://pytorch.org/docs/stable/nn.html#torch.nn.parallel.DistributedDataParallel
 # [3] Rajbhandari, S. et al. "ZeRO: Memory Optimizations Toward Training Trillion
 #     Parameter Models." arXiv:1910.02054 (2019)
 
@@ -152,18 +152,23 @@ class RoseTrainer:
                         world_size=self.world_size,
                     )
                     logger.info(
-                        f"Successfully initialized distributed training with backend={backend}"
+                        f"Successfully initialized distributed training "
+                        f"with backend={backend}"
                     )
                     break
                 except Exception as e:
                     if attempt < max_retries - 1:
                         logger.warning(
-                            f"Failed to initialize distributed (attempt {attempt + 1}/{max_retries}): {e}"
+                            f"Failed to initialize distributed "
+                            f"(attempt {attempt + 1}/{max_retries}): {e}"
                         )
                         logger.warning(f"Retrying in {retry_delay} seconds...")
                         time.sleep(retry_delay)
                     else:
-                        error_msg = f"Failed to initialize distributed training after {max_retries} attempts: {e}"
+                        error_msg = (
+                            f"Failed to initialize distributed training "
+                            f"after {max_retries} attempts: {e}"
+                        )
                         logger.error(error_msg)
                         raise DistributedInitializationError(error_msg) from e
 
@@ -370,16 +375,14 @@ class RoseTrainer:
         self._update_memory_stats()
         return self.memory_stats.copy()
 
-    def cleanup(self, timeout: int = 30) -> None:
-        """Clean up distributed training resources with timeout.
-
-        Args:
-            timeout: Maximum time in seconds to wait for cleanup
-        """
+    def cleanup(self) -> None:
+        """Clean up distributed training resources."""
         if self.distributed and dist.is_initialized():
             try:
                 # Synchronize all processes before cleanup
-                dist.barrier(timeout=timedelta(seconds=timeout))
+                # Note: timeout parameter may not be available in all PyTorch versions
+                # We use a simple barrier without timeout for compatibility
+                dist.barrier()
                 dist.destroy_process_group()
                 logger.info("Successfully destroyed distributed process group")
             except Exception as e:

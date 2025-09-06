@@ -1,7 +1,7 @@
 import functools
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Type
 
 import torch
 import torch.nn as nn
@@ -135,7 +135,8 @@ class ActivationCheckpointing:
         # Ensure model has the specified layer attribute
         if not hasattr(model, layer_attr.split(".")[0]):
             print(
-                f"Warning: Model doesn't have attribute {layer_attr}, skipping checkpointing."
+                f"Warning: Model doesn't have attribute {layer_attr}, "
+                "skipping checkpointing."
             )
             return model
 
@@ -144,7 +145,8 @@ class ActivationCheckpointing:
         for attr in layer_attr.split("."):
             if not hasattr(current, attr):
                 print(
-                    f"Warning: Model doesn't have attribute {attr}, skipping checkpointing."
+                    f"Warning: Model doesn't have attribute {attr}, "
+                    "skipping checkpointing."
                 )
                 return model
             current = getattr(current, attr)
@@ -152,7 +154,8 @@ class ActivationCheckpointing:
         # Now current should point to the list/ModuleList of transformer layers
         if not isinstance(current, nn.ModuleList) and not isinstance(current, list):
             print(
-                f"Warning: {layer_attr} is not a ModuleList or list, skipping checkpointing."
+                f"Warning: {layer_attr} is not a ModuleList or list, "
+                "skipping checkpointing."
             )
             return model
 

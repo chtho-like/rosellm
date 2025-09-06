@@ -10,7 +10,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 
 class CodeValidator:
@@ -70,7 +70,6 @@ class CodeValidator:
             elif isinstance(node, ast.ImportFrom):
                 module = node.module or ""
                 for alias in node.names:
-                    full_name = f"{module}.{alias.name}" if module else alias.name
                     if not self._can_import(module, alias.name):
                         import_errors.append(
                             f"Cannot import '{alias.name}' from '{module}'"
@@ -99,10 +98,10 @@ class CodeValidator:
                 try:
                     mod = importlib.import_module(module)
                     return hasattr(mod, name)
-                except:
+                except (ImportError, AttributeError):
                     return False
             return True
-        except:
+        except (ImportError, ModuleNotFoundError):
             return False
 
     def _check_type_hints(self, filepath: Path) -> None:
@@ -347,8 +346,8 @@ def main():
         sys.exit(1)
 
     if sys.argv[1] == "--before-edit" and len(sys.argv) > 2:
-        state = validate_before_edit(sys.argv[2])
-        print(f"\n📸 State saved. Edit the file and run with --after-edit")
+        _ = validate_before_edit(sys.argv[2])  # state
+        print("\n📸 State saved. Edit the file and run with --after-edit")
 
     elif sys.argv[1] == "--after-edit" and len(sys.argv) > 2:
         is_valid = validate_after_edit(sys.argv[2])

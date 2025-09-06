@@ -87,7 +87,7 @@ import torch
 if torch.cuda.device_count() >= 2:
     print(f"Found {torch.cuda.device_count()} GPUs")
     import subprocess
-    subprocess.run(["torchrun", "--nproc_per_node=2", 
+    subprocess.run(["torchrun", "--nproc_per_node=2",
                    "examples/training_example.py"])
 else:
     print("Less than 2 GPUs, skipping GPU test")

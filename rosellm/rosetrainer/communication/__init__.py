@@ -16,7 +16,7 @@ import torch.distributed as dist
 
 def all_reduce(
     tensor: torch.Tensor,
-    op: dist.ReduceOp = dist.ReduceOp.SUM,
+    op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
     group: Optional[dist.ProcessGroup] = None,
     async_op: bool = False,
 ):

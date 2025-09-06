@@ -59,7 +59,7 @@ class TestDataParallelTrainer(unittest.TestCase):
         optimizer.zero_grad()
 
         # First accumulation step
-        loss1 = self.trainer.forward_backward(batch, optimizer)
+        _ = self.trainer.forward_backward(batch, optimizer)  # loss1
         self.assertEqual(self.trainer.accumulation_step, 1)
 
         # Check that optimizer step was not called yet
@@ -71,7 +71,7 @@ class TestDataParallelTrainer(unittest.TestCase):
         self.assertTrue(has_grad)
 
         # Second accumulation step (should update parameters)
-        loss2 = self.trainer.forward_backward(batch, optimizer)
+        _ = self.trainer.forward_backward(batch, optimizer)  # loss2
         self.assertEqual(self.trainer.accumulation_step, 0)  # Reset after accumulation
 
     def test_get_model(self):
