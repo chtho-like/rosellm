@@ -6,13 +6,15 @@ and automatic validation of training parameters.
 """
 
 from enum import Enum
-from typing import Optional, Union, Literal
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from typing import Literal, Optional, Union
+
 import torch
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class PrecisionType(str, Enum):
     """Supported precision types for training."""
+
     FP32 = "fp32"
     FP16 = "fp16"
     BF16 = "bf16"
@@ -22,6 +24,7 @@ class PrecisionType(str, Enum):
 
 class GradientClipType(str, Enum):
     """Gradient clipping strategies."""
+
     NORM = "norm"
     VALUE = "value"
     NONE = "none"
@@ -29,6 +32,7 @@ class GradientClipType(str, Enum):
 
 class OptimizerConfig(BaseModel):
     """Optimizer configuration."""
+
     model_config = ConfigDict(use_enum_values=True)
 
     name: Literal["adam", "adamw", "sgd", "rmsprop"] = "adamw"
@@ -37,7 +41,7 @@ class OptimizerConfig(BaseModel):
     betas: tuple[float, float] = (0.9, 0.999)
     eps: float = Field(1e-8, gt=0)
 
-    @field_validator('betas')
+    @field_validator("betas")
     def validate_betas(cls, v):
         beta1, beta2 = v
         if not (0 <= beta1 < 1 and 0 <= beta2 < 1):
@@ -47,21 +51,23 @@ class OptimizerConfig(BaseModel):
 
 class GradientConfig(BaseModel):
     """Gradient handling configuration."""
+
     model_config = ConfigDict(use_enum_values=True)
 
     clip_type: GradientClipType = GradientClipType.NORM
     clip_value: Optional[float] = Field(None, gt=0, description="Gradient clip value")
     accumulation_steps: int = Field(1, ge=1, description="Gradient accumulation steps")
 
-    @field_validator('clip_value')
+    @field_validator("clip_value")
     def validate_clip_value(cls, v, info):
-        if info.data.get('clip_type') != GradientClipType.NONE and v is None:
+        if info.data.get("clip_type") != GradientClipType.NONE and v is None:
             raise ValueError("clip_value required when clip_type is not 'none'")
         return v
 
 
 class MemoryConfig(BaseModel):
     """Memory optimization configuration."""
+
     model_config = ConfigDict(use_enum_values=True)
 
     activation_checkpointing: bool = False
@@ -73,6 +79,7 @@ class MemoryConfig(BaseModel):
 
 class ParallelismConfig(BaseModel):
     """Parallelism configuration."""
+
     tensor_parallel_size: int = Field(1, ge=1)
     pipeline_parallel_size: int = Field(1, ge=1)
     data_parallel_size: Optional[int] = Field(None, ge=1)
@@ -80,7 +87,7 @@ class ParallelismConfig(BaseModel):
     expert_parallel_size: int = Field(1, ge=1)
 
     @field_validator(
-        'data_parallel_size', 'tensor_parallel_size', 'pipeline_parallel_size'
+        "data_parallel_size", "tensor_parallel_size", "pipeline_parallel_size"
     )
     def validate_power_of_two(cls, v):
         if v is not None and v > 1 and (v & (v - 1)) != 0:
@@ -90,6 +97,7 @@ class ParallelismConfig(BaseModel):
 
 class TrainingConfig(BaseModel):
     """Main training configuration with validation."""
+
     model_config = ConfigDict(use_enum_values=True, arbitrary_types_allowed=True)
 
     # Basic training parameters
@@ -126,17 +134,17 @@ class TrainingConfig(BaseModel):
     track_throughput: bool = True
     profile_kernel: bool = False
 
-    @field_validator('max_steps')
+    @field_validator("max_steps")
     def validate_max_steps(cls, v, info):
-        if v is not None and 'num_epochs' in info.data:
-            if v > 0 and info.data['num_epochs'] > 0:
+        if v is not None and "num_epochs" in info.data:
+            if v > 0 and info.data["num_epochs"] > 0:
                 raise ValueError("Cannot specify both max_steps and num_epochs")
         return v
 
-    @field_validator('precision')
+    @field_validator("precision")
     def validate_precision_support(cls, v):
         if v == PrecisionType.FP8:
-            if not hasattr(torch, 'float8_e4m3fn'):
+            if not hasattr(torch, "float8_e4m3fn"):
                 raise ValueError("FP8 not supported in current PyTorch version")
         elif v == PrecisionType.BF16:
             if not torch.cuda.is_bf16_supported():
@@ -145,16 +153,16 @@ class TrainingConfig(BaseModel):
 
     def to_dict(self) -> dict:
         """Convert to dictionary for backward compatibility."""
-        config_dict = self.model_dump(mode='json')  # Serialize enums properly
+        config_dict = self.model_dump(mode="json")  # Serialize enums properly
 
         # Flatten nested configs for backward compatibility
-        if 'optimizer' in config_dict:
-            config_dict['learning_rate'] = config_dict['optimizer']['learning_rate']
-            config_dict['weight_decay'] = config_dict['optimizer']['weight_decay']
+        if "optimizer" in config_dict:
+            config_dict["learning_rate"] = config_dict["optimizer"]["learning_rate"]
+            config_dict["weight_decay"] = config_dict["optimizer"]["weight_decay"]
 
-        if 'gradient' in config_dict:
-            config_dict['gradient_clip_type'] = config_dict['gradient']['clip_type']
-            config_dict['gradient_clip_value'] = config_dict['gradient']['clip_value']
+        if "gradient" in config_dict:
+            config_dict["gradient_clip_type"] = config_dict["gradient"]["clip_type"]
+            config_dict["gradient_clip_value"] = config_dict["gradient"]["clip_value"]
 
         return config_dict
 
@@ -162,24 +170,24 @@ class TrainingConfig(BaseModel):
     def from_dict(cls, config_dict: dict) -> "TrainingConfig":
         """Create from dictionary, handling legacy configs."""
         # Handle legacy flat structure
-        if 'learning_rate' in config_dict and 'optimizer' not in config_dict:
-            config_dict['optimizer'] = {
-                'learning_rate': config_dict.pop('learning_rate', 1e-4),
-                'weight_decay': config_dict.pop('weight_decay', 0.01)
+        if "learning_rate" in config_dict and "optimizer" not in config_dict:
+            config_dict["optimizer"] = {
+                "learning_rate": config_dict.pop("learning_rate", 1e-4),
+                "weight_decay": config_dict.pop("weight_decay", 0.01),
             }
 
-        if 'gradient_clip_value' in config_dict and 'gradient' not in config_dict:
-            config_dict['gradient'] = {
-                'clip_type': config_dict.pop('gradient_clip_type', 'norm'),
-                'clip_value': config_dict.pop('gradient_clip_value', None)
+        if "gradient_clip_value" in config_dict and "gradient" not in config_dict:
+            config_dict["gradient"] = {
+                "clip_type": config_dict.pop("gradient_clip_type", "norm"),
+                "clip_value": config_dict.pop("gradient_clip_value", None),
             }
 
         # Handle old max_grad_norm parameter
-        if 'max_grad_norm' in config_dict:
-            if 'gradient' not in config_dict:
-                config_dict['gradient'] = {}
-            config_dict['gradient']['clip_value'] = config_dict.pop('max_grad_norm')
-            config_dict['gradient']['clip_type'] = 'norm'
+        if "max_grad_norm" in config_dict:
+            if "gradient" not in config_dict:
+                config_dict["gradient"] = {}
+            config_dict["gradient"]["clip_value"] = config_dict.pop("max_grad_norm")
+            config_dict["gradient"]["clip_type"] = "norm"
 
         return cls(**config_dict)
 
@@ -187,13 +195,13 @@ class TrainingConfig(BaseModel):
 def validate_config(config: Union[dict, TrainingConfig]) -> TrainingConfig:
     """
     Validate and convert configuration to TrainingConfig.
-    
+
     Args:
         config: Dictionary or TrainingConfig object
-        
+
     Returns:
         Validated TrainingConfig object
-        
+
     Raises:
         ValidationError: If configuration is invalid
     """

@@ -6,25 +6,24 @@ to set up multi-dimensional parallelism for training large language models.
 """
 
 import os
+
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 
 from rosellm.rosetrainer import RoseTrainer
-from rosellm.rosetrainer.parallelism import (
-    initialize_model_parallel,
-    get_tensor_model_parallel_size,
-    get_pipeline_model_parallel_size,
-    get_data_parallel_size,
-    get_context_parallel_size,
-    get_tensor_model_parallel_rank,
-    get_pipeline_model_parallel_rank,
-    get_data_parallel_rank,
-    get_data_parallel_group,
-    NCCLConfig,
-    set_nccl_config,
-)
+from rosellm.rosetrainer.parallelism import (NCCLConfig,
+                                             get_context_parallel_size,
+                                             get_data_parallel_group,
+                                             get_data_parallel_rank,
+                                             get_data_parallel_size,
+                                             get_pipeline_model_parallel_rank,
+                                             get_pipeline_model_parallel_size,
+                                             get_tensor_model_parallel_rank,
+                                             get_tensor_model_parallel_size,
+                                             initialize_model_parallel,
+                                             set_nccl_config)
 
 
 def setup_multi_dimensional_parallelism():
@@ -33,7 +32,7 @@ def setup_multi_dimensional_parallelism():
     """
     # Get world size from environment
     world_size = int(os.environ.get("WORLD_SIZE", 1))
-    
+
     # Configure parallelism dimensions based on world size
     if world_size == 1:
         # Single GPU - no parallelism
@@ -65,7 +64,7 @@ def setup_multi_dimensional_parallelism():
         pp_size = 1
         dp_size = world_size // tp_size
         cp_size = 1
-    
+
     # Configure NCCL optimizations
     nccl_config = NCCLConfig(
         enable_sharp=True,  # Enable SHARP for better collective performance
@@ -74,7 +73,7 @@ def setup_multi_dimensional_parallelism():
         tree_threshold=1000,  # Threshold for tree algorithm
     )
     set_nccl_config(nccl_config)
-    
+
     # Initialize multi-dimensional parallelism
     initialize_model_parallel(
         tensor_model_parallel_size=tp_size,
@@ -83,7 +82,7 @@ def setup_multi_dimensional_parallelism():
         context_parallel_size=cp_size,
         order="tp-cp-dp-pp",  # Optimized dimension ordering
     )
-    
+
     # Print parallelism configuration
     if get_data_parallel_rank() == 0 and get_tensor_model_parallel_rank() == 0:
         print(f"Initialized multi-dimensional parallelism:")
@@ -98,10 +97,10 @@ def setup_multi_dimensional_parallelism():
 def create_model_with_parallelism(model_name: str = "EleutherAI/pythia-70m"):
     """
     Create a model with appropriate parallelism configuration.
-    
+
     Args:
         model_name: Name of the model to load
-    
+
     Returns:
         Model configured for multi-dimensional parallelism
     """
@@ -110,14 +109,14 @@ def create_model_with_parallelism(model_name: str = "EleutherAI/pythia-70m"):
     pp_size = get_pipeline_model_parallel_size()
     dp_size = get_data_parallel_size()
     cp_size = get_context_parallel_size()
-    
+
     tp_rank = get_tensor_model_parallel_rank()
     pp_rank = get_pipeline_model_parallel_rank()
     dp_rank = get_data_parallel_rank()
-    
+
     # Load model on appropriate device
     device = torch.cuda.current_device()
-    
+
     # For tensor parallelism, we would need to shard the model
     # For pipeline parallelism, we would need to split layers
     # For simplicity, this example uses standard DDP
@@ -126,7 +125,7 @@ def create_model_with_parallelism(model_name: str = "EleutherAI/pythia-70m"):
         torch_dtype=torch.float16,
         device_map=device,
     )
-    
+
     # Apply data parallelism
     if dp_size > 1:
         model = DDP(
@@ -134,7 +133,7 @@ def create_model_with_parallelism(model_name: str = "EleutherAI/pythia-70m"):
             device_ids=[device],
             process_group=get_data_parallel_group(),
         )
-    
+
     return model
 
 
@@ -146,7 +145,7 @@ def main():
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
-        
+
         # Initialize process group
         dist.init_process_group(
             backend="nccl",
@@ -154,28 +153,27 @@ def main():
             world_size=world_size,
             rank=rank,
         )
-        
+
         # Set CUDA device
         torch.cuda.set_device(rank % torch.cuda.device_count())
-    
+
     # Set up multi-dimensional parallelism
     setup_multi_dimensional_parallelism()
-    
+
     # Create model with parallelism
     model = create_model_with_parallelism()
-    
+
     # Create dummy data for demonstration
     batch_size = 4
     seq_length = 512
     vocab_size = 50257
-    
+
     # Generate random input
     input_ids = torch.randint(
-        0, vocab_size, (batch_size, seq_length),
-        device=torch.cuda.current_device()
+        0, vocab_size, (batch_size, seq_length), device=torch.cuda.current_device()
     )
     labels = input_ids.clone()
-    
+
     # Training configuration
     training_config = {
         "learning_rate": 1e-4,
@@ -184,43 +182,47 @@ def main():
         "gradient_clipping": 1.0,
         "checkpoint_dir": "./checkpoints",
     }
-    
+
     # Initialize optimizer (required for RoseTrainer)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=training_config["learning_rate"],
     )
-    
+
     # Initialize RoseTrainer with advanced parallelism
     trainer = RoseTrainer(
         model=model,
         optimizer=optimizer,
         config=training_config,
     )
-    
+
     # Print current process information
     print(f"Process Info:")
     print(f"  Global Rank: {dist.get_rank()}")
-    print(f"  TP Rank: {get_tensor_model_parallel_rank()}/{get_tensor_model_parallel_size()}")
-    print(f"  PP Rank: {get_pipeline_model_parallel_rank()}/{get_pipeline_model_parallel_size()}")
+    print(
+        f"  TP Rank: {get_tensor_model_parallel_rank()}/{get_tensor_model_parallel_size()}"
+    )
+    print(
+        f"  PP Rank: {get_pipeline_model_parallel_rank()}/{get_pipeline_model_parallel_size()}"
+    )
     print(f"  DP Rank: {get_data_parallel_rank()}/{get_data_parallel_size()}")
-    
+
     # Training step (simplified for demonstration)
     for epoch in range(training_config["num_epochs"]):
         # Forward pass
         outputs = model(input_ids=input_ids, labels=labels)
         loss = outputs.loss
-        
+
         # Backward pass
         loss.backward()
-        
+
         # Optimizer step (would be handled by trainer)
         # trainer.step()
-        
+
         print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
-    
+
     print("Training completed successfully with advanced parallelism!")
-    
+
     # Cleanup
     if dist.is_initialized():
         dist.destroy_process_group()

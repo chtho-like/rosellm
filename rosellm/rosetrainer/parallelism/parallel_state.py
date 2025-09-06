@@ -132,7 +132,9 @@ def initialize_model_parallel(
 
     with _STATE_LOCK:  # Thread-safe initialization
         if _INITIALIZED:
-            warnings.warn("Parallel state already initialized, skipping re-initialization")
+            warnings.warn(
+                "Parallel state already initialized, skipping re-initialization"
+            )
             return
 
     # Initialize PyTorch distributed if not already done
@@ -597,7 +599,13 @@ def get_pipeline_model_parallel_last_rank() -> int:
     # Get current coordinates
     coords = _get_coords_from_rank(_RANK if _RANK is not None else 0)
     # Set PP coordinate to max, keep others same
-    last_coords = (coords[0], _PIPELINE_MODEL_PARALLEL_SIZE - 1, coords[2], coords[3], coords[4])
+    last_coords = (
+        coords[0],
+        _PIPELINE_MODEL_PARALLEL_SIZE - 1,
+        coords[2],
+        coords[3],
+        coords[4],
+    )
     return _get_rank_from_coords(*last_coords)
 
 
