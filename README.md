@@ -231,21 +231,6 @@ This implementation is based on the algorithm description in the original paper 
 
 ## Code Quality & Development
 
-### Automatic Code Fixing
-
-The project includes comprehensive auto-fixing capabilities:
-
-```bash
-# Auto-fix a specific file after editing
-python scripts/autofix_ide.py path/to/file.py
-
-# Auto-fix all recently modified files
-python scripts/autofix_ide.py
-
-# Auto-fix all Python files in the project
-python scripts/autofix_ide.py --all
-```
-
 ### Pre-commit Hooks
 
 The project uses pre-commit hooks to maintain code quality:

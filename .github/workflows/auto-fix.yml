@@ -38,10 +38,6 @@ jobs:
           pip install black isort flake8 mypy
           pip install -e .
 
-      - name: Run auto-fix script
-        run: |
-          python scripts/autofix_ide.py --all
-
       - name: Check if changes were made
         id: verify
         run: |
