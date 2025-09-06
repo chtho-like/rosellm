@@ -166,7 +166,8 @@ class IntegrationTest(unittest.TestCase):
         )
 
         # Apply activation checkpointing to transformer layers
-        model_with_checkpoints = ActivationCheckpointing.apply_to_transformer_layers(
+        checkpoint_manager = ActivationCheckpointing()
+        model_with_checkpoints = checkpoint_manager.apply_to_transformer_layers(
             transformer_model, use_reentrant=True, layer_attr="layers"
         )
 
