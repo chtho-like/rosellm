@@ -11,7 +11,9 @@ import torch.distributed as dist
 
 from rosellm.rosetrainer.parallelism import parallel_state
 from rosellm.rosetrainer.parallelism.parallel_state import (
-    NCCLConfig, ParallelismDimension)
+    NCCLConfig,
+    ParallelismDimension,
+)
 
 
 class TestParallelState:

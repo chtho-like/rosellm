@@ -4,8 +4,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from rosellm.rosetrainer.memory.cpu_offload import (CPUOffloadOptimizer,
-                                                    ParameterOffloader)
+from rosellm.rosetrainer.memory.cpu_offload import (
+    CPUOffloadOptimizer,
+    ParameterOffloader,
+)
 
 
 class SimpleModel(nn.Module):

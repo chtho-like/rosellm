@@ -10,13 +10,15 @@ from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 
 from rosellm.rosetrainer.config import PrecisionType, TrainingConfig
+
 # Import RoseTrainer components with new improvements
 from rosellm.rosetrainer.engine import RoseTrainer
-from rosellm.rosetrainer.memory.activation_checkpoint import \
-    ActivationCheckpointing
+from rosellm.rosetrainer.memory.activation_checkpoint import ActivationCheckpointing
 from rosellm.rosetrainer.memory.mixed_precision import MixedPrecisionManager
-from rosellm.rosetrainer.parallelism import (destroy_model_parallel,
-                                             initialize_model_parallel)
+from rosellm.rosetrainer.parallelism import (
+    destroy_model_parallel,
+    initialize_model_parallel,
+)
 
 
 @contextmanager

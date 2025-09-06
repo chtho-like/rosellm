@@ -3,8 +3,7 @@ import unittest
 import torch
 import torch.nn as nn
 
-from rosellm.rosetrainer.memory.activation_checkpoint import \
-    ActivationCheckpointing
+from rosellm.rosetrainer.memory.activation_checkpoint import ActivationCheckpointing
 
 
 class SimpleTransformerLayer(nn.Module):

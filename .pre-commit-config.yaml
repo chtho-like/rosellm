@@ -29,7 +29,7 @@ repos:
       - id: mypy
         additional_dependencies: [types-requests]
         args: [--ignore-missing-imports]
-        exclude: ^notebooks/
+        exclude: ^(notebooks/|scripts/)
 
   - repo: https://github.com/pycqa/flake8
     rev: 7.0.0

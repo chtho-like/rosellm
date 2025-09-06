@@ -8,8 +8,7 @@ from transformers.models.auto.tokenization_auto import AutoTokenizer
 
 # Import RoseTrainer components
 from rosellm.rosetrainer.engine import RoseTrainer
-from rosellm.rosetrainer.memory.activation_checkpoint import \
-    ActivationCheckpointing
+from rosellm.rosetrainer.memory.activation_checkpoint import ActivationCheckpointing
 
 
 def main():

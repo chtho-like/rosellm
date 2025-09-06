@@ -13,17 +13,19 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 
 from rosellm.rosetrainer import RoseTrainer
-from rosellm.rosetrainer.parallelism import (NCCLConfig,
-                                             get_context_parallel_size,
-                                             get_data_parallel_group,
-                                             get_data_parallel_rank,
-                                             get_data_parallel_size,
-                                             get_pipeline_model_parallel_rank,
-                                             get_pipeline_model_parallel_size,
-                                             get_tensor_model_parallel_rank,
-                                             get_tensor_model_parallel_size,
-                                             initialize_model_parallel,
-                                             set_nccl_config)
+from rosellm.rosetrainer.parallelism import (
+    NCCLConfig,
+    get_context_parallel_size,
+    get_data_parallel_group,
+    get_data_parallel_rank,
+    get_data_parallel_size,
+    get_pipeline_model_parallel_rank,
+    get_pipeline_model_parallel_size,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_size,
+    initialize_model_parallel,
+    set_nccl_config,
+)
 
 
 def setup_multi_dimensional_parallelism():
