@@ -217,8 +217,16 @@ class TrainingConfig(BaseModel):
             if not hasattr(torch, "float8_e4m3fn"):
                 raise ValueError("FP8 not supported in current PyTorch version")
         elif v == PrecisionType.BF16:
-            if not torch.cuda.is_bf16_supported():
+            # Only validate BF16 support when CUDA is available
+            if torch.cuda.is_available() and not torch.cuda.is_bf16_supported():
                 raise ValueError("BF16 not supported on current hardware")
+            elif not torch.cuda.is_available():
+                # On CPU, BF16 can still be used (though may be emulated)
+                import warnings
+                warnings.warn(
+                    "BF16 validation skipped - no CUDA available. "
+                    "BF16 may be emulated on CPU with potential performance impact."
+                )
         return v
 
     def to_dict(self) -> dict:

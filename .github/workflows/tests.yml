@@ -27,7 +27,7 @@ jobs:
     
     - name: Run CPU tests
       run: |
-        pytest tests/ -v --cov=rosellm --cov-report=term-missing
+        pytest tests/ -v --cov=rosellm --cov-report=term-missing -m "not gpu"
 
   cuda-test:
     runs-on: ubuntu-latest

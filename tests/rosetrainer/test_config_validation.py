@@ -11,6 +11,8 @@ Tests the comprehensive validation of TrainingConfig including:
 
 import unittest
 
+import pytest
+import torch
 from pydantic import ValidationError
 
 from rosellm.rosetrainer.config import (
@@ -86,6 +88,22 @@ class TestTrainingConfig(unittest.TestCase):
 
     def test_custom_training_config(self):
         """Test creating TrainingConfig with custom values."""
+        config = TrainingConfig(  # type: ignore[call-arg]
+            batch_size=64,
+            num_epochs=10,
+            precision=PrecisionType.FP32,  # Use FP32 for CPU tests
+        )
+        self.assertEqual(config.batch_size, 64)
+        self.assertEqual(config.num_epochs, 10)
+        self.assertEqual(config.precision, PrecisionType.FP32)
+
+    @pytest.mark.gpu
+    @unittest.skipIf(
+        not torch.cuda.is_available() or not torch.cuda.is_bf16_supported(),
+        "BF16 not supported on current hardware"
+    )
+    def test_custom_training_config_bf16(self):
+        """Test creating TrainingConfig with BF16 precision."""
         config = TrainingConfig(  # type: ignore[call-arg]
             batch_size=64,
             num_epochs=10,
@@ -298,7 +316,13 @@ class TestPrecisionType(unittest.TestCase):
         config = TrainingConfig(precision=PrecisionType.FP16)  # type: ignore[call-arg]
         self.assertEqual(config.precision, PrecisionType.FP16)
 
-        # From string (via dict)
+    @pytest.mark.gpu
+    @unittest.skipIf(
+        not torch.cuda.is_available() or not torch.cuda.is_bf16_supported(),
+        "BF16 not supported on current hardware"
+    )
+    def test_precision_bf16_from_dict(self):
+        """Test BF16 precision from dictionary config."""
         config_dict = {"precision": "bf16"}
         config = TrainingConfig.from_dict(config_dict)
         self.assertEqual(config.precision, PrecisionType.BF16)
