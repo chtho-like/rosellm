@@ -320,7 +320,7 @@ def convert_model_to_fp16(model: nn.Module, keep_norm_fp32: bool = True) -> nn.M
             continue
 
         # Convert parameters to FP16
-        for name, param in module.named_parameters(recurse=False):
+        for _, param in module.named_parameters(recurse=False):
             if param.requires_grad:
                 param.data = param.data.half()
 
@@ -352,7 +352,7 @@ def convert_model_to_bf16(model: nn.Module, keep_norm_fp32: bool = True) -> nn.M
             continue
 
         # Convert parameters to BF16
-        for name, param in module.named_parameters(recurse=False):
+        for _, param in module.named_parameters(recurse=False):
             if param.requires_grad:
                 param.data = param.data.to(torch.bfloat16)
 
