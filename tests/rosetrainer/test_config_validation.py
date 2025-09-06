@@ -74,7 +74,7 @@ class TestTrainingConfig(unittest.TestCase):
 
     def test_default_training_config(self):
         """Test creating TrainingConfig with defaults."""
-        config = TrainingConfig()
+        config = TrainingConfig()  # type: ignore[call-arg]
         self.assertEqual(config.batch_size, 32)
         self.assertEqual(config.num_epochs, 3)
         self.assertIsNone(config.max_steps)
@@ -86,10 +86,9 @@ class TestTrainingConfig(unittest.TestCase):
 
     def test_custom_training_config(self):
         """Test creating TrainingConfig with custom values."""
-        config = TrainingConfig(
+        config = TrainingConfig(  # type: ignore[call-arg]
             batch_size=64,
             num_epochs=10,
-            learning_rate=5e-5,  # Should be ignored now
             precision=PrecisionType.BF16,
         )
         self.assertEqual(config.batch_size, 64)
@@ -99,27 +98,27 @@ class TestTrainingConfig(unittest.TestCase):
     def test_validation_batch_size(self):
         """Test batch size validation."""
         with self.assertRaises(ValidationError):
-            TrainingConfig(batch_size=0)  # Must be >= 1
+            TrainingConfig(batch_size=0)  # type: ignore[call-arg]  # Must be >= 1
 
         with self.assertRaises(ValidationError):
-            TrainingConfig(batch_size=-1)
+            TrainingConfig(batch_size=-1)  # type: ignore[call-arg]
 
     def test_validation_epochs(self):
         """Test epoch validation."""
         with self.assertRaises(ValidationError):
-            TrainingConfig(num_epochs=0)  # Must be >= 1
+            TrainingConfig(num_epochs=0)  # type: ignore[call-arg]  # Must be >= 1
 
     def test_max_steps_epochs_conflict(self):
         """Test that max_steps and num_epochs conflict is handled."""
         # Both specified should raise error
         with self.assertRaises(ValidationError):
-            TrainingConfig(max_steps=1000, num_epochs=3)  # Both specified
+            TrainingConfig(max_steps=1000, num_epochs=3)  # type: ignore[call-arg]  # Both specified
 
         # One or the other should work
-        config1 = TrainingConfig(max_steps=1000)  # Only max_steps
+        config1 = TrainingConfig(max_steps=1000)  # type: ignore[call-arg]  # Only max_steps
         self.assertEqual(config1.max_steps, 1000)
 
-        config2 = TrainingConfig(num_epochs=5)  # Only num_epochs
+        config2 = TrainingConfig(num_epochs=5)  # type: ignore[call-arg]  # Only num_epochs
         self.assertEqual(config2.num_epochs, 5)
 
 
@@ -140,7 +139,7 @@ class TestConfigConversion(unittest.TestCase):
 
     def test_to_dict(self):
         """Test converting config to dictionary."""
-        config = TrainingConfig(batch_size=24)
+        config = TrainingConfig(batch_size=24)  # type: ignore[call-arg]
         config_dict = config.to_dict()
         self.assertIsInstance(config_dict, dict)
         self.assertEqual(config_dict["batch_size"], 24)
@@ -175,7 +174,7 @@ class TestValidateConfig(unittest.TestCase):
 
     def test_validate_training_config(self):
         """Test validating an existing TrainingConfig."""
-        config = TrainingConfig(batch_size=8)
+        config = TrainingConfig(batch_size=8)  # type: ignore[call-arg]
         validated = validate_config(config)
         self.assertIsInstance(validated, TrainingConfig)
         self.assertEqual(validated.batch_size, 8)
@@ -183,12 +182,12 @@ class TestValidateConfig(unittest.TestCase):
     def test_validate_invalid_type(self):
         """Test validation with invalid type."""
         with self.assertRaises(TypeError) as cm:
-            validate_config("not a config")
+            validate_config("not a config")  # type: ignore[arg-type]
         self.assertIn("Config must be dict or TrainingConfig", str(cm.exception))
 
     def test_recursive_validation(self):
         """Test that sub-configs are recursively validated."""
-        config = TrainingConfig()
+        config = TrainingConfig()  # type: ignore[call-arg]
         # Modify a sub-config to test re-validation
         original_lr = config.optimizer.learning_rate
         validated = validate_config(config)
@@ -210,7 +209,7 @@ class TestSubConfigurations(unittest.TestCase):
     def test_optimizer_config_validation(self):
         """Test OptimizerConfig validation."""
         # Valid config
-        config = OptimizerConfig(
+        config = OptimizerConfig(  # type: ignore[call-arg]
             name="adam",
             learning_rate=1e-3,
             weight_decay=0.0,
@@ -220,16 +219,16 @@ class TestSubConfigurations(unittest.TestCase):
 
         # Invalid learning rate
         with self.assertRaises(ValidationError):
-            OptimizerConfig(learning_rate=-1)
+            OptimizerConfig(learning_rate=-1)  # type: ignore[call-arg]
 
         # Invalid weight decay
         with self.assertRaises(ValidationError):
-            OptimizerConfig(weight_decay=2.0)  # Must be <= 1
+            OptimizerConfig(weight_decay=2.0)  # type: ignore[call-arg]  # Must be <= 1
 
     def test_gradient_config_validation(self):
         """Test GradientConfig validation."""
         # Valid config with clipping
-        config = GradientConfig(
+        config = GradientConfig(  # type: ignore[call-arg]
             clip_type=GradientClipType.VALUE,
             clip_value=5.0,
             accumulation_steps=2,
@@ -238,18 +237,18 @@ class TestSubConfigurations(unittest.TestCase):
 
         # Missing clip_value when needed
         with self.assertRaises(ValidationError):
-            GradientConfig(
+            GradientConfig(  # type: ignore[call-arg]
                 clip_type=GradientClipType.NORM,
                 clip_value=None,  # Required when clip_type != NONE
             )
 
         # Invalid accumulation steps
         with self.assertRaises(ValidationError):
-            GradientConfig(accumulation_steps=0)  # Must be >= 1
+            GradientConfig(accumulation_steps=0)  # type: ignore[call-arg]  # Must be >= 1
 
     def test_memory_config_validation(self):
         """Test MemoryConfig validation."""
-        config = MemoryConfig(
+        config = MemoryConfig(  # type: ignore[call-arg]
             activation_checkpointing=True,
             cpu_offload=True,
             zero_optimization_stage=2,
@@ -259,11 +258,11 @@ class TestSubConfigurations(unittest.TestCase):
 
         # Invalid gradient checkpointing ratio
         with self.assertRaises(ValidationError):
-            MemoryConfig(gradient_checkpointing_ratio=1.5)  # Must be <= 1
+            MemoryConfig(gradient_checkpointing_ratio=1.5)  # type: ignore[call-arg]  # Must be <= 1
 
     def test_parallelism_config_validation(self):
         """Test ParallelismConfig validation."""
-        config = ParallelismConfig(
+        config = ParallelismConfig(  # type: ignore[call-arg]
             tensor_parallel_size=2,
             pipeline_parallel_size=4,
             data_parallel_size=8,
@@ -272,10 +271,10 @@ class TestSubConfigurations(unittest.TestCase):
 
         # Power of 2 validation
         with self.assertRaises(ValidationError):
-            ParallelismConfig(tensor_parallel_size=3)  # Not power of 2
+            ParallelismConfig(tensor_parallel_size=3)  # type: ignore[call-arg]  # Not power of 2
 
         # Valid power of 2
-        config2 = ParallelismConfig(
+        config2 = ParallelismConfig(  # type: ignore[call-arg]
             tensor_parallel_size=1,
             pipeline_parallel_size=1,
             data_parallel_size=16,  # Power of 2
@@ -296,7 +295,7 @@ class TestPrecisionType(unittest.TestCase):
 
     def test_precision_in_config(self):
         """Test precision type in config."""
-        config = TrainingConfig(precision=PrecisionType.FP16)
+        config = TrainingConfig(precision=PrecisionType.FP16)  # type: ignore[call-arg]
         self.assertEqual(config.precision, PrecisionType.FP16)
 
         # From string (via dict)
@@ -310,22 +309,22 @@ class TestBetaValidation(unittest.TestCase):
 
     def test_valid_betas(self):
         """Test valid beta values."""
-        config = OptimizerConfig(betas=(0.9, 0.999))
+        config = OptimizerConfig(betas=(0.9, 0.999))  # type: ignore[call-arg]
         self.assertEqual(config.betas, (0.9, 0.999))
 
-        config2 = OptimizerConfig(betas=(0.0, 0.99))
+        config2 = OptimizerConfig(betas=(0.0, 0.99))  # type: ignore[call-arg]
         self.assertEqual(config2.betas, (0.0, 0.99))
 
     def test_invalid_betas(self):
         """Test invalid beta values."""
         with self.assertRaises(ValidationError):
-            OptimizerConfig(betas=(1.0, 0.999))  # beta1 must be < 1
+            OptimizerConfig(betas=(1.0, 0.999))  # type: ignore[call-arg]  # beta1 must be < 1
 
         with self.assertRaises(ValidationError):
-            OptimizerConfig(betas=(0.9, 1.0))  # beta2 must be < 1
+            OptimizerConfig(betas=(0.9, 1.0))  # type: ignore[call-arg]  # beta2 must be < 1
 
         with self.assertRaises(ValidationError):
-            OptimizerConfig(betas=(-0.1, 0.999))  # beta1 must be >= 0
+            OptimizerConfig(betas=(-0.1, 0.999))  # type: ignore[call-arg]  # beta1 must be >= 0
 
 
 if __name__ == "__main__":

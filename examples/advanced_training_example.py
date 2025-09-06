@@ -37,7 +37,7 @@ def main():
     print("1. Creating validated configuration with Pydantic")
     print("=" * 60)
 
-    config = TrainingConfig(
+    config = TrainingConfig(  # type: ignore[call-arg]
         # Basic parameters
         batch_size=4,
         num_epochs=1,
