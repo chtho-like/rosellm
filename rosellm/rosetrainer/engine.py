@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 
 from .config import TrainingConfig, validate_config
+from .scheduler import OptimizerParamScheduler
 
 # References:
 # [1] Shoeybi, M. et al. "Megatron-LM: Training Multi-Billion Parameter Language Models
@@ -86,6 +87,29 @@ class RoseTrainer:
         # Gradient clipping configuration from validated config
         self.grad_clip_type = self.config.gradient.clip_type
         self.grad_clip_value = self.config.gradient.clip_value
+
+        # Initialize scheduler if enabled
+        self.scheduler = None
+        if self.config.scheduler.enabled:
+            self.scheduler = OptimizerParamScheduler(
+                optimizer=self.optimizer,
+                init_lr=self.config.scheduler.init_lr,
+                max_lr=self.config.scheduler.max_lr,
+                min_lr=self.config.scheduler.min_lr,
+                lr_warmup_steps=self.config.scheduler.lr_warmup_steps,
+                lr_decay_steps=self.config.scheduler.lr_decay_steps,
+                lr_decay_style=self.config.scheduler.lr_decay_style,
+                start_wd=self.config.scheduler.start_wd,
+                end_wd=self.config.scheduler.end_wd,
+                wd_incr_steps=self.config.scheduler.wd_incr_steps,
+                wd_incr_style=self.config.scheduler.wd_incr_style,
+                wsd_decay_steps=self.config.scheduler.wsd_decay_steps,
+                lr_wsd_decay_style=self.config.scheduler.lr_wsd_decay_style,
+            )
+            logger.info(
+                f"Initialized learning rate scheduler with "
+                f"{self.config.scheduler.lr_decay_style} decay"
+            )
 
         # Initialize distributed training
         self.local_rank = (
@@ -245,6 +269,10 @@ class RoseTrainer:
         # Update parameters
         self.optimizer.step()
 
+        # Step the scheduler if enabled
+        if self.scheduler is not None:
+            self.scheduler.step()
+
         # Reduce loss across devices if distributed
         loss_item = loss.item()
         if self.distributed:
@@ -287,6 +315,10 @@ class RoseTrainer:
                 }
             )
 
+        # Add current learning rate to metrics if scheduler is enabled
+        if self.scheduler is not None:
+            metrics["learning_rate"] = self.scheduler.get_lr()
+
         return metrics
 
     def save_checkpoint(self, filepath: str, compute_checksum: bool = True) -> None:
@@ -309,10 +341,16 @@ class RoseTrainer:
             "performance_stats": self.performance_stats,
         }
 
+        # Save scheduler state if enabled
+        if self.scheduler is not None:
+            checkpoint["scheduler"] = self.scheduler.state_dict()
+
         # Add checksum for validation
         if compute_checksum:
-            checkpoint_bytes = str(checkpoint).encode("utf-8")
-            checkpoint["checksum"] = hashlib.sha256(checkpoint_bytes).hexdigest()
+            checkpoint_str = str(checkpoint)
+            checkpoint_bytes = checkpoint_str.encode("utf-8")
+            checksum = hashlib.sha256(checkpoint_bytes).hexdigest()
+            checkpoint["checksum"] = checksum  # type: ignore[assignment]
 
         # Only save on rank 0 to avoid file conflicts
         if not self.distributed or self.local_rank == 0:
@@ -344,6 +382,11 @@ class RoseTrainer:
 
         model_to_load.load_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
+
+        # Load scheduler state if present and scheduler is enabled
+        if "scheduler" in checkpoint and self.scheduler is not None:
+            self.scheduler.load_state_dict(checkpoint["scheduler"])
+            logger.info("Loaded scheduler state from checkpoint")
 
         # Update config with loaded config
         if "config" in checkpoint:
@@ -395,7 +438,7 @@ class RoseTrainer:
 
     def get_performance_report(self) -> Dict[str, Any]:
         """Get comprehensive performance report."""
-        return {
+        report = {
             "performance": self.performance_stats.copy(),
             "memory": self.memory_stats.copy(),
             "config": {
@@ -409,3 +452,26 @@ class RoseTrainer:
                 "world_size": self.world_size,
             },
         }
+
+        # Add scheduler info if enabled
+        if self.scheduler is not None:
+            report["scheduler"] = {
+                "current_lr": self.scheduler.get_lr(),
+                "current_wd": self.scheduler.get_wd(),
+                "num_steps": self.scheduler.num_steps,
+                "decay_style": self.config.scheduler.lr_decay_style,
+            }
+
+        return report
+
+    def get_current_lr(self) -> float:
+        """Get current learning rate from scheduler or optimizer.
+
+        Returns:
+            Current learning rate
+        """
+        if self.scheduler is not None:
+            return self.scheduler.get_lr()
+        else:
+            # Return the first param group's lr from optimizer
+            return float(self.optimizer.param_groups[0]["lr"])

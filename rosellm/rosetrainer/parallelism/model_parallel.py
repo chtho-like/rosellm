@@ -78,7 +78,7 @@ class TensorParallelism:
             tp_groups.append(dist.new_group(ranks=ranks_in_group))
 
         # Return the TP group for this rank
-        return tp_groups[tp_group_id]
+        return tp_groups[tp_group_id]  # type: ignore[no-any-return]
 
     def split_tensor(self, tensor: torch.Tensor, dim: int = 0) -> torch.Tensor:
         """
@@ -126,11 +126,11 @@ class TensorParallelism:
         dist.all_gather(sizes, local_size, group=self.tp_group)
 
         # Convert sizes to integers
-        sizes = [int(size.item()) for size in sizes]
+        sizes_int = [int(size.item()) for size in sizes]
 
         # All-gather tensors
         tensors = []
-        for size in sizes:
+        for size in sizes_int:
             # Create shape dynamically
             shape = list(tensor.shape)
             shape[dim] = size

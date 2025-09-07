@@ -406,4 +406,4 @@ class ActivationCheckpointing:
 
     def get_profiling_report(self) -> Dict[str, Any]:
         """Get memory profiling report."""
-        return self.profiler.get_memory_report()
+        return self.profiler.get_memory_report()  # type: ignore[no-any-return]

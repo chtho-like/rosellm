@@ -205,7 +205,7 @@ class ZeROStateDict:
         state_dict["zero_local_rank"] = optimizer.local_rank
         state_dict["zero_world_size"] = optimizer.world_size
 
-        return state_dict
+        return state_dict  # type: ignore[no-any-return]
 
     @staticmethod
     def load_optimizer_state(

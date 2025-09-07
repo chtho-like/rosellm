@@ -55,6 +55,11 @@ lint:
 	black --check rosellm/ tests/
 	isort --check-only rosellm/ tests/
 
+tlp: test lint pre-commit
+
+pre-commit:
+	pre-commit run --all-files
+
 # Auto-format code
 format:
 	black rosellm/ tests/ examples/

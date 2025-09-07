@@ -133,7 +133,7 @@ class CPUOffloadOptimizer:
         if self.offload_params:
             self._offload_parameters()
 
-        return loss
+        return loss  # type: ignore[no-any-return]
 
     def _sync_gradients_to_parameters(self) -> None:
         """Ensure gradients are on the same device as their parameters."""
@@ -190,7 +190,7 @@ class CPUOffloadOptimizer:
         }
         state_dict["pin_memory"] = self.pin_memory
         state_dict["offload_params"] = self.offload_params
-        return state_dict
+        return state_dict  # type: ignore[no-any-return]
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         """
