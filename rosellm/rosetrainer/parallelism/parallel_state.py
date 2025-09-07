@@ -700,6 +700,8 @@ def destroy_model_parallel() -> None:
             return
 
         # Destroy all process groups
+        # Note: _SEQUENCE_PARALLEL_GROUP may alias _TENSOR_MODEL_PARALLEL_GROUP,
+        # so we need to deduplicate to avoid destroying the same group twice
         groups = [
             _TENSOR_MODEL_PARALLEL_GROUP,
             _PIPELINE_MODEL_PARALLEL_GROUP,
@@ -712,9 +714,12 @@ def destroy_model_parallel() -> None:
             _SEQUENCE_PARALLEL_GROUP,
         ]
 
+        # Use a set to track already destroyed groups to avoid double-destroy
+        destroyed_groups = set()
         for group in groups:
-            if group is not None:
+            if group is not None and id(group) not in destroyed_groups:
                 dist.destroy_process_group(group)
+                destroyed_groups.add(id(group))
 
         # Reset all variables
         _TENSOR_MODEL_PARALLEL_GROUP = None

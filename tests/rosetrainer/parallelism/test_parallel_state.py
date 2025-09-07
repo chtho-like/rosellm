@@ -273,6 +273,88 @@ class TestParallelState:
         assert parallel_state.get_pipeline_model_parallel_group() is None
         assert parallel_state.get_data_parallel_group() is None
 
+    @patch("torch.distributed.is_initialized")
+    @patch("torch.distributed.get_world_size")
+    @patch("torch.distributed.get_rank")
+    @patch("torch.distributed.new_group")
+    @patch("torch.distributed.destroy_process_group")
+    def test_destroy_with_sequence_parallel_aliasing(
+        self,
+        mock_destroy_group,
+        mock_new_group,
+        mock_get_rank,
+        mock_get_world_size,
+        mock_is_initialized,
+    ):
+        """Test that destroy handles sequence parallel group aliasing correctly.
+
+        When sequence parallelism is enabled, _SEQUENCE_PARALLEL_GROUP aliases
+        _TENSOR_MODEL_PARALLEL_GROUP. The destroy function should handle this
+        without attempting to destroy the same group twice.
+        """
+        mock_is_initialized.return_value = True
+        mock_get_world_size.return_value = 8
+        mock_get_rank.return_value = 0
+
+        # Create a simple mock that returns a unique group for each call
+        # but keep track of specific groups we care about
+        tp_group = MagicMock(name="tp_group")
+        groups_created = []
+
+        def new_group_side_effect(ranks):
+            # First group containing rank 0 with size 4 is the TP group
+            if 0 in ranks and len(ranks) == 4 and not groups_created:
+                groups_created.append(tp_group)
+                return tp_group
+            else:
+                # Return a unique mock for each other group
+                new_mock = MagicMock(name=f"group_{len(groups_created)}")
+                groups_created.append(new_mock)
+                return new_mock
+
+        mock_new_group.side_effect = new_group_side_effect
+
+        # Initialize with sequence parallelism enabled (requires tp_size > 1)
+        parallel_state.initialize_model_parallel(
+            tensor_model_parallel_size=2,
+            pipeline_model_parallel_size=2,
+            data_parallel_size=2,
+            sequence_parallel_enabled=True,  # Makes SP alias TP group
+        )
+
+        # Verify sequence parallel group is the same as tensor parallel group
+        sp_group = parallel_state.get_sequence_parallel_group()
+        tp_group_actual = parallel_state.get_tensor_model_parallel_group()
+        assert (
+            sp_group is tp_group_actual
+        ), "Sequence parallel should alias tensor parallel group"
+
+        # Reset mock to track destroy calls
+        mock_destroy_group.reset_mock()
+
+        # Destroy parallel state
+        parallel_state.destroy_model_parallel()
+
+        # Get the destroyed groups
+        destroy_calls = mock_destroy_group.call_args_list
+        destroyed_groups = [c[0][0] for c in destroy_calls]
+
+        # Check that no group was destroyed more than once
+        # This is the key test - if deduplication works, each group appears only once
+        destroyed_group_ids = [id(g) for g in destroyed_groups]
+        unique_destroyed_ids = set(destroyed_group_ids)
+
+        assert len(destroyed_group_ids) == len(unique_destroyed_ids), (
+            f"Some groups were destroyed multiple times. "
+            f"Total: {len(destroyed_group_ids)}, Unique: {len(unique_destroyed_ids)}"
+        )
+
+        # Specifically check that the aliased group (tp_group) was only destroyed once
+        tp_destroy_count = sum(1 for g in destroyed_groups if g is tp_group_actual)
+        assert (
+            tp_destroy_count <= 1
+        ), f"TP/SP group destroyed {tp_destroy_count} times, expected <= 1"
+
     def test_parallelism_dimension_enum(self):
         """Test ParallelismDimension enum"""
         assert ParallelismDimension.TENSOR.value == "tp"
