@@ -58,9 +58,15 @@ HISTOGRAM_BINS = 50
 MAX_GRADIENT_VALUE = 1e10
 MIN_GRADIENT_VALUE = -1e10
 
-# Thread-safe counter for gradient accumulation
-_accumulation_counter_lock = threading.Lock()
-_accumulation_counters: Dict[int, int] = {}
+# Thread-local storage for gradient accumulation to avoid race conditions
+_thread_local_data = threading.local()
+
+
+def _get_accumulation_counters() -> Dict[int, int]:
+    """Get thread-local accumulation counters."""
+    if not hasattr(_thread_local_data, "accumulation_counters"):
+        _thread_local_data.accumulation_counters = {}
+    return _thread_local_data.accumulation_counters  # type: ignore[no-any-return]
 
 
 class ClipType(str, Enum):
@@ -823,18 +829,16 @@ def gradient_accumulation_context(
         ...             optimizer.step()
         ...             optimizer.zero_grad()
     """
-    global _accumulation_counters
-
-    # Use model id as key for thread-safe counter management
+    # Use model id as key with thread-local storage
     model_id = id(model)
+    counters = _get_accumulation_counters()
 
-    with _accumulation_counter_lock:
-        if model_id not in _accumulation_counters:
-            _accumulation_counters[model_id] = 0
+    if model_id not in counters:
+        counters[model_id] = 0
 
-        step = _accumulation_counters[model_id]
-        is_last_step = (step + 1) % accumulation_steps == 0
-        _accumulation_counters[model_id] = (step + 1) % accumulation_steps
+    step = counters[model_id]
+    is_last_step = (step + 1) % accumulation_steps == 0
+    counters[model_id] = (step + 1) % accumulation_steps
 
     # Disable gradient synchronization if not the last step
     if sync_on_last_step and not is_last_step:
@@ -1031,7 +1035,7 @@ def get_gradient_stats(
                     "values": hist_values.cpu().numpy().tolist(),
                     "bins": hist_bins.cpu().numpy().tolist(),
                 }
-                stats["histogram"] = histogram_data  # type: ignore
+                stats["histogram"] = histogram_data
             except Exception as e:
                 logger.warning(f"Failed to compute gradient histogram: {e}")
 

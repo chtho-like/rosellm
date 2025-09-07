@@ -218,27 +218,27 @@ class TestDynamicGradScaler(unittest.TestCase):
     def test_parameter_validation(self):
         """Test that invalid parameters raise errors."""
         # Negative initial scale
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             DynamicGradScaler(initial_scale=-1.0)
 
         # Min scale > initial scale
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             DynamicGradScaler(initial_scale=10.0, min_scale=20.0)
 
         # Growth factor <= 1
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             DynamicGradScaler(initial_scale=10.0, growth_factor=0.5)
 
         # Backoff factor out of range
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             DynamicGradScaler(initial_scale=10.0, backoff_factor=1.5)
 
         # Negative growth interval
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             DynamicGradScaler(initial_scale=10.0, growth_interval=-1)
 
         # Zero hysteresis
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             DynamicGradScaler(initial_scale=10.0, hysteresis=0)
 
 

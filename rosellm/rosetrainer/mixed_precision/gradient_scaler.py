@@ -41,9 +41,14 @@ class AbstractGradScaler(ABC):
         Raises:
             AssertionError: If initial_scale is not positive
         """
-        assert (
-            initial_scale > 0.0
-        ), f"initial_scale must be positive, got {initial_scale}"
+        # Bounds checking for numerical stability
+        if not (1e-10 <= initial_scale <= 1e10):
+            raise ValueError(
+                f"initial_scale must be in range [1e-10, 1e10] "
+                f"for numerical stability, got {initial_scale}"
+            )
+        if initial_scale <= 0.0:
+            raise ValueError(f"initial_scale must be positive, got {initial_scale}")
 
         # Auto-detect device if not specified
         if device is None:
@@ -161,7 +166,15 @@ class ConstantGradScaler(AbstractGradScaler):
         Args:
             state_dict: State dictionary containing 'scale' key
         """
-        self._scale = state_dict["scale"].to(self._device)
+        loaded_scale = state_dict["scale"]
+        # Ensure tensor is on the correct device
+        if hasattr(loaded_scale, "device") and loaded_scale.device != self._device:
+            loaded_scale = loaded_scale.to(self._device)
+        # Verify the tensor is valid
+        assert torch.isfinite(
+            loaded_scale
+        ).all(), "Loaded scale contains non-finite values"
+        self._scale = loaded_scale
 
 
 class DynamicGradScaler(AbstractGradScaler):
@@ -201,18 +214,25 @@ class DynamicGradScaler(AbstractGradScaler):
         """
         super().__init__(initial_scale, device)
 
-        # Validation
-        assert (
-            min_scale > 0.0 and min_scale <= initial_scale
-        ), f"min_scale must be positive and <= initial_scale, got {min_scale}"
-        assert growth_factor > 1.0, f"growth_factor must be > 1.0, got {growth_factor}"
-        assert (
-            0.0 < backoff_factor < 1.0
-        ), f"backoff_factor must be in (0, 1), got {backoff_factor}"
-        assert (
-            growth_interval > 0
-        ), f"growth_interval must be positive, got {growth_interval}"
-        assert hysteresis > 0, f"hysteresis must be positive, got {hysteresis}"
+        # Validation with consistent error messages
+        if not (1e-10 <= min_scale <= initial_scale):
+            raise ValueError(
+                f"min_scale must be in range [1e-10, {initial_scale}], got {min_scale}"
+            )
+        if not (1.0 < growth_factor <= 10.0):
+            raise ValueError(
+                f"growth_factor must be in range (1.0, 10.0], got {growth_factor}"
+            )
+        if not (0.1 <= backoff_factor < 1.0):
+            raise ValueError(
+                f"backoff_factor must be in range [0.1, 1.0), got {backoff_factor}"
+            )
+        if not (1 <= growth_interval <= 100000):
+            raise ValueError(
+                f"growth_interval must be in range [1, 100000], got {growth_interval}"
+            )
+        if not (1 <= hysteresis <= 100):
+            raise ValueError(f"hysteresis must be in range [1, 100], got {hysteresis}")
 
         # Scale bounds and factors - use self._device from parent class
         self.min_scale = torch.tensor(
@@ -295,9 +315,21 @@ class DynamicGradScaler(AbstractGradScaler):
         Args:
             state_dict: State dictionary with scale and tracker values
         """
-        self._scale = state_dict["scale"].to(self._device)
-        self._growth_tracker = state_dict["growth_tracker"]
-        self._hysteresis_tracker = state_dict["hysteresis_tracker"]
+        loaded_scale = state_dict["scale"]
+        # Ensure tensor is on the correct device
+        if hasattr(loaded_scale, "device") and loaded_scale.device != self._device:
+            loaded_scale = loaded_scale.to(self._device)
+        # Verify the tensor is valid
+        assert torch.isfinite(
+            loaded_scale
+        ).all(), "Loaded scale contains non-finite values"
+        self._scale = loaded_scale
+
+        # Validate tracker values
+        self._growth_tracker = int(state_dict["growth_tracker"])
+        self._hysteresis_tracker = int(state_dict["hysteresis_tracker"])
+        assert self._growth_tracker >= 0, "Invalid growth_tracker value"
+        assert self._hysteresis_tracker > 0, "Invalid hysteresis_tracker value"
 
 
 @dataclass
