@@ -457,9 +457,9 @@ def train_step(
         throughput_samples_per_sec=throughput,
         memory_allocated_gb=memory_stats["allocated_gb"],
         memory_reserved_gb=memory_stats["reserved_gb"],
-        grad_norm=grad_norm.item()
-        if isinstance(grad_norm, torch.Tensor)
-        else grad_norm,
+        grad_norm=(
+            grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+        ),
     )
 
 

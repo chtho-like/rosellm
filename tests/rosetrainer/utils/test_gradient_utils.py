@@ -246,6 +246,63 @@ class TestGradientNormCalculation(unittest.TestCase):
         )
 
 
+class TestCustomScalerIntegration(unittest.TestCase):
+    """Test integration with custom gradient scalers."""
+
+    def test_check_for_inf_and_nan_with_custom_scaler(self):
+        """Test that custom scalers are properly recognized and updated."""
+        from rosellm.rosetrainer.mixed_precision.gradient_scaler import (
+            DynamicGradScaler,
+        )
+        from rosellm.rosetrainer.utils.gradient_utils import (
+            check_for_inf_and_nan_with_scaler,
+        )
+
+        # Create a simple model with gradients
+        model = SimpleModel()
+        x = torch.randn(4, 10, device=model.linear1.weight.device)
+        y = model(x)
+        loss = y.sum()
+        loss.backward()
+
+        # Create custom scaler with hysteresis=1 for simpler testing
+        scaler = DynamicGradScaler(
+            initial_scale=1024.0,
+            growth_factor=2.0,
+            backoff_factor=0.5,
+            growth_interval=100,
+            hysteresis=1,  # Set to 1 so scale backs off immediately on overflow
+            device=str(model.linear1.weight.device),
+        )
+
+        # Initial scale
+        initial_scale = float(scaler.scale)
+
+        # Check for inf/nan (should find none and update scaler)
+        found_inf = check_for_inf_and_nan_with_scaler(model, scaler)
+
+        self.assertFalse(found_inf, "Should not find inf/nan in normal gradients")
+
+        # Verify scaler was updated (growth tracker should be incremented)
+        self.assertEqual(scaler._growth_tracker, 1)
+
+        # Create inf gradient
+        assert model.linear1.weight.grad is not None
+        model.linear1.weight.grad[0, 0] = float("inf")
+
+        # Check again (should find inf and update scaler)
+        found_inf = check_for_inf_and_nan_with_scaler(model, scaler)
+
+        self.assertTrue(found_inf, "Should find inf in gradients")
+
+        # Verify scaler was updated (scale should be reduced)
+        new_scale = float(scaler.scale)
+        self.assertLess(
+            new_scale, initial_scale, "Scale should be reduced after inf detected"
+        )
+        self.assertEqual(scaler._growth_tracker, 0, "Growth tracker should reset")
+
+
 class TestGradientClipping(unittest.TestCase):
     """Test gradient clipping functionality."""
 
