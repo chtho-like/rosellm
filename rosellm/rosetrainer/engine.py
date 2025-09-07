@@ -56,7 +56,7 @@ class RoseTrainer:
         config: Union[Dict[str, Any], TrainingConfig],
         local_rank: Optional[int] = None,
         world_size: Optional[int] = None,
-    ):
+    ) -> None:
         """
         Initialize the RoseTrainer.
 

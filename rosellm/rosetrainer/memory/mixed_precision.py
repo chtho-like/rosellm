@@ -37,7 +37,7 @@ class DynamicLossScaler:
         scale_window: int = 2000,
         min_scale: float = 1.0,
         max_scale: float = 2**24,
-    ):
+    ) -> None:
         """
         Initialize the dynamic loss scaler.
 
@@ -133,7 +133,7 @@ class MixedPrecisionManager:
         backoff_factor: float = 0.5,
         growth_interval: int = 2000,
         enabled: bool = True,
-    ):
+    ) -> None:
         """
         Initialize the mixed precision manager.
 

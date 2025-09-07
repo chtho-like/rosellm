@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 class MemoryProfiler:
     """Memory profiling utilities for activation checkpointing."""
 
-    def __init__(self):
-        self.memory_stats = {
+    def __init__(self) -> None:
+        self.memory_stats: Dict[str, Dict[str, Any]] = {
             "before_checkpoint": {},
             "after_checkpoint": {},
             "memory_saved": {},
@@ -100,7 +100,7 @@ class ActivationCheckpointing:
     recomputing forward activations during the backward pass.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.profiler = MemoryProfiler()
         self.profiling_enabled = False
 

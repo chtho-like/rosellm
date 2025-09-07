@@ -98,6 +98,10 @@ _NCCL_CONFIG: Optional[NCCLConfig] = None
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_SIZE: Optional[int] = None
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK: Optional[int] = None
 
+# Sequence parallel settings
+_SEQUENCE_PARALLEL_ENABLED: bool = False
+_SEQUENCE_PARALLEL_GROUP: Optional[dist.ProcessGroup] = None  # Same as TP group
+
 
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
@@ -106,6 +110,7 @@ def initialize_model_parallel(
     expert_model_parallel_size: int = 1,
     data_parallel_size: Optional[int] = None,
     virtual_pipeline_model_parallel_size: Optional[int] = None,
+    sequence_parallel_enabled: bool = False,
     order: str = "tp-cp-ep-dp-pp",
     hierarchical_context_parallel_sizes: Optional[List[int]] = None,
     nccl_config: Optional[NCCLConfig] = None,
@@ -121,6 +126,7 @@ def initialize_model_parallel(
         expert_model_parallel_size: Size of expert parallel group for MoE
         data_parallel_size: Size of data parallel group (auto-calculated if None)
         virtual_pipeline_model_parallel_size: Number of virtual pipeline stages
+        sequence_parallel_enabled: Enable sequence parallelism (requires TP > 1)
         order: Order of parallelism dimensions (e.g., "tp-cp-ep-dp-pp")
         hierarchical_context_parallel_sizes: Nested context parallel group sizes
         nccl_config: NCCL optimization configuration
@@ -130,6 +136,7 @@ def initialize_model_parallel(
     global _TENSOR_MODEL_PARALLEL_SIZE, _PIPELINE_MODEL_PARALLEL_SIZE
     global _DATA_PARALLEL_SIZE, _CONTEXT_PARALLEL_SIZE, _EXPERT_MODEL_PARALLEL_SIZE
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_SIZE, _NCCL_CONFIG
+    global _SEQUENCE_PARALLEL_ENABLED, _SEQUENCE_PARALLEL_GROUP
 
     with _STATE_LOCK:  # Thread-safe initialization
         if _INITIALIZED:
@@ -178,6 +185,15 @@ def initialize_model_parallel(
 
     # Store NCCL configuration
     _NCCL_CONFIG = nccl_config or NCCLConfig()
+
+    # Enable sequence parallelism if requested and TP > 1
+    _SEQUENCE_PARALLEL_ENABLED = (
+        sequence_parallel_enabled and tensor_model_parallel_size > 1
+    )
+    if sequence_parallel_enabled and tensor_model_parallel_size == 1:
+        warnings.warn(
+            "Sequence parallelism requires tensor_model_parallel_size > 1, disabling SP"
+        )
 
     # Create process groups based on specified order
     _create_parallel_groups(order, hierarchical_context_parallel_sizes)
@@ -351,6 +367,10 @@ def _create_dimension_groups(rank_groups: Dict[str, List[List[int]]]) -> None:
     # Create tensor parallel group
     if "tp" in rank_groups and _TENSOR_MODEL_PARALLEL_SIZE > 1:
         _TENSOR_MODEL_PARALLEL_GROUP = create_group_with_rank(rank_groups["tp"])
+
+        # Sequence parallel uses the same group as tensor parallel
+        global _SEQUENCE_PARALLEL_GROUP
+        _SEQUENCE_PARALLEL_GROUP = _TENSOR_MODEL_PARALLEL_GROUP
 
     # Create pipeline parallel group
     if "pp" in rank_groups and _PIPELINE_MODEL_PARALLEL_SIZE > 1:
@@ -673,13 +693,15 @@ def destroy_model_parallel() -> None:
     global _INITIALIZED, _TENSOR_MODEL_PARALLEL_GROUP, _PIPELINE_MODEL_PARALLEL_GROUP
     global _DATA_PARALLEL_GROUP, _CONTEXT_PARALLEL_GROUP, _EXPERT_MODEL_PARALLEL_GROUP
     global _TENSOR_AND_DATA_PARALLEL_GROUP, _TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP
-    global _MODEL_PARALLEL_GROUP
+    global _MODEL_PARALLEL_GROUP, _SEQUENCE_PARALLEL_GROUP, _SEQUENCE_PARALLEL_ENABLED
 
     with _STATE_LOCK:
         if not _INITIALIZED:
             return
 
         # Destroy all process groups
+        # Note: _SEQUENCE_PARALLEL_GROUP may alias _TENSOR_MODEL_PARALLEL_GROUP,
+        # so we need to deduplicate to avoid destroying the same group twice
         groups = [
             _TENSOR_MODEL_PARALLEL_GROUP,
             _PIPELINE_MODEL_PARALLEL_GROUP,
@@ -689,11 +711,15 @@ def destroy_model_parallel() -> None:
             _TENSOR_AND_DATA_PARALLEL_GROUP,
             _TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP,
             _MODEL_PARALLEL_GROUP,
+            _SEQUENCE_PARALLEL_GROUP,
         ]
 
+        # Use a set to track already destroyed groups to avoid double-destroy
+        destroyed_groups = set()
         for group in groups:
-            if group is not None:
+            if group is not None and id(group) not in destroyed_groups:
                 dist.destroy_process_group(group)
+                destroyed_groups.add(id(group))
 
         # Reset all variables
         _TENSOR_MODEL_PARALLEL_GROUP = None
@@ -704,6 +730,8 @@ def destroy_model_parallel() -> None:
         _TENSOR_AND_DATA_PARALLEL_GROUP = None
         _TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP = None
         _MODEL_PARALLEL_GROUP = None
+        _SEQUENCE_PARALLEL_GROUP = None
+        _SEQUENCE_PARALLEL_ENABLED = False
 
         _INITIALIZED = False
 
@@ -723,3 +751,44 @@ def set_virtual_pipeline_model_parallel_rank(rank: int) -> None:
 def get_virtual_pipeline_model_parallel_size() -> Optional[int]:
     """Get virtual pipeline model parallel size."""
     return _VIRTUAL_PIPELINE_MODEL_PARALLEL_SIZE
+
+
+def is_sequence_parallel_enabled() -> bool:
+    """Check if sequence parallelism is enabled."""
+    return _SEQUENCE_PARALLEL_ENABLED
+
+
+def get_sequence_parallel_group() -> Optional[dist.ProcessGroup]:
+    """Get sequence parallel process group (same as TP group)."""
+    return _SEQUENCE_PARALLEL_GROUP
+
+
+def get_sequence_parallel_world_size() -> int:
+    """Get the world size for sequence parallelism (same as TP size)."""
+    return get_tensor_model_parallel_size()
+
+
+def get_sequence_parallel_rank() -> int:
+    """Get the rank for sequence parallelism (same as TP rank)."""
+    return get_tensor_model_parallel_rank()
+
+
+def enable_sequence_parallel() -> None:
+    """Enable sequence parallelism (must be called after initialization)."""
+    global _SEQUENCE_PARALLEL_ENABLED, _SEQUENCE_PARALLEL_GROUP
+    with _STATE_LOCK:
+        if not _INITIALIZED:
+            raise RuntimeError("Parallel state must be initialized first")
+        if _TENSOR_MODEL_PARALLEL_SIZE <= 1:
+            raise RuntimeError(
+                "Sequence parallelism requires tensor_model_parallel_size > 1"
+            )
+        _SEQUENCE_PARALLEL_ENABLED = True
+        _SEQUENCE_PARALLEL_GROUP = _TENSOR_MODEL_PARALLEL_GROUP
+
+
+def disable_sequence_parallel() -> None:
+    """Disable sequence parallelism."""
+    global _SEQUENCE_PARALLEL_ENABLED
+    with _STATE_LOCK:
+        _SEQUENCE_PARALLEL_ENABLED = False

@@ -28,7 +28,7 @@ class PipelineStage(Enum):
 class MicrobatchInfo:
     """Class to track microbatch state in the pipeline."""
 
-    def __init__(self, id: int, batch_size: int):
+    def __init__(self, id: int, batch_size: int) -> None:
         """
         Initialize microbatch info.
 
@@ -59,7 +59,7 @@ class PipelineParallel:
         num_microbatches: int,
         pp_size: int,
         pp_group: Optional[dist.ProcessGroup] = None,
-    ):
+    ) -> None:
         """
         Initialize the pipeline parallel manager.
 
