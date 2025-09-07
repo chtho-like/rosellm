@@ -272,7 +272,7 @@ class TestCustomScalerIntegration(unittest.TestCase):
             backoff_factor=0.5,
             growth_interval=100,
             hysteresis=1,  # Set to 1 so scale backs off immediately on overflow
-            device=model.linear1.weight.device,
+            device=str(model.linear1.weight.device),
         )
 
         # Initial scale
@@ -287,6 +287,7 @@ class TestCustomScalerIntegration(unittest.TestCase):
         self.assertEqual(scaler._growth_tracker, 1)
 
         # Create inf gradient
+        assert model.linear1.weight.grad is not None
         model.linear1.weight.grad[0, 0] = float("inf")
 
         # Check again (should find inf and update scaler)

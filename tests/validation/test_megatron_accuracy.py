@@ -39,7 +39,7 @@ class ReferenceGradientUtils:
 
     @staticmethod
     def calculate_grad_norm_pytorch(
-        parameters: Union[List[torch.Tensor], nn.Module],
+        parameters: Union[List[torch.nn.Parameter], nn.Module],
         norm_type: float = 2.0,
     ) -> torch.Tensor:
         """Calculate gradient norm using PyTorch's native implementation."""
@@ -71,7 +71,7 @@ class ReferenceGradientUtils:
 
     @staticmethod
     def clip_grad_norm_pytorch(
-        parameters: Union[List[torch.Tensor], nn.Module],
+        parameters: Union[List[torch.nn.Parameter], nn.Module],
         max_norm: float,
         norm_type: float = 2.0,
     ) -> float:
@@ -87,7 +87,7 @@ class ReferenceGradientUtils:
 
     @staticmethod
     def clip_grad_value_pytorch(
-        parameters: Union[List[torch.Tensor], nn.Module],
+        parameters: Union[List[torch.nn.Parameter], nn.Module],
         clip_value: float,
     ) -> None:
         """Gradient value clipping using PyTorch's native implementation."""
@@ -115,7 +115,7 @@ class TestModel(nn.Module):
         if hidden_sizes is None:
             hidden_sizes = [256, 512, 256]
 
-        layers = []
+        layers: List[nn.Module] = []
         prev_size = input_size
 
         for hidden_size in hidden_sizes:
