@@ -6,7 +6,7 @@ and automatic validation of training parameters.
 """
 
 from enum import Enum
-from typing import Literal, Optional, Union
+from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -52,7 +52,7 @@ class OptimizerConfig(BaseModel):
         DEFAULT_LEARNING_RATE, gt=0, le=1.0, description="Learning rate"
     )
     weight_decay: float = Field(DEFAULT_WEIGHT_DECAY, ge=0, le=1.0)
-    betas: tuple[float, float] = (0.9, 0.999)
+    betas: Tuple[float, float] = (0.9, 0.999)
     eps: float = Field(1e-8, gt=0)
 
     @field_validator("betas")
@@ -115,6 +115,79 @@ class ParallelismConfig(BaseModel):
         return v
 
 
+class SchedulerConfig(BaseModel):
+    """Learning rate and weight decay scheduler configuration."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    # Enable scheduler
+    enabled: bool = Field(True, description="Enable learning rate scheduling")
+
+    # Learning rate bounds
+    init_lr: float = Field(0.0, ge=0, description="Initial LR for warmup start")
+    max_lr: float = Field(1e-3, gt=0, description="Maximum LR after warmup")
+    min_lr: float = Field(1e-5, ge=0, description="Minimum LR after decay")
+
+    # Warmup and decay steps
+    lr_warmup_steps: int = Field(0, ge=0, description="Number of warmup steps")
+    lr_decay_steps: int = Field(1000, ge=1, description="Total decay steps")
+    lr_decay_style: Literal[
+        "linear", "cosine", "inverse-square-root", "WSD", "constant"
+    ] = Field("linear", description="Learning rate decay style")
+
+    # Weight decay scheduling
+    start_wd: float = Field(0.0, ge=0, description="Initial weight decay")
+    end_wd: float = Field(0.0, ge=0, description="Final weight decay")
+    wd_incr_steps: int = Field(0, ge=0, description="Weight decay increment steps")
+    wd_incr_style: Literal["linear", "cosine", "constant"] = Field(
+        "constant", description="Weight decay increment style"
+    )
+
+    # WSD-specific parameters (Warmup-Stable-Decay)
+    wsd_decay_steps: Optional[int] = Field(
+        None, ge=1, description="Steps for WSD decay phase"
+    )
+    lr_wsd_decay_style: Optional[
+        Literal["linear", "cosine", "exponential", "minus_sqrt"]
+    ] = Field(None, description="Decay style within WSD phase")
+
+    @field_validator("max_lr")
+    def validate_max_lr(cls, v, info):
+        if "min_lr" in info.data and v < info.data["min_lr"]:
+            raise ValueError("max_lr must be >= min_lr")
+        return v
+
+    @field_validator("init_lr")
+    def validate_init_lr(cls, v, info):
+        if "max_lr" in info.data and v > info.data["max_lr"]:
+            raise ValueError("init_lr must be <= max_lr")
+        return v
+
+    @field_validator("lr_warmup_steps")
+    def validate_warmup_steps(cls, v, info):
+        if "lr_decay_steps" in info.data and v >= info.data["lr_decay_steps"]:
+            raise ValueError("lr_warmup_steps must be < lr_decay_steps")
+        return v
+
+    @field_validator("end_wd")
+    def validate_end_wd(cls, v, info):
+        if "start_wd" in info.data and v < info.data["start_wd"]:
+            raise ValueError("end_wd must be >= start_wd")
+        return v
+
+    @model_validator(mode="after")
+    def validate_wsd_config(self):
+        """Validate WSD-specific configuration."""
+        if self.lr_decay_style == "WSD":
+            if self.wsd_decay_steps is None:
+                raise ValueError("wsd_decay_steps required for WSD decay style")
+            if self.lr_wsd_decay_style is None:
+                raise ValueError("lr_wsd_decay_style required for WSD decay style")
+            if self.wsd_decay_steps > self.lr_decay_steps:
+                raise ValueError("wsd_decay_steps must be <= lr_decay_steps")
+        return self
+
+
 # Factory functions for cleaner default configurations
 def _default_optimizer() -> OptimizerConfig:
     """Create default optimizer configuration.
@@ -154,6 +227,15 @@ def _default_parallelism() -> ParallelismConfig:
     return ParallelismConfig()  # type: ignore[call-arg]
 
 
+def _default_scheduler() -> SchedulerConfig:
+    """Create default scheduler configuration.
+
+    Returns:
+        SchedulerConfig: Default scheduler settings with linear decay
+    """
+    return SchedulerConfig()  # type: ignore[call-arg]
+
+
 class TrainingConfig(BaseModel):
     """Main training configuration with validation."""
 
@@ -178,6 +260,7 @@ class TrainingConfig(BaseModel):
     gradient: GradientConfig = Field(default_factory=_default_gradient)
     memory: MemoryConfig = Field(default_factory=_default_memory)
     parallelism: ParallelismConfig = Field(default_factory=_default_parallelism)
+    scheduler: SchedulerConfig = Field(default_factory=_default_scheduler)
 
     # Checkpointing
     checkpoint_interval: int = Field(DEFAULT_CHECKPOINT_INTERVAL, ge=1)
@@ -223,13 +306,14 @@ class TrainingConfig(BaseModel):
             elif not torch.cuda.is_available():
                 # On CPU, BF16 can still be used (though may be emulated)
                 import warnings
+
                 warnings.warn(
                     "BF16 validation skipped - no CUDA available. "
                     "BF16 may be emulated on CPU with potential performance impact."
                 )
         return v
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[Any, Any]:
         """Convert to dictionary for backward compatibility."""
         config_dict = self.model_dump(mode="json")  # Serialize enums properly
 
@@ -242,7 +326,7 @@ class TrainingConfig(BaseModel):
             config_dict["gradient_clip_type"] = config_dict["gradient"]["clip_type"]
             config_dict["gradient_clip_value"] = config_dict["gradient"]["clip_value"]
 
-        return config_dict
+        return config_dict  # type: ignore[no-any-return]
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "TrainingConfig":
@@ -311,6 +395,10 @@ def validate_config(config: Union[dict, TrainingConfig]) -> TrainingConfig:
             validated.parallelism = ParallelismConfig(
                 **validated.parallelism.model_dump()
             )
+
+        # Validate scheduler config
+        if hasattr(validated, "scheduler"):
+            validated.scheduler = SchedulerConfig(**validated.scheduler.model_dump())
 
     except Exception as e:
         raise ValueError(f"Sub-configuration validation failed: {e}")

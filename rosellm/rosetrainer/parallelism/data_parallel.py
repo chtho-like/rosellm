@@ -128,7 +128,7 @@ class DataParallelTrainer:
             self.accumulation_step = 0
 
         # Return the unscaled loss for reporting
-        return loss
+        return loss  # type: ignore[no-any-return]
 
     def all_reduce_gradients(self) -> None:
         """

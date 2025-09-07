@@ -194,14 +194,14 @@ def _create_parallel_groups(
         order: Parallelism dimension order (e.g., "tp-cp-ep-dp-pp")
         hierarchical_cp_sizes: Sizes for hierarchical context parallel groups
     """
-    global _TENSOR_MODEL_PARALLEL_GROUP, _PIPELINE_MODEL_PARALLEL_GROUP
-    global _DATA_PARALLEL_GROUP, _CONTEXT_PARALLEL_GROUP, _EXPERT_MODEL_PARALLEL_GROUP
-    global _TENSOR_AND_DATA_PARALLEL_GROUP, _TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP
-    global _TENSOR_AND_EXPERT_PARALLEL_GROUP, _DATA_PARALLEL_GROUP_WITH_CP
-    global _MODEL_PARALLEL_GROUP, _EMBEDDING_GROUP, _POSITION_EMBEDDING_GROUP
-    global _HIERARCHICAL_CONTEXT_PARALLEL_GROUPS
-    global _TENSOR_MODEL_PARALLEL_RANK, _PIPELINE_MODEL_PARALLEL_RANK
-    global _DATA_PARALLEL_RANK, _CONTEXT_PARALLEL_RANK, _EXPERT_MODEL_PARALLEL_RANK
+    # Global group assignments (conditional based on sizes)
+    global _TENSOR_MODEL_PARALLEL_GROUP, _PIPELINE_MODEL_PARALLEL_GROUP  # noqa: F824
+    global _DATA_PARALLEL_GROUP, _CONTEXT_PARALLEL_GROUP  # noqa: F824
+    global _EXPERT_MODEL_PARALLEL_GROUP  # noqa: F824
+    global _HIERARCHICAL_CONTEXT_PARALLEL_GROUPS  # noqa: F824
+    global _TENSOR_MODEL_PARALLEL_RANK, _PIPELINE_MODEL_PARALLEL_RANK  # noqa: F824
+    global _DATA_PARALLEL_RANK, _CONTEXT_PARALLEL_RANK  # noqa: F824
+    global _EXPERT_MODEL_PARALLEL_RANK  # noqa: F824
 
     # Parse dimension order
     dims = order.lower().split("-")
@@ -344,7 +344,7 @@ def _create_dimension_groups(rank_groups: Dict[str, List[List[int]]]) -> None:
             if _RANK in ranks:
                 group = dist.new_group(ranks)
                 if _RANK in ranks:
-                    return group
+                    return group  # type: ignore[no-any-return]
         return None
 
     # Create tensor parallel group
@@ -371,8 +371,7 @@ def _create_dimension_groups(rank_groups: Dict[str, List[List[int]]]) -> None:
 def _create_combined_groups() -> None:
     """Create combined process groups for optimized communication patterns."""
     global _TENSOR_AND_DATA_PARALLEL_GROUP, _TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP
-    global _TENSOR_AND_EXPERT_PARALLEL_GROUP, _DATA_PARALLEL_GROUP_WITH_CP
-    global _MODEL_PARALLEL_GROUP, _EMBEDDING_GROUP, _POSITION_EMBEDDING_GROUP
+    global _MODEL_PARALLEL_GROUP
 
     # Create TP+DP group (commonly used for gradient all-reduce)
     tp_dp_size = _TENSOR_MODEL_PARALLEL_SIZE * _DATA_PARALLEL_SIZE

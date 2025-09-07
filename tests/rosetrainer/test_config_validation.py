@@ -100,7 +100,7 @@ class TestTrainingConfig(unittest.TestCase):
     @pytest.mark.gpu
     @unittest.skipIf(
         not torch.cuda.is_available() or not torch.cuda.is_bf16_supported(),
-        "BF16 not supported on current hardware"
+        "BF16 not supported on current hardware",
     )
     def test_custom_training_config_bf16(self):
         """Test creating TrainingConfig with BF16 precision."""
@@ -130,13 +130,16 @@ class TestTrainingConfig(unittest.TestCase):
         """Test that max_steps and num_epochs conflict is handled."""
         # Both specified should raise error
         with self.assertRaises(ValidationError):
-            TrainingConfig(max_steps=1000, num_epochs=3)  # type: ignore[call-arg]  # Both specified
+            # Both specified
+            TrainingConfig(max_steps=1000, num_epochs=3)  # type: ignore[call-arg]
 
         # One or the other should work
-        config1 = TrainingConfig(max_steps=1000)  # type: ignore[call-arg]  # Only max_steps
+        # Only max_steps
+        config1 = TrainingConfig(max_steps=1000)  # type: ignore[call-arg]
         self.assertEqual(config1.max_steps, 1000)
 
-        config2 = TrainingConfig(num_epochs=5)  # type: ignore[call-arg]  # Only num_epochs
+        # Only num_epochs
+        config2 = TrainingConfig(num_epochs=5)  # type: ignore[call-arg]
         self.assertEqual(config2.num_epochs, 5)
 
 
@@ -262,7 +265,8 @@ class TestSubConfigurations(unittest.TestCase):
 
         # Invalid accumulation steps
         with self.assertRaises(ValidationError):
-            GradientConfig(accumulation_steps=0)  # type: ignore[call-arg]  # Must be >= 1
+            # Must be >= 1
+            GradientConfig(accumulation_steps=0)  # type: ignore[call-arg]
 
     def test_memory_config_validation(self):
         """Test MemoryConfig validation."""
@@ -276,7 +280,8 @@ class TestSubConfigurations(unittest.TestCase):
 
         # Invalid gradient checkpointing ratio
         with self.assertRaises(ValidationError):
-            MemoryConfig(gradient_checkpointing_ratio=1.5)  # type: ignore[call-arg]  # Must be <= 1
+            # Must be <= 1
+            MemoryConfig(gradient_checkpointing_ratio=1.5)  # type: ignore[call-arg]
 
     def test_parallelism_config_validation(self):
         """Test ParallelismConfig validation."""
@@ -289,7 +294,8 @@ class TestSubConfigurations(unittest.TestCase):
 
         # Power of 2 validation
         with self.assertRaises(ValidationError):
-            ParallelismConfig(tensor_parallel_size=3)  # type: ignore[call-arg]  # Not power of 2
+            # Not power of 2
+            ParallelismConfig(tensor_parallel_size=3)  # type: ignore[call-arg]
 
         # Valid power of 2
         config2 = ParallelismConfig(  # type: ignore[call-arg]
@@ -319,7 +325,7 @@ class TestPrecisionType(unittest.TestCase):
     @pytest.mark.gpu
     @unittest.skipIf(
         not torch.cuda.is_available() or not torch.cuda.is_bf16_supported(),
-        "BF16 not supported on current hardware"
+        "BF16 not supported on current hardware",
     )
     def test_precision_bf16_from_dict(self):
         """Test BF16 precision from dictionary config."""
@@ -342,13 +348,16 @@ class TestBetaValidation(unittest.TestCase):
     def test_invalid_betas(self):
         """Test invalid beta values."""
         with self.assertRaises(ValidationError):
-            OptimizerConfig(betas=(1.0, 0.999))  # type: ignore[call-arg]  # beta1 must be < 1
+            # beta1 must be < 1
+            OptimizerConfig(betas=(1.0, 0.999))  # type: ignore[call-arg]
 
         with self.assertRaises(ValidationError):
-            OptimizerConfig(betas=(0.9, 1.0))  # type: ignore[call-arg]  # beta2 must be < 1
+            # beta2 must be < 1
+            OptimizerConfig(betas=(0.9, 1.0))  # type: ignore[call-arg]
 
         with self.assertRaises(ValidationError):
-            OptimizerConfig(betas=(-0.1, 0.999))  # type: ignore[call-arg]  # beta1 must be >= 0
+            # beta1 must be >= 0
+            OptimizerConfig(betas=(-0.1, 0.999))  # type: ignore[call-arg]
 
 
 if __name__ == "__main__":

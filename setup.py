@@ -4,6 +4,7 @@ All other configuration is in pyproject.toml.
 """
 
 from pathlib import Path
+
 from setuptools import setup
 
 # Check if CUDA extension files exist
@@ -17,7 +18,7 @@ cuda_cu = Path("flash_attention_cuda.cu")
 if cuda_cpp.exists() and cuda_cu.exists():
     try:
         from torch.utils.cpp_extension import BuildExtension, CUDAExtension
-        
+
         cuda_ext = [
             CUDAExtension(
                 name="rosellm.flash_attention_cuda",

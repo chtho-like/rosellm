@@ -1,6 +1,6 @@
 from collections import deque
 from enum import Enum
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -100,7 +100,7 @@ class PipelineParallel:
         self.model.to(self.device)
 
         # Keep track of microbatches
-        self.active_microbatches: deque[MicrobatchInfo] = deque()
+        self.active_microbatches: Deque[MicrobatchInfo] = deque()
 
     def _initialize_process_group(self) -> dist.ProcessGroup:
         """Initialize the pipeline parallel process group."""
@@ -123,7 +123,7 @@ class PipelineParallel:
             pp_groups.append(dist.new_group(ranks=ranks_in_group))
 
         # Return the PP group for this rank
-        return pp_groups[pp_group_id]
+        return pp_groups[pp_group_id]  # type: ignore[no-any-return]
 
     def _send_tensors(self, tensors: Dict[str, torch.Tensor], dest: int) -> None:
         """Send tensors to the next stage."""
@@ -189,9 +189,7 @@ class PipelineParallel:
 
         return tensors
 
-    def _forward_step(
-        self, microbatch: Dict[str, torch.Tensor]
-    ) -> Dict[str, torch.Tensor]:
+    def _forward_step(self, microbatch: Dict[str, torch.Tensor]) -> Dict[str, Any]:
         """Perform a forward step on the current microbatch."""
         # Move tensors to device
         microbatch = {k: v.to(self.device) for k, v in microbatch.items()}
@@ -214,7 +212,7 @@ class PipelineParallel:
             else:
                 outputs = {"output": outputs}
 
-        return outputs
+        return outputs  # type: ignore[no-any-return]
 
     def _backward_step(
         self, microbatch_info: MicrobatchInfo
@@ -329,7 +327,7 @@ class PipelineParallel:
 
     def _split_batch(
         self, batch: Dict[str, torch.Tensor], num_chunks: int
-    ) -> List[Dict[str, torch.Tensor]]:
+    ) -> List[Dict[str, Any]]:
         """Split a batch into microbatches."""
         # Determine batch size from first tensor dimension
         sample_tensor = next(iter(batch.values()))
@@ -356,7 +354,7 @@ class PipelineParallel:
                 microbatch[name] = tensor[start_idx:end_idx]
 
             # Store the actual size
-            microbatch["batch_size"] = end_idx - start_idx
+            microbatch["batch_size"] = end_idx - start_idx  # type: ignore[assignment]
             microbatches.append(microbatch)
 
         return microbatches
