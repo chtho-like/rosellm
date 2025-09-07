@@ -93,7 +93,7 @@ def _performance_monitor(func: F) -> F:
 
 # Import custom gradient scaler if available
 try:
-    from ..memory.mixed_precision import AbstractGradScaler
+    from ..mixed_precision.gradient_scaler import AbstractGradScaler
 except ImportError:
     AbstractGradScaler = None  # type: ignore
 
