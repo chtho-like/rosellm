@@ -19,12 +19,18 @@ References:
 
 import contextlib
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+import threading
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from functools import wraps
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, Union
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+
+F = TypeVar("F", bound=Callable[..., Any])
 
 try:
     from ..parallelism.parallel_state import (
@@ -44,26 +50,88 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Constants for numerical stability and configuration
+EPSILON = 1e-8
+DEFAULT_NORM_TYPE = 2.0
+DEFAULT_MAX_NORM = 1.0
+HISTOGRAM_BINS = 50
+MAX_GRADIENT_VALUE = 1e10
+MIN_GRADIENT_VALUE = -1e10
+
+# Thread-safe counter for gradient accumulation
+_accumulation_counter_lock = threading.Lock()
+_accumulation_counters: Dict[int, int] = {}
+
+
+class ClipType(str, Enum):
+    """Gradient clipping types."""
+
+    NORM = "norm"
+    VALUE = "value"
+    NONE = "none"
+
+
+def _performance_monitor(func: F) -> F:
+    """Decorator to monitor performance of gradient operations."""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        try:
+            result = func(*args, **kwargs)
+            elapsed = time.perf_counter() - start_time
+            if elapsed > 1.0:  # Log slow operations
+                logger.debug(f"{func.__name__} took {elapsed:.3f}s")
+            return result
+        except Exception as e:
+            elapsed = time.perf_counter() - start_time
+            logger.error(f"{func.__name__} failed after {elapsed:.3f}s: {e}")
+            raise
+
+    return wrapper  # type: ignore
+
+
+# Import custom gradient scaler if available
+try:
+    from ..memory.mixed_precision import AbstractGradScaler
+except ImportError:
+    AbstractGradScaler = None  # type: ignore
+
 
 @dataclass
 class GradientClipConfig:
-    """Configuration for gradient clipping operations."""
+    """Configuration for gradient clipping operations.
 
-    clip_type: str = "norm"  # "norm", "value", "none"
-    max_norm: float = 1.0
-    norm_type: float = 2.0
+    Attributes:
+        clip_type: Type of clipping to apply (norm, value, or none)
+        max_norm: Maximum allowed norm/value for clipping
+        norm_type: Type of norm to use (1.0, 2.0, inf)
+        error_if_nonfinite: Whether to raise errors on non-finite gradients
+        model_parallel_reduce: Whether to reduce across model parallel groups
+        use_multitensor: Whether to use APEX multi-tensor operations
+        cache_norm: Whether to cache norm calculations for efficiency
+    """
+
+    clip_type: str = ClipType.NORM.value
+    max_norm: float = DEFAULT_MAX_NORM
+    norm_type: float = DEFAULT_NORM_TYPE
     error_if_nonfinite: bool = True
     model_parallel_reduce: bool = True
     use_multitensor: bool = True
+    cache_norm: bool = False
+    _cached_norm: Optional[torch.Tensor] = field(default=None, init=False, repr=False)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Validate configuration parameters."""
-        if self.clip_type not in ["norm", "value", "none"]:
-            raise ValueError(f"Invalid clip_type: {self.clip_type}")
+        if self.clip_type not in [ct.value for ct in ClipType]:
+            raise ValueError(
+                f"Invalid clip_type: {self.clip_type}. "
+                f"Must be one of {[ct.value for ct in ClipType]}"
+            )
         if self.max_norm <= 0:
             raise ValueError(f"max_norm must be positive, got {self.max_norm}")
-        if self.norm_type <= 0:
-            raise ValueError(f"norm_type must be positive, got {self.norm_type}")
+        if self.norm_type <= 0 and self.norm_type != float("inf"):
+            raise ValueError(f"norm_type must be positive or inf, got {self.norm_type}")
 
 
 def _try_import_apex_multitensor() -> Tuple[bool, Optional[Any]]:
@@ -84,44 +152,77 @@ def _try_import_apex_multitensor() -> Tuple[bool, Optional[Any]]:
         return False, None
 
 
-def _get_model_parameters(
+def _get_model_parameters_with_grad(
     model: nn.Module, requires_grad_only: bool = True
-) -> List[torch.Tensor]:
+) -> List[torch.nn.Parameter]:
     """
-    Extract model parameters as a list of tensors.
+    Extract model parameters that have gradients as a list.
 
     Args:
         model: PyTorch model
         requires_grad_only: Only include parameters that require gradients
 
     Returns:
-        List of parameter tensors
+        List of parameters that have gradients computed
+
+    Note:
+        This function returns the parameter objects themselves (not their gradients).
+        Parameters without gradients are filtered out.
     """
-    if requires_grad_only:
-        return [p for p in model.parameters() if p.requires_grad and p.grad is not None]
-    else:
-        return [p for p in model.parameters() if p.grad is not None]
+    params: List[torch.nn.Parameter] = []
+    for p in model.parameters():
+        if p.grad is not None:
+            if not requires_grad_only or p.requires_grad:
+                params.append(p)
+    return params
 
 
-def _get_gradient_tensors(parameters: List[torch.Tensor]) -> List[torch.Tensor]:
+def _get_model_gradients(
+    model: nn.Module, requires_grad_only: bool = True
+) -> List[torch.Tensor]:
+    """
+    Extract model parameter gradients as a list of tensors.
+
+    Args:
+        model: PyTorch model
+        requires_grad_only: Only include parameters that require gradients
+
+    Returns:
+        List of gradient tensors (not parameters themselves)
+
+    Note:
+        This function returns the gradient tensors of parameters that have
+        gradients computed. Parameters without gradients are filtered out.
+    """
+    grads: List[torch.Tensor] = []
+    for p in model.parameters():
+        if p.grad is not None:
+            if not requires_grad_only or p.requires_grad:
+                grads.append(p.grad)
+    return grads
+
+
+def _get_gradient_tensors(
+    parameters: Union[List[torch.Tensor], List[torch.nn.Parameter]],
+) -> List[torch.Tensor]:
     """
     Extract gradient tensors from parameters.
 
     Args:
-        parameters: List of parameter tensors
+        parameters: List of parameter tensors or Parameter objects
 
     Returns:
         List of gradient tensors
     """
     gradients = []
     for param in parameters:
-        if param.grad is not None:
+        if hasattr(param, "grad") and param.grad is not None:
             gradients.append(param.grad)
     return gradients
 
 
 def _get_default_device(
-    parameters: Union[List[torch.Tensor], nn.Module],
+    parameters: Union[List[torch.Tensor], List[torch.nn.Parameter], nn.Module],
     fallback_device: Optional[torch.device] = None,
 ) -> torch.device:
     """
@@ -153,9 +254,10 @@ def _get_default_device(
         return torch.device("cpu")
 
 
+@_performance_monitor
 def calculate_gradient_norm_multitensor(
-    parameters: Union[List[torch.Tensor], nn.Module],
-    norm_type: float = 2.0,
+    parameters: Union[List[torch.Tensor], List[torch.nn.Parameter], nn.Module],
+    norm_type: float = DEFAULT_NORM_TYPE,
     use_multitensor: bool = True,
     model_parallel_reduce: bool = True,
 ) -> torch.Tensor:
@@ -182,22 +284,17 @@ def calculate_gradient_norm_multitensor(
     if norm_type <= 0 and norm_type != float("inf"):
         raise ValueError(f"norm_type must be positive or inf, got {norm_type}")
 
-    # Convert model to parameter list if needed
+    # Convert model to gradient list if needed
     if isinstance(parameters, nn.Module):
-        param_list = _get_model_parameters(parameters, requires_grad_only=True)
+        gradients = _get_model_gradients(parameters, requires_grad_only=True)
     else:
-        param_list = [p for p in parameters if p.grad is not None]
-
-    if not param_list:
-        logger.debug("No parameters with gradients found for norm calculation")
-        device = _get_default_device(parameters)
-        return torch.tensor(0.0, device=device)
-
-    # Extract gradients
-    gradients = _get_gradient_tensors(param_list)
+        # Extract gradients from parameter list
+        gradients = _get_gradient_tensors(parameters)
 
     if not gradients:
-        return torch.tensor(0.0, device=param_list[0].device)
+        logger.debug("No gradients found for norm calculation")
+        device = _get_default_device(parameters)
+        return torch.tensor(0.0, device=device)
 
     # Try to use multi-tensor operations if requested and available
     if use_multitensor:
@@ -231,6 +328,7 @@ def calculate_gradient_norm_multitensor(
     return total_norm
 
 
+@_performance_monitor
 def _calculate_norm_apex_multitensor(
     gradients: List[torch.Tensor], multi_tensor_applier: Any
 ) -> torch.Tensor:
@@ -243,6 +341,10 @@ def _calculate_norm_apex_multitensor(
 
     Returns:
         L2 norm as scalar tensor
+
+    Note:
+        Falls back gracefully to standard calculation if APEX operations fail.
+        Groups tensors by device and dtype for optimal performance.
     """
     if not gradients:
         return torch.tensor(0.0, device=torch.device("cpu"))
@@ -263,6 +365,13 @@ def _calculate_norm_apex_multitensor(
 
         for (device, dtype), grad_group in grouped_grads.items():
             if not grad_group:
+                continue
+
+            # Skip if tensors are too small for multi-tensor to be beneficial
+            total_elements = sum(g.numel() for g in grad_group)
+            if total_elements < 1000:  # Threshold for multi-tensor benefit
+                group_std_norm = _calculate_norm_standard(grad_group, 2.0)
+                total_norm_squared += group_std_norm**2
                 continue
 
             try:
@@ -311,10 +420,14 @@ def _calculate_norm_standard(
 
     Args:
         gradients: List of gradient tensors
-        norm_type: Type of norm to calculate
+        norm_type: Type of norm to calculate (1.0, 2.0, inf, etc.)
 
     Returns:
         Gradient norm as scalar tensor
+
+    Note:
+        Handles numerical edge cases and filters out non-finite values
+        for robust norm calculation.
     """
     if not gradients:
         return torch.tensor(0.0)
@@ -324,9 +437,18 @@ def _calculate_norm_standard(
 
     # Filter out empty or NaN/Inf gradients for stability
     valid_gradients = []
+    invalid_count = 0
     for grad in gradients:
         if grad.numel() > 0 and torch.isfinite(grad).any():
             valid_gradients.append(grad)
+        else:
+            invalid_count += 1
+
+    if invalid_count > 0:
+        logger.debug(
+            f"Filtered {invalid_count} invalid gradient tensors during norm calculation"
+        )
+
     if not valid_gradients:
         logger.warning("No valid finite gradients found for norm calculation")
         return torch.tensor(0.0, device=device, dtype=dtype)
@@ -416,6 +538,7 @@ def _reduce_across_model_parallel_groups(
     return norm
 
 
+@_performance_monitor
 def apply_gradient_clipping(
     parameters: Union[List[torch.Tensor], nn.Module],
     config: GradientClipConfig,
@@ -451,8 +574,11 @@ def apply_gradient_clipping(
 
     try:
         # Convert model to parameter list if needed
+        param_list: Union[List[torch.nn.Parameter], List[torch.Tensor]]
         if isinstance(parameters, nn.Module):
-            param_list = _get_model_parameters(parameters, requires_grad_only=True)
+            param_list = _get_model_parameters_with_grad(
+                parameters, requires_grad_only=True
+            )
         else:
             param_list = [p for p in parameters if p.grad is not None]
 
@@ -494,7 +620,7 @@ def apply_gradient_clipping(
 
 
 def _apply_norm_clipping(
-    parameters: List[torch.Tensor],
+    parameters: Union[List[torch.Tensor], List[torch.nn.Parameter]],
     config: GradientClipConfig,
     stats: Dict[str, float],
 ) -> Dict[str, float]:
@@ -515,7 +641,7 @@ def _apply_norm_clipping(
 
     # Calculate clipping factor
     max_norm = config.max_norm
-    clip_coeff = max_norm / (grad_norm + 1e-6)  # Add epsilon for numerical stability
+    clip_coeff = max_norm / (grad_norm + EPSILON)
 
     if clip_coeff < 1.0:
         stats["clipped"] = True
@@ -530,7 +656,7 @@ def _apply_norm_clipping(
 
 
 def _apply_value_clipping(
-    parameters: List[torch.Tensor],
+    parameters: Union[List[torch.Tensor], List[torch.nn.Parameter]],
     config: GradientClipConfig,
     stats: Dict[str, float],
 ) -> Dict[str, float]:
@@ -625,9 +751,11 @@ def check_gradient_finite(
     return all_finite, stats
 
 
+@_performance_monitor
 def sync_gradients(
     model: nn.Module,
     data_parallel_group: Optional[dist.ProcessGroup] = None,
+    average: bool = True,
 ) -> None:
     """
     Synchronize gradients across data parallel ranks.
@@ -635,6 +763,11 @@ def sync_gradients(
     Args:
         model: PyTorch model
         data_parallel_group: Process group for data parallelism (optional)
+        average: Whether to average gradients after all-reduce
+
+    Note:
+        This function is a no-op if distributed training is not initialized
+        or if no data parallel group exists.
     """
     if not parallel_initialized():
         return
@@ -646,13 +779,18 @@ def sync_gradients(
     if data_parallel_group is None:
         return  # No data parallelism
 
-    # Synchronize gradients
+    # Synchronize gradients with error handling
+    world_size = dist.get_world_size(data_parallel_group)
     for param in model.parameters():
         if param.grad is not None:
-            dist.all_reduce(param.grad, group=data_parallel_group)
-            # Average gradients
-            if data_parallel_group is not None:
-                param.grad.div_(dist.get_world_size(data_parallel_group))
+            try:
+                dist.all_reduce(param.grad, group=data_parallel_group)
+                # Average gradients if requested
+                if average and world_size > 1:
+                    param.grad.div_(world_size)
+            except Exception as e:
+                logger.error(f"Failed to synchronize gradient: {e}")
+                raise RuntimeError(f"Gradient synchronization failed: {e}") from e
 
 
 @contextlib.contextmanager
@@ -664,20 +802,39 @@ def gradient_accumulation_context(
     """
     Context manager for gradient accumulation with optional synchronization control.
 
+    This context manager tracks accumulation steps in a thread-safe manner and
+    optionally disables gradient synchronization for non-final accumulation steps
+    when using DistributedDataParallel.
+
     Args:
-        model: PyTorch model
-        accumulation_steps: Number of accumulation steps
+        model: PyTorch model (potentially wrapped in DDP)
+        accumulation_steps: Number of accumulation steps before optimizer step
         sync_on_last_step: Whether to sync gradients only on the last step
 
     Yields:
         Boolean indicating if this is the last accumulation step
-    """
-    # Use a module-level counter to avoid mypy issues
-    if not hasattr(gradient_accumulation_context, "_step_counter"):
-        setattr(gradient_accumulation_context, "_step_counter", 0)
 
-    step = getattr(gradient_accumulation_context, "_step_counter", 0)
-    is_last_step = (step + 1) % accumulation_steps == 0
+    Example:
+        >>> for batch in dataloader:
+        ...     with gradient_accumulation_context(model, 4) as is_last:
+        ...         loss = model(batch)
+        ...         loss.backward()
+        ...         if is_last:
+        ...             optimizer.step()
+        ...             optimizer.zero_grad()
+    """
+    global _accumulation_counters
+
+    # Use model id as key for thread-safe counter management
+    model_id = id(model)
+
+    with _accumulation_counter_lock:
+        if model_id not in _accumulation_counters:
+            _accumulation_counters[model_id] = 0
+
+        step = _accumulation_counters[model_id]
+        is_last_step = (step + 1) % accumulation_steps == 0
+        _accumulation_counters[model_id] = (step + 1) % accumulation_steps
 
     # Disable gradient synchronization if not the last step
     if sync_on_last_step and not is_last_step:
@@ -689,12 +846,76 @@ def gradient_accumulation_context(
     else:
         yield is_last_step
 
-    setattr(gradient_accumulation_context, "_step_counter", step + 1)
+
+def check_for_inf_and_nan_with_scaler(
+    parameters: Union[List[torch.nn.Parameter], nn.Module],
+    scaler: Optional[Any] = None,
+) -> bool:
+    """
+    Check for infinite or NaN values in gradients and optionally update scaler.
+
+    This function is compatible with both PyTorch native scalers and custom
+    AbstractGradScaler instances.
+
+    Args:
+        parameters: Model or list of parameters to check
+        scaler: Optional gradient scaler to update (AbstractGradScaler or native)
+
+    Returns:
+        True if any infinite or NaN gradients were found, False otherwise
+
+    Example:
+        >>> found_inf = check_for_inf_and_nan_with_scaler(model, scaler)
+        >>> if not found_inf:
+        ...     optimizer.step()
+        >>> scaler.update()
+    """
+    found_inf = False
+    nan_params = 0
+    inf_params = 0
+
+    if isinstance(parameters, nn.Module):
+        param_list = list(parameters.parameters())
+    else:
+        param_list = list(parameters)
+
+    for param in param_list:
+        if param.grad is not None:
+            has_nan = torch.isnan(param.grad).any()
+            has_inf = torch.isinf(param.grad).any()
+
+            if has_nan:
+                nan_params += 1
+                found_inf = True
+            if has_inf:
+                inf_params += 1
+                found_inf = True
+
+            if found_inf and not (nan_params > 0 or inf_params > 0):
+                break
+
+    if found_inf:
+        logger.debug(
+            f"Found non-finite gradients: {nan_params} NaN, {inf_params} Inf parameters"
+        )
+
+    # Update scaler if provided
+    if scaler is not None:
+        if AbstractGradScaler is not None and isinstance(scaler, AbstractGradScaler):
+            # Custom scaler
+            scaler.update(found_inf)
+        elif hasattr(scaler, "update"):
+            # PyTorch native scaler - needs to be called after optimizer step
+            # Just mark for now, actual update happens in scaler.update()
+            pass
+
+    return found_inf
 
 
 def get_gradient_stats(
     parameters: Union[List[torch.nn.Parameter], nn.Module],
     include_histograms: bool = False,
+    compute_percentiles: bool = False,
 ) -> Dict[str, Any]:
     """
     Get comprehensive gradient statistics for monitoring and debugging.
@@ -702,11 +923,17 @@ def get_gradient_stats(
     Args:
         parameters: Model parameters or list of tensors
         include_histograms: Whether to include gradient histograms (expensive)
+        compute_percentiles: Whether to compute gradient percentiles
 
     Returns:
-        Dictionary with gradient statistics
+        Dictionary with gradient statistics including norms, moments,
+        and optional histograms/percentiles
+
+    Note:
+        Computing histograms and percentiles can be expensive for large models.
+        Use these options judiciously in production.
     """
-    stats = {
+    stats: Dict[str, Any] = {
         "total_parameters": 0,
         "parameters_with_grad": 0,
         "grad_norm_l1": 0.0,
@@ -797,7 +1024,7 @@ def get_gradient_stats(
                 # Concatenate gradients only if histograms are needed
                 all_grads_tensor = torch.cat(all_grads)
                 hist_values, hist_bins = torch.histogram(
-                    all_grads_tensor, bins=50, range=None
+                    all_grads_tensor, bins=HISTOGRAM_BINS, range=None
                 )
                 # Use separate variable for histogram data to avoid type issues
                 histogram_data = {
@@ -807,5 +1034,34 @@ def get_gradient_stats(
                 stats["histogram"] = histogram_data  # type: ignore
             except Exception as e:
                 logger.warning(f"Failed to compute gradient histogram: {e}")
+
+        # Add percentiles if requested
+        if compute_percentiles:
+            try:
+                if not include_histograms:
+                    all_grads_tensor = torch.cat(all_grads)
+
+                # Sample if tensor is too large to avoid memory issues
+                max_elements_for_percentiles = 10_000_000  # 10M elements
+                if all_grads_tensor.numel() > max_elements_for_percentiles:
+                    # Random sampling for large tensors
+                    indices = torch.randperm(all_grads_tensor.numel())[
+                        :max_elements_for_percentiles
+                    ]
+                    sampled_grads = all_grads_tensor.flatten()[indices]
+                else:
+                    sampled_grads = all_grads_tensor
+
+                percentiles = [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+                percentile_values = torch.quantile(
+                    sampled_grads,
+                    torch.tensor(percentiles, device=sampled_grads.device),
+                )
+                stats["percentiles"] = {
+                    f"p{int(p*100)}": float(val)
+                    for p, val in zip(percentiles, percentile_values)
+                }
+            except Exception as e:
+                logger.warning(f"Failed to compute gradient percentiles: {e}")
 
     return stats
