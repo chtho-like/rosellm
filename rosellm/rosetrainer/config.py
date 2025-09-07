@@ -64,10 +64,11 @@ class OptimizerConfig(BaseModel):
 
 
 class GradientConfig(BaseModel):
-    """Gradient handling configuration."""
+    """Gradient handling configuration with advanced utilities support."""
 
     model_config = ConfigDict(use_enum_values=True)
 
+    # Basic gradient clipping
     clip_type: GradientClipType = GradientClipType.NORM
     clip_value: Optional[float] = Field(
         DEFAULT_GRADIENT_CLIP_VALUE, gt=0, description="Gradient clip value"
@@ -78,10 +79,44 @@ class GradientConfig(BaseModel):
         description="Gradient accumulation steps",
     )
 
+    # Advanced gradient utilities configuration
+    norm_type: float = Field(2.0, gt=0, description="Norm type for gradient clipping")
+    use_multitensor: bool = Field(
+        True, description="Use multi-tensor operations when available"
+    )
+    model_parallel_reduce: bool = Field(
+        True, description="Reduce gradients across model parallel groups"
+    )
+    error_if_nonfinite: bool = Field(
+        True, description="Raise error if non-finite gradients detected"
+    )
+
+    # Gradient synchronization
+    sync_on_accumulation: bool = Field(
+        False, description="Sync gradients on every accumulation step"
+    )
+
+    # Gradient monitoring
+    track_gradient_stats: bool = Field(
+        False, description="Track detailed gradient statistics"
+    )
+    gradient_stats_interval: int = Field(
+        100, ge=1, description="Interval for gradient statistics logging"
+    )
+    include_gradient_histograms: bool = Field(
+        False, description="Include gradient histograms in stats (expensive)"
+    )
+
     @field_validator("clip_value")
     def validate_clip_value(cls, v, info):
         if info.data.get("clip_type") != GradientClipType.NONE and v is None:
             raise ValueError("clip_value required when clip_type is not 'none'")
+        return v
+
+    @field_validator("norm_type")
+    def validate_norm_type(cls, v):
+        if v != float("inf") and v <= 0:
+            raise ValueError("norm_type must be positive or inf")
         return v
 
 
