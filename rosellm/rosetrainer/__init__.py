@@ -43,6 +43,15 @@ from .parallelism import (
     is_initialized,
     set_nccl_config,
 )
+from .utils import (  # Gradient utilities
+    GradientClipConfig,
+    apply_gradient_clipping,
+    calculate_gradient_norm_multitensor,
+    check_gradient_finite,
+    get_gradient_stats,
+    gradient_accumulation_context,
+    sync_gradients,
+)
 
 __all__ = [
     "RoseTrainer",
@@ -58,6 +67,14 @@ __all__ = [
     "MicrobatchInfo",
     # ZeRO
     "ZeROOptimizer",
+    # Gradient Utilities
+    "GradientClipConfig",
+    "apply_gradient_clipping",
+    "calculate_gradient_norm_multitensor",
+    "check_gradient_finite",
+    "gradient_accumulation_context",
+    "get_gradient_stats",
+    "sync_gradients",
     # Parallel State Management
     "initialize_model_parallel",
     "is_initialized",

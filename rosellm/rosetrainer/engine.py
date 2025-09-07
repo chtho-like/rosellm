@@ -10,6 +10,13 @@ import torch.distributed as dist
 
 from .config import TrainingConfig, validate_config
 from .scheduler import OptimizerParamScheduler
+from .utils.gradient_utils import (
+    GradientClipConfig,
+    apply_gradient_clipping,
+    check_gradient_finite,
+    get_gradient_stats,
+    sync_gradients,
+)
 
 # References:
 # [1] Shoeybi, M. et al. "Megatron-LM: Training Multi-Billion Parameter Language Models
@@ -84,9 +91,18 @@ class RoseTrainer:
         }
         self._step_start_time: Optional[float] = None
 
-        # Gradient clipping configuration from validated config
-        self.grad_clip_type = self.config.gradient.clip_type
-        self.grad_clip_value = self.config.gradient.clip_value
+        # Create gradient clipping configuration from validated config
+        self.gradient_clip_config = GradientClipConfig(
+            clip_type=self.config.gradient.clip_type,
+            max_norm=self.config.gradient.clip_value or 1.0,
+            norm_type=self.config.gradient.norm_type,
+            error_if_nonfinite=self.config.gradient.error_if_nonfinite,
+            model_parallel_reduce=self.config.gradient.model_parallel_reduce,
+            use_multitensor=self.config.gradient.use_multitensor,
+        )
+
+        # Gradient tracking
+        self.gradient_stats_step = 0
 
         # Initialize scheduler if enabled
         self.scheduler = None
@@ -107,7 +123,7 @@ class RoseTrainer:
                 lr_wsd_decay_style=self.config.scheduler.lr_wsd_decay_style,
             )
             logger.info(
-                f"Initialized learning rate scheduler with "
+                "Initialized learning rate scheduler with "
                 f"{self.config.scheduler.lr_decay_style} decay"
             )
 
@@ -176,21 +192,21 @@ class RoseTrainer:
                         world_size=self.world_size,
                     )
                     logger.info(
-                        f"Successfully initialized distributed training "
+                        "Successfully initialized distributed training "
                         f"with backend={backend}"
                     )
                     break
                 except Exception as e:
                     if attempt < max_retries - 1:
                         logger.warning(
-                            f"Failed to initialize distributed "
+                            "Failed to initialize distributed "
                             f"(attempt {attempt + 1}/{max_retries}): {e}"
                         )
                         logger.warning(f"Retrying in {retry_delay} seconds...")
                         time.sleep(retry_delay)
                     else:
                         error_msg = (
-                            f"Failed to initialize distributed training "
+                            "Failed to initialize distributed training "
                             f"after {max_retries} attempts: {e}"
                         )
                         logger.error(error_msg)
@@ -251,20 +267,88 @@ class RoseTrainer:
         # Backward pass
         loss.backward()
 
-        # Apply gradient clipping if configured
-        if self.grad_clip_value is not None and self.grad_clip_type != "none":
-            if self.grad_clip_type == "norm":
-                total_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.grad_clip_value
+        # Check gradient finiteness and apply advanced gradient clipping
+        try:
+            # Check for non-finite gradients
+            is_finite, finite_stats = check_gradient_finite(
+                self.model, raise_on_nonfinite=False
+            )
+
+            if not is_finite:
+                logger.warning(
+                    "Non-finite gradients detected: "
+                    f"{finite_stats['nan_parameters']} NaN, "
+                    f"{finite_stats['inf_parameters']} Inf parameters"
                 )
-                if torch.isnan(total_norm) or torch.isinf(total_norm):
-                    logger.warning(f"Gradient norm is {total_norm}, skipping update")
+                if self.config.gradient.error_if_nonfinite:
                     self.optimizer.zero_grad()
-                    return {"loss": float("nan"), "grad_norm": float(total_norm)}
-            elif self.grad_clip_type == "value":
-                torch.nn.utils.clip_grad_value_(
-                    self.model.parameters(), self.grad_clip_value
-                )
+                    # Create return dict with consistent types
+                    error_metrics = {
+                        "loss": float("nan"),
+                        "grad_norm": float("nan"),
+                        "finite_gradients": False,
+                    }
+                    # Add gradient stats separately to avoid type mixing
+                    error_metrics.update(
+                        {
+                            f"gradient_stat_{k}": (
+                                float(v) if isinstance(v, (int, float)) else v
+                            )
+                            for k, v in finite_stats.items()
+                        }
+                    )
+                    return error_metrics
+
+            # Apply advanced gradient clipping
+            clip_stats = apply_gradient_clipping(self.model, self.gradient_clip_config)
+
+            # Add gradient statistics to metrics if enabled
+            if self.config.gradient.track_gradient_stats:
+                if (
+                    self.gradient_stats_step
+                    % self.config.gradient.gradient_stats_interval
+                    == 0
+                ):
+                    grad_stats = get_gradient_stats(
+                        self.model,
+                        include_histograms=(
+                            self.config.gradient.include_gradient_histograms
+                        ),
+                    )
+                    logger.info(f"Gradient stats: {grad_stats}")
+                self.gradient_stats_step += 1
+
+        except Exception as e:
+            logger.error(f"Advanced gradient processing failed: {e}")
+            # Fallback to simple gradient clipping
+            if (
+                self.config.gradient.clip_value is not None
+                and self.config.gradient.clip_type != "none"
+            ):
+                if self.config.gradient.clip_type == "norm":
+                    total_norm = torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.config.gradient.clip_value
+                    )
+                    clip_stats = {
+                        "grad_norm": float(total_norm),
+                        "clipped": total_norm > self.config.gradient.clip_value,
+                    }
+                elif self.config.gradient.clip_type == "value":
+                    torch.nn.utils.clip_grad_value_(
+                        self.model.parameters(), self.config.gradient.clip_value
+                    )
+                    clip_stats = {"grad_norm": 0.0, "clipped": True}
+                else:
+                    clip_stats = {"grad_norm": 0.0, "clipped": False}
+            else:
+                clip_stats = {"grad_norm": 0.0, "clipped": False}
+
+        # Synchronize gradients if distributed and configured
+        if self.distributed and (
+            self.config.gradient.sync_on_accumulation
+            or (self.gradient_stats_step % self.config.gradient.accumulation_steps == 0)
+        ):
+            sync_gradients(self.model)
 
         # Update parameters
         self.optimizer.step()
@@ -290,12 +374,12 @@ class RoseTrainer:
 
         metrics = {"loss": loss_item}
 
-        # Add gradient norm to metrics if gradient clipping is enabled
-        if self.grad_clip_value is not None and self.grad_clip_type == "norm":
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), float("inf")
-            )
-            metrics["grad_norm"] = float(grad_norm)
+        # Add gradient clipping statistics to metrics
+        if "clip_stats" in locals():
+            metrics["grad_norm"] = clip_stats.get("grad_norm", 0.0)
+            metrics["grad_clipped"] = clip_stats.get("clipped", False)
+            if "scale_factor" in clip_stats:
+                metrics["grad_scale_factor"] = clip_stats["scale_factor"]
 
         # Add memory stats to metrics if tracking is enabled
         if self.config.track_memory:

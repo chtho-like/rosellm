@@ -158,13 +158,27 @@ class MixedPrecisionManager:
         if self.enabled:
             if self.precision == PrecisionType.FP16:
                 self.autocast_dtype = torch.float16
+                # Handle different loss scaling strategies
+                if isinstance(loss_scale, str):
+                    if loss_scale == "dynamic":
+                        scaler_enabled = True
+                    elif loss_scale == "static":
+                        scaler_enabled = True
+                        init_scale = 2**16  # Use fixed scale for static
+                    else:
+                        scaler_enabled = False
+                elif isinstance(loss_scale, (int, float)):
+                    scaler_enabled = True
+                    init_scale = float(loss_scale)
+                else:
+                    scaler_enabled = True  # Default to dynamic
                 self.scaler = GradScaler(
                     "cuda",
                     init_scale=init_scale,
                     growth_factor=growth_factor,
                     backoff_factor=backoff_factor,
                     growth_interval=growth_interval,
-                    enabled=True,
+                    enabled=scaler_enabled,
                 )
                 logger.info("Initialized FP16 mixed precision training")
 

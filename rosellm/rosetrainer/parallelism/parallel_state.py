@@ -67,11 +67,12 @@ _EXPERT_MODEL_PARALLEL_GROUP: Optional[dist.ProcessGroup] = None
 # Combined groups for optimized communication
 _TENSOR_AND_DATA_PARALLEL_GROUP: Optional[dist.ProcessGroup] = None
 _TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP: Optional[dist.ProcessGroup] = None
-_TENSOR_AND_EXPERT_PARALLEL_GROUP: Optional[dist.ProcessGroup] = None
-_DATA_PARALLEL_GROUP_WITH_CP: Optional[dist.ProcessGroup] = None
+# Reserved for future advanced communication patterns
+_TENSOR_AND_EXPERT_PARALLEL_GROUP: Optional[dist.ProcessGroup] = None  # TODO: TP+EP
+_DATA_PARALLEL_GROUP_WITH_CP: Optional[dist.ProcessGroup] = None  # TODO: DP+CP comm
 _MODEL_PARALLEL_GROUP: Optional[dist.ProcessGroup] = None  # TP + PP combined
-_EMBEDDING_GROUP: Optional[dist.ProcessGroup] = None
-_POSITION_EMBEDDING_GROUP: Optional[dist.ProcessGroup] = None
+_EMBEDDING_GROUP: Optional[dist.ProcessGroup] = None  # TODO: Embedding parallelism
+_POSITION_EMBEDDING_GROUP: Optional[dist.ProcessGroup] = None  # TODO: Pos embedding
 
 # Hierarchical context parallel groups
 _HIERARCHICAL_CONTEXT_PARALLEL_GROUPS: Optional[List[dist.ProcessGroup]] = None

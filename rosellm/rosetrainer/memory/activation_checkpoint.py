@@ -132,6 +132,9 @@ class ActivationCheckpointing:
         Returns:
             Model with activation checkpointing applied.
         """
+        # TODO: Implement chunking functionality - chunks parameter reserved for future
+        # For now, apply checkpointing to all or selected layers
+        _ = chunks  # Acknowledge unused parameter
         # Ensure model has the specified layer attribute
         if not hasattr(model, layer_attr.split(".")[0]):
             print(
@@ -178,9 +181,7 @@ class ActivationCheckpointing:
             original_forward = layer.forward
 
             # Create a checkpointed forward function with profiling
-            def checkpointed_forward(
-                module, original_forward, layer_idx, *args, **kwargs
-            ):
+            def checkpointed_forward(original_forward, layer_idx, *args, **kwargs):
                 # Profile memory before if enabled
                 if self.profiling_enabled or profile:
                     tag = f"layer_{layer_idx}"
@@ -219,9 +220,7 @@ class ActivationCheckpointing:
                 return result
 
             # Create a bound method for this specific layer's forward
-            layer.forward = functools.partial(
-                checkpointed_forward, layer, original_forward, i
-            )
+            layer.forward = functools.partial(checkpointed_forward, original_forward, i)
 
             logger.info(f"Applied checkpointing to layer {i}")
 
@@ -268,9 +267,7 @@ class ActivationCheckpointing:
             original_forward = module.forward
 
             # Create a checkpointed forward function with profiling
-            def checkpointed_forward(
-                module, original_forward, module_name, *args, **kwargs
-            ):
+            def checkpointed_forward(original_forward, module_name, *args, **kwargs):
                 # Profile memory before if enabled
                 if self.profiling_enabled or profile:
                     self.profiler.profile_memory(module_name, "before")
@@ -306,7 +303,7 @@ class ActivationCheckpointing:
 
             # Create a bound method for this specific module's forward
             module.forward = functools.partial(
-                checkpointed_forward, module, original_forward, name
+                checkpointed_forward, original_forward, name
             )
 
             logger.info(f"Applied checkpointing to module {name}")

@@ -40,6 +40,8 @@ class TestParallelState:
         mock_is_initialized,
     ):
         """Test basic parallel state initialization"""
+        # Acknowledge unused mock parameter (required for decorator)
+        _ = mock_init_process_group
         # Setup mocks
         mock_is_initialized.return_value = False
         mock_get_world_size.return_value = 8
@@ -246,6 +248,8 @@ class TestParallelState:
         mock_is_initialized,
     ):
         """Test destroying parallel state"""
+        # Acknowledge unused mock parameter (required for decorator)
+        _ = mock_destroy_group
         mock_is_initialized.return_value = True
         mock_get_world_size.return_value = 8
         mock_get_rank.return_value = 0
