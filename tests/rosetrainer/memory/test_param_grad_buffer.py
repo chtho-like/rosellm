@@ -187,10 +187,10 @@ class TestParamAndGradBuffer(unittest.TestCase):
             data_parallel_group=None,
         )
 
-        # Verify all parameters are mapped
+        # Verify all parameters are mapped (by identity)
         for param in params:
             if param.requires_grad:
-                self.assertIn(param, buffer.param_to_buffer_index)
+                self.assertIn(id(param), buffer.param_index_by_id)
 
         # Verify offsets are correct
         total_numel = 0

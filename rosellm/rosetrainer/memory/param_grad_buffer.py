@@ -138,9 +138,8 @@ class GradientBucket:
         if self.numel % alignment != 0:
             self.numel = ((self.numel // alignment) + 1) * alignment
 
-        # Allocate the bucket buffer
-        self.data = torch.zeros(self.numel, dtype=dtype, device=device)
-        self.grad_data = torch.zeros_like(self.data)
+        # Allocate gradient buffer only (no separate data buffer needed here)
+        self.grad_data = torch.zeros(self.numel, dtype=dtype, device=device)
 
         # Track parameters in this bucket - use deque for efficient append
         self.params: List[torch.nn.Parameter] = []
@@ -331,8 +330,8 @@ class ParamAndGradBuffer:
         self.numel = sum(p.numel() for p in self.params)
         self.numel_per_dtype: Dict[torch.dtype, int] = {}
 
-        # Build parameter mapping
-        self.param_to_buffer_index: Dict[torch.nn.Parameter, int] = {}
+        # Build parameter mapping (keyed by parameter id to avoid unhashable keys)
+        self.param_index_by_id: Dict[int, int] = {}
         self.param_offsets: List[Tuple[int, int]] = []
 
         # Initialize buffers
@@ -375,7 +374,8 @@ class ParamAndGradBuffer:
         offset = 0
         for i, param in enumerate(self.params):
             param_numel = param.numel()
-            self.param_to_buffer_index[param] = i
+            # Map by object identity to avoid using nn.Parameter as dict key
+            self.param_index_by_id[id(param)] = i
             self.param_offsets.append((offset, offset + param_numel))
 
             # Copy parameter data to buffer
@@ -415,16 +415,28 @@ class ParamAndGradBuffer:
             alignment=self.bucket_config.alignment,
         )
 
+        elem_size = (
+            torch.finfo(self.grad_dtype).bits // 8
+            if self.grad_dtype.is_floating_point
+            else torch.empty(0, dtype=self.grad_dtype).element_size()
+        )
+
         for param in self.params:
+            # If parameter cannot fit current bucket, finalize and create new one
             if not current_bucket.can_add_param(param):
-                # Finalize current bucket and create new one
-                self.buckets.append(current_bucket)
-                bucket_id += 1
+                if current_bucket.params:
+                    self.buckets.append(current_bucket)
+                    bucket_id += 1
+
+                # Ensure the new bucket can hold at least this parameter
+                needed_bytes = int(param.numel() * elem_size)
+                new_bucket_size_bytes = max(bucket_size_bytes, needed_bytes)
+
                 current_bucket = GradientBucket(
                     bucket_id=bucket_id,
                     dtype=self.grad_dtype,
                     device=device,
-                    bucket_size_bytes=bucket_size_bytes,
+                    bucket_size_bytes=new_bucket_size_bytes,
                     alignment=self.bucket_config.alignment,
                 )
 
