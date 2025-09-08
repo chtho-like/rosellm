@@ -8,6 +8,15 @@ import psutil
 import torch
 import torch.distributed as dist
 
+from .communication import (
+    BucketConfig,
+    BucketGroupConfig,
+    BucketGroupManager,
+    BucketManager,
+    BucketStrategy,
+    CommunicationBackend,
+    GroupStrategy,
+)
 from .config import TrainingConfig, validate_config
 from .scheduler import OptimizerParamScheduler
 from .utils.gradient_utils import (
@@ -156,6 +165,86 @@ class RoseTrainer:
         if self.distributed:
             self._setup_distributed_model()
 
+        # Initialize gradient bucketing if enabled
+        self.bucket_manager: Optional[BucketManager] = None
+        self.bucket_group_manager: Optional[BucketGroupManager] = None
+
+        if self.config.bucketing.enabled and self.distributed:
+            self._initialize_gradient_bucketing()
+
+    def _initialize_gradient_bucketing(self) -> None:
+        """Initialize gradient bucketing components."""
+        try:
+            # Convert config enums to bucketing module enums
+            bucket_strategy_map = {
+                "size_based": BucketStrategy.SIZE_BASED,
+                "layer_based": BucketStrategy.LAYER_BASED,
+                "mixed": BucketStrategy.MIXED,
+                "custom": BucketStrategy.CUSTOM,
+            }
+
+            backend_map = {
+                "nccl": CommunicationBackend.NCCL,
+                "gloo": CommunicationBackend.GLOO,
+                "auto": CommunicationBackend.AUTO,
+            }
+
+            # Create bucket configuration
+            bucket_config = BucketConfig(
+                strategy=bucket_strategy_map[self.config.bucketing.strategy],
+                max_bucket_size_mb=self.config.bucketing.max_bucket_size_mb,
+                min_bucket_size_mb=self.config.bucketing.min_bucket_size_mb,
+                backend=backend_map[self.config.bucketing.backend],
+                overlap_communication=self.config.bucketing.overlap_communication,
+                compress_gradients=self.config.bucketing.compress_gradients,
+                dynamic_bucketing=self.config.bucketing.dynamic_bucketing,
+                gradient_predivision=self.config.bucketing.gradient_predivision,
+                communication_timeout_ms=self.config.bucketing.communication_timeout_ms,
+                bucket_cap_mb=self.config.bucketing.bucket_cap_mb,
+            )
+
+            # Initialize bucket manager
+            self.bucket_manager = BucketManager(
+                config=bucket_config,
+                device=self.device,
+                dtype=torch.float32,  # Use FP32 for gradient communication
+            )
+
+            # Initialize bucket group manager if groups are enabled
+            if self.config.bucketing.enable_groups:
+                group_strategy_map = {
+                    "parallel": GroupStrategy.PARALLEL,
+                    "sequential": GroupStrategy.SEQUENTIAL,
+                    "hierarchical": GroupStrategy.HIERARCHICAL,
+                    "adaptive": GroupStrategy.ADAPTIVE,
+                }
+
+                group_config = BucketGroupConfig(
+                    group_strategy=group_strategy_map[
+                        self.config.bucketing.group_strategy
+                    ],
+                    max_groups=self.config.bucketing.max_groups,
+                    overlap_groups=self.config.bucketing.overlap_communication,
+                )
+
+                self.bucket_group_manager = BucketGroupManager(
+                    config=group_config,
+                    bucket_manager=self.bucket_manager,
+                )
+
+            logger.info(
+                f"Initialized gradient bucketing with strategy: "
+                f"{self.config.bucketing.strategy}, max_size: "
+                f"{self.config.bucketing.max_bucket_size_mb}MB, "
+                f"groups: {self.config.bucketing.enable_groups}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to initialize gradient bucketing: {e}")
+            self.bucket_manager = None
+            self.bucket_group_manager = None
+            raise
+
     def _update_performance_stats(self, batch_size: int) -> None:
         """Update performance tracking statistics."""
         if self._step_start_time is not None:
@@ -262,7 +351,16 @@ class RoseTrainer:
         # Forward pass
         self.optimizer.zero_grad()
         outputs = self.model(**batch)
-        loss = outputs.loss
+
+        # Handle different output formats
+        if hasattr(outputs, "loss"):
+            loss = outputs.loss
+        elif isinstance(outputs, dict) and "loss" in outputs:
+            loss = outputs["loss"]
+        else:
+            raise ValueError(
+                f"Model output must have 'loss' attribute or key, got {type(outputs)}"
+            )
 
         # Backward pass
         loss.backward()
@@ -348,7 +446,12 @@ class RoseTrainer:
             self.config.gradient.sync_on_accumulation
             or (self.gradient_stats_step % self.config.gradient.accumulation_steps == 0)
         ):
-            sync_gradients(self.model)
+            if self.bucket_manager is not None:
+                # Use gradient bucketing for synchronization
+                self._synchronize_gradients_with_bucketing()
+            else:
+                # Use traditional gradient synchronization
+                sync_gradients(self.model)
 
         # Update parameters
         self.optimizer.step()
@@ -547,6 +650,76 @@ class RoseTrainer:
             }
 
         return report
+
+    def _synchronize_gradients_with_bucketing(self) -> Dict[str, Any]:
+        """
+        Synchronize gradients using the gradient bucketing system.
+
+        Returns:
+            Dictionary containing synchronization statistics
+        """
+        if self.bucket_manager is None:
+            raise RuntimeError("Bucket manager not initialized")
+
+        sync_stats = {}
+
+        try:
+            # Reset buckets for new synchronization round
+            self.bucket_manager.reset()
+
+            # Assign gradients to buckets
+            for name, param in self.model.named_parameters():
+                if param.grad is not None:
+                    bucket_id = self.bucket_manager.assign_gradient(
+                        param_name=name,
+                        gradient=param.grad,
+                    )
+                    logger.debug(f"Assigned {name} to bucket {bucket_id}")
+
+            # Use bucket group manager if available,
+            # otherwise use bucket manager directly
+            if self.bucket_group_manager is not None:
+                # Assign buckets to groups
+                group_assignment_stats = (
+                    self.bucket_group_manager.assign_buckets_to_groups()
+                )
+                sync_stats.update(group_assignment_stats)
+
+                # Synchronize bucket groups
+                group_sync_stats = self.bucket_group_manager.synchronize_groups()
+                sync_stats.update(group_sync_stats)
+            else:
+                # Direct bucket synchronization
+                bucket_sync_stats = self.bucket_manager.synchronize_buckets(
+                    overlap=self.config.bucketing.overlap_communication
+                )
+                sync_stats.update(bucket_sync_stats)
+
+            # Get synchronized gradients and update model parameters
+            updated_gradients = self.bucket_manager.get_bucket_assignments()
+
+            for name, param in self.model.named_parameters():
+                if name in updated_gradients:
+                    param.grad = updated_gradients[name]
+
+            # Add bucketing statistics
+            bucket_stats = self.bucket_manager.get_statistics()
+            sync_stats["bucket_stats"] = bucket_stats
+
+            if self.bucket_group_manager is not None:
+                group_stats = self.bucket_group_manager.get_statistics()
+                sync_stats["group_stats"] = group_stats
+
+            logger.debug(f"Gradient bucketing synchronization completed: {sync_stats}")
+
+        except Exception as e:
+            logger.error(f"Gradient bucketing synchronization failed: {e}")
+            # Fallback to traditional synchronization
+            sync_gradients(self.model)
+            sync_stats["fallback_used"] = True
+            sync_stats["error"] = str(e)
+
+        return sync_stats
 
     def get_current_lr(self) -> float:
         """Get current learning rate from scheduler or optimizer.

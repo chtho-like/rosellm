@@ -132,6 +132,70 @@ class MemoryConfig(BaseModel):
     memory_efficient_attention: bool = True
 
 
+class BucketingConfig(BaseModel):
+    """Gradient bucketing configuration."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    # Enable gradient bucketing
+    enabled: bool = Field(False, description="Enable gradient bucketing")
+
+    # Bucket strategy
+    strategy: Literal["size_based", "layer_based", "mixed", "custom"] = Field(
+        "size_based", description="Bucketing strategy"
+    )
+
+    # Bucket size limits
+    max_bucket_size_mb: float = Field(
+        25.0, gt=0, le=200.0, description="Maximum bucket size in MB"
+    )
+    min_bucket_size_mb: float = Field(
+        1.0, gt=0, description="Minimum bucket size in MB"
+    )
+
+    # Communication settings
+    backend: Literal["nccl", "gloo", "auto"] = Field(
+        "auto", description="Communication backend"
+    )
+    overlap_communication: bool = Field(
+        True, description="Overlap communication with computation"
+    )
+    compress_gradients: bool = Field(False, description="Enable gradient compression")
+
+    # Advanced features
+    dynamic_bucketing: bool = Field(False, description="Dynamically adapt bucket sizes")
+    gradient_predivision: bool = Field(
+        True, description="Pre-divide gradients for numerical stability"
+    )
+
+    # Group management
+    enable_groups: bool = Field(False, description="Enable bucket grouping")
+    group_strategy: Literal[
+        "parallel", "sequential", "hierarchical", "adaptive"
+    ] = Field("adaptive", description="Group communication strategy")
+    max_groups: int = Field(8, ge=1, le=32, description="Maximum number of groups")
+
+    # Performance tuning
+    communication_timeout_ms: int = Field(
+        30000, ge=1000, description="Communication timeout in milliseconds"
+    )
+    bucket_cap_mb: float = Field(
+        100.0, gt=0, description="Hard limit on bucket size in MB"
+    )
+
+    @field_validator("max_bucket_size_mb")
+    def validate_max_bucket_size(cls, v, info):
+        if "min_bucket_size_mb" in info.data and v < info.data["min_bucket_size_mb"]:
+            raise ValueError("max_bucket_size_mb must be >= min_bucket_size_mb")
+        return v
+
+    @field_validator("bucket_cap_mb")
+    def validate_bucket_cap(cls, v, info):
+        if "max_bucket_size_mb" in info.data and v < info.data["max_bucket_size_mb"]:
+            raise ValueError("bucket_cap_mb must be >= max_bucket_size_mb")
+        return v
+
+
 class ParallelismConfig(BaseModel):
     """Parallelism configuration."""
 
@@ -271,6 +335,15 @@ def _default_scheduler() -> SchedulerConfig:
     return SchedulerConfig()  # type: ignore[call-arg]
 
 
+def _default_bucketing() -> BucketingConfig:
+    """Create default bucketing configuration.
+
+    Returns:
+        BucketingConfig: Default bucketing settings with bucketing disabled
+    """
+    return BucketingConfig()  # type: ignore[call-arg]
+
+
 class TrainingConfig(BaseModel):
     """Main training configuration with validation."""
 
@@ -296,6 +369,7 @@ class TrainingConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=_default_memory)
     parallelism: ParallelismConfig = Field(default_factory=_default_parallelism)
     scheduler: SchedulerConfig = Field(default_factory=_default_scheduler)
+    bucketing: BucketingConfig = Field(default_factory=_default_bucketing)
 
     # Checkpointing
     checkpoint_interval: int = Field(DEFAULT_CHECKPOINT_INTERVAL, ge=1)
@@ -434,6 +508,10 @@ def validate_config(config: Union[dict, TrainingConfig]) -> TrainingConfig:
         # Validate scheduler config
         if hasattr(validated, "scheduler"):
             validated.scheduler = SchedulerConfig(**validated.scheduler.model_dump())
+
+        # Validate bucketing config
+        if hasattr(validated, "bucketing"):
+            validated.bucketing = BucketingConfig(**validated.bucketing.model_dump())
 
     except Exception as e:
         raise ValueError(f"Sub-configuration validation failed: {e}")
