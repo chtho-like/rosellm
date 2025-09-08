@@ -249,9 +249,9 @@ def main():
     grad_config = GradientFinalizationConfig(
         sync_strategy=args.sync_strategy,
         reduction_op="mean",
-        dimension_order="hierarchical"
-        if args.sync_strategy == "hierarchical"
-        else "tp-pp-dp-cp-ep",
+        dimension_order=(
+            "hierarchical" if args.sync_strategy == "hierarchical" else "tp-pp-dp-cp-ep"
+        ),
         bucket_size_mb=args.bucket_size_mb,
         overlap_grad_sync=args.overlap_grad_sync,
         sync_grad_before_clip=True,
