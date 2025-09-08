@@ -197,10 +197,30 @@ class GradientBucket:
         """Pack parameter gradients into the bucket buffer.
 
         Optimized version using batched operations where possible.
+
+        Raises:
+            ValueError: If gradient shape doesn't match parameter shape
         """
         # Pack parameters with gradients
         for param, (start, end) in zip(self.params, self.param_offsets):
             if param.grad is not None:
+                # Validate gradient shape matches parameter shape
+                if param.grad.shape != param.shape:
+                    raise ValueError(
+                        f"Gradient shape {param.grad.shape} doesn't match "
+                        f"parameter shape {param.shape}. This may indicate "
+                        f"a model architecture change during training."
+                    )
+
+                # Validate buffer segment size matches parameter size
+                expected_numel = end - start
+                if param.grad.numel() != expected_numel:
+                    raise ValueError(
+                        f"Parameter gradient has {param.grad.numel()} elements but "
+                        f"buffer segment expects {expected_numel} elements. "
+                        f"This indicates a buffer allocation mismatch."
+                    )
+
                 # Use no_grad context to avoid unnecessary gradient tracking
                 with torch.no_grad():
                     self.grad_data[start:end].copy_(param.grad.data.view(-1))
@@ -263,6 +283,17 @@ class ParamAndGradBuffer:
     - Gradient bucketing for optimized all-reduce
     - Memory alignment for CUDA operations
     - Integration with mixed precision training
+
+    IMPORTANT: Buffer Lifetime Management
+    -------------------------------------
+    This class modifies parameter tensors to point to views of the internal buffer.
+    The buffer MUST outlive all parameters that reference it. Deallocating the buffer
+    while parameters still hold references will cause undefined behavior and crashes.
+
+    Best Practices:
+    - Use BufferManager's context manager for automatic cleanup
+    - Never manually delete buffers while model is in use
+    - Call restore_params() before buffer deallocation if needed
     """
 
     def __init__(
@@ -348,6 +379,9 @@ class ParamAndGradBuffer:
             self.param_data[offset : offset + param_numel].copy_(param.data.view(-1))
 
             # Update parameter to point to buffer slice
+            # WARNING: This creates a view into the buffer. The buffer must outlive
+            # all parameters to avoid dangling references. Ensure proper cleanup
+            # order and never deallocate the buffer while parameters are still in use.
             param.data = self.param_data[offset : offset + param_numel].view_as(
                 param.data
             )
@@ -489,6 +523,20 @@ class ParamAndGradBuffer:
 
         return handles if async_op else None
 
+    def finish_bucketed_all_reduce(self) -> None:
+        """Finish async bucketed all-reduce by unpacking gradients from buckets."""
+        if not self.buckets:
+            return
+
+        world_size = dist.get_world_size(self.data_parallel_group)
+        for bucket in self.buckets:
+            # Wait for any pending async operations
+            bucket.finish_all_reduce()
+            # Unpack gradients with proper scaling
+            bucket.unpack_gradients(scale=1.0 / world_size)
+            # Reset bucket for next iteration
+            bucket.reset()
+
     def zero_gradients(self) -> None:
         """Zero out all gradients in the buffer."""
         self.grad_data.zero_()
@@ -515,6 +563,18 @@ class ParamAndGradBuffer:
             self.sync_buffer_to_gradients()
 
         return float(total_norm)
+
+    def restore_params(self) -> None:
+        """
+        Restore parameters to independent memory allocations.
+
+        This method creates new independent tensors for each parameter, breaking
+        the dependency on the buffer. Use this before deallocating the buffer
+        to prevent dangling references.
+        """
+        for param, (start, end) in zip(self.params, self.param_offsets):
+            # Create a new tensor with the current data
+            param.data = self.param_data[start:end].view_as(param.data).clone()
 
     def get_memory_usage(self) -> Dict[str, float]:
         """Get memory usage statistics in MB."""
@@ -661,11 +721,16 @@ class BufferManager:
             if handle is not None:
                 handle.wait()
 
-        # Sync gradients back after async completion
+        # Handle bucketed and flat all-reduce differently
         if self.comm_handles:
-            world_size = dist.get_world_size(self.data_parallel_group)
             for buffer in self.buffers.values():
-                buffer.sync_buffer_to_gradients(scale=1.0 / world_size)
+                # If using bucketed all-reduce, finish bucket operations
+                if buffer.buckets:
+                    buffer.finish_bucketed_all_reduce()
+                else:
+                    # For flat all-reduce, sync gradients back with scaling
+                    world_size = dist.get_world_size(self.data_parallel_group)
+                    buffer.sync_buffer_to_gradients(scale=1.0 / world_size)
 
         self.comm_handles.clear()
 
