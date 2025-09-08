@@ -18,7 +18,7 @@ References:
 import logging
 import math
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
@@ -71,14 +71,11 @@ class BucketConfig:
 
     # Bucket size in MB (recommended: 25-50 MB for good performance)
     bucket_size_mb: float = DEFAULT_BUCKET_SIZE_MB
-    # Whether to use constant bucket size or adaptive sizing
-    use_constant_size: bool = False
     # Alignment for CUDA operations (should be power of 2)
     alignment: int = DEFAULT_ALIGNMENT
     # Whether to overlap communication with computation
     overlap_comm: bool = True
-    # NCCL communication hints
-    nccl_hints: Dict[str, bool] = field(default_factory=lambda: {"use_lla": True})
+    # (Removed unused configuration fields to reduce confusion.)
 
     def __post_init__(self):
         """Validate configuration parameters."""
@@ -146,10 +143,7 @@ class GradientBucket:
         self.param_offsets: List[Tuple[int, int]] = []  # (start, end) offsets
         self.current_offset = 0
 
-        # Pre-allocate space for better performance
-        self.params_capacity = 100  # Initial capacity
-        self.params = []
-        self.param_offsets = []
+        # (Lists grow dynamically; no manual pre-allocation is needed.)
 
         # Communication handle for async operations
         self.comm_handle: Optional[dist.Work] = None
@@ -237,7 +231,10 @@ class GradientBucket:
         """
         for param, (start, end) in zip(self.params, self.param_offsets):
             if param.grad is not None:
-                param.grad.data = self.grad_data[start:end].view_as(param.grad) * scale
+                grad_slice = self.grad_data[start:end].view_as(param.grad) * scale
+                if grad_slice.dtype != param.dtype:
+                    grad_slice = grad_slice.to(param.dtype)
+                param.grad.data = grad_slice
 
     def start_all_reduce(
         self, process_group: Optional[dist.ProcessGroup] = None
@@ -328,7 +325,17 @@ class ParamAndGradBuffer:
         self.params.sort(key=lambda p: p.numel(), reverse=True)
         # Calculate total size
         self.numel = sum(p.numel() for p in self.params)
-        self.numel_per_dtype: Dict[torch.dtype, int] = {}
+
+        # Validate uniform dtype for parameters when using a single buffer
+        # (BufferManager defaults to per-dtype buffers; if caller opts into a
+        # single buffer, enforce that all params match the provided dtype)
+        for p in self.params:
+            if p.dtype != self.dtype:
+                raise ParameterMappingError(
+                    "All parameters must have dtype == buffer dtype when using a "
+                    "single ParamAndGradBuffer. Consider using BufferManager with "
+                    "create_per_dtype_buffers=True."
+                )
 
         # Build parameter mapping (keyed by parameter id to avoid unhashable keys)
         self.param_index_by_id: Dict[int, int] = {}
@@ -345,11 +352,17 @@ class ParamAndGradBuffer:
         self._last_all_reduce_bucketed: bool = False
 
         # Statistics
+        # Compute element size in bytes for reporting
+        elem_size = (
+            torch.finfo(self.dtype).bits // 8
+            if self.dtype.is_floating_point
+            else torch.empty(0, dtype=self.dtype).element_size()
+        )
         self.stats = {
             "num_params": len(self.params),
             "total_numel": self.numel,
             "num_buckets": len(self.buckets),
-            "buffer_memory_mb": (self.numel * self.dtype.itemsize) / (1024 * 1024),
+            "buffer_memory_mb": (self.numel * elem_size) / (1024 * 1024),
         }
 
         logger.info(f"Created ParamAndGradBuffer: {self.stats}")
@@ -474,7 +487,10 @@ class ParamAndGradBuffer:
         for param, (start, end) in zip(self.params, self.param_offsets):
             if param.grad is None:
                 param.grad = torch.zeros_like(param.data)
-            param.grad.data = self.grad_data[start:end].view_as(param.grad) * scale
+            grad_slice = self.grad_data[start:end].view_as(param.grad) * scale
+            if grad_slice.dtype != param.dtype:
+                grad_slice = grad_slice.to(param.dtype)
+            param.grad.data = grad_slice
 
     def all_reduce_gradients(
         self, async_op: bool = False
@@ -616,8 +632,17 @@ class ParamAndGradBuffer:
 
     def get_memory_usage(self) -> Dict[str, float]:
         """Get memory usage statistics in MB."""
-        element_size = self.dtype.itemsize
-        grad_element_size = self.grad_dtype.itemsize
+        # Compute element sizes in bytes
+        element_size = (
+            torch.finfo(self.dtype).bits // 8
+            if self.dtype.is_floating_point
+            else torch.empty(0, dtype=self.dtype).element_size()
+        )
+        grad_element_size = (
+            torch.finfo(self.grad_dtype).bits // 8
+            if self.grad_dtype.is_floating_point
+            else torch.empty(0, dtype=self.grad_dtype).element_size()
+        )
 
         param_memory = (self.numel * element_size) / (1024 * 1024)
         grad_memory = (self.numel * grad_element_size) / (1024 * 1024)
@@ -666,11 +691,14 @@ class BufferManager:
         """
         self.model = model
         self.data_parallel_group = data_parallel_group
-        self.bucket_config = bucket_config or BucketConfig()
-        # Respect user-provided BucketConfig.overlap_comm by only overriding
-        # when an explicit override is provided via the constructor
-        if overlap_comm is not None:
-            self.bucket_config.overlap_comm = overlap_comm
+        base_config = bucket_config or BucketConfig()
+        # Avoid mutating caller-provided BucketConfig; create an adjusted copy
+        # when an explicit override is provided via the constructor.
+        self.bucket_config = (
+            replace(base_config, overlap_comm=overlap_comm)
+            if overlap_comm is not None
+            else base_config
+        )
 
         # Group parameters by dtype if requested
         self.buffers: Dict[str, ParamAndGradBuffer] = {}
@@ -853,6 +881,10 @@ class BufferManager:
 
         # Zero gradients to free memory
         self.zero_gradients()
+
+        # Detach parameters from internal buffers to avoid dangling views
+        for buffer in self.buffers.values():
+            buffer.restore_params()
 
         # Log exit
         if exc_type is not None:
