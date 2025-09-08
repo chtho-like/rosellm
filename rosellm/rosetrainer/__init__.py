@@ -8,6 +8,11 @@ This module provides a comprehensive distributed training framework with support
 """
 
 from .engine import RoseTrainer
+from .gradient import (  # Gradient finalization
+    GradientFinalizationConfig,
+    GradientFinalizer,
+    GradientSyncStrategy,
+)
 from .optimizer import (  # Distributed optimizer
     DistributedOptimizer,
     DistributedOptimizerConfig,
@@ -73,6 +78,10 @@ __all__ = [
     "MicrobatchInfo",
     # ZeRO
     "ZeROOptimizer",
+    # Gradient Finalization
+    "GradientFinalizationConfig",
+    "GradientFinalizer",
+    "GradientSyncStrategy",
     # Gradient Utilities
     "GradientClipConfig",
     "apply_gradient_clipping",
