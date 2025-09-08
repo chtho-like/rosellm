@@ -606,9 +606,9 @@ class TestContextManagers(unittest.TestCase):
             if param.requires_grad:
                 param.grad = torch.ones_like(param) * 4.0
 
-        # Use gradient accumulation context
-        with manager.gradient_accumulation_context(num_steps=4) as scale:
-            self.assertEqual(scale, 0.25)
+        # Use gradient accumulation context (auto-scales on exit; no external scaling)
+        with manager.gradient_accumulation_context(num_steps=4):
+            pass
 
         # After context, gradients should be scaled
         for buffer in manager.buffers.values():

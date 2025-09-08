@@ -613,7 +613,7 @@ class BufferManager:
         data_parallel_group: Optional[dist.ProcessGroup] = None,
         bucket_config: Optional[BucketConfig] = None,
         create_per_dtype_buffers: bool = True,
-        overlap_comm: bool = True,
+        overlap_comm: Optional[bool] = None,
     ) -> None:
         """
         Initialize buffer manager.
@@ -623,12 +623,16 @@ class BufferManager:
             data_parallel_group: Process group for gradient all-reduce
             bucket_config: Configuration for gradient bucketing
             create_per_dtype_buffers: Whether to create separate buffers per dtype
-            overlap_comm: Whether to overlap communication with computation
+            overlap_comm: Optional override for communication overlap. If None,
+                preserves the value from the provided BucketConfig (or its default).
         """
         self.model = model
         self.data_parallel_group = data_parallel_group
         self.bucket_config = bucket_config or BucketConfig()
-        self.bucket_config.overlap_comm = overlap_comm
+        # Respect user-provided BucketConfig.overlap_comm by only overriding
+        # when an explicit override is provided via the constructor
+        if overlap_comm is not None:
+            self.bucket_config.overlap_comm = overlap_comm
 
         # Group parameters by dtype if requested
         self.buffers: Dict[str, ParamAndGradBuffer] = {}
@@ -813,11 +817,14 @@ class BufferManager:
             num_steps: Number of accumulation steps
 
         Yields:
-            Scale factor for gradient averaging
+            None (auto-scales gradients on exit). To avoid double-scaling,
+            do not additionally divide the loss by num_steps when using this context.
         """
         scale = 1.0 / num_steps
         try:
-            yield scale
+            # Yield nothing (value ignored) to discourage external scaling and
+            # avoid double-scaling
+            yield None
         finally:
             # Ensure gradients are properly scaled after accumulation
             for buffer in self.buffers.values():
