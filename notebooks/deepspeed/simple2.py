@@ -711,16 +711,20 @@ def main():
 
             # Tokenize the prompt directly
             tokens = tokenizer.tokenize(prompt)
-            input_ids = tokenizer.convert_tokens_to_ids(tokens)
+            # convert_tokens_to_ids may return Optional[int]; coerce Nones to 0 for safety
+            from typing import List, Optional
+
+            input_ids_opt: List[Optional[int]] = tokenizer.convert_tokens_to_ids(tokens)
+            input_ids_list: List[int] = [int(x) if x is not None else 0 for x in input_ids_opt]
 
             # Check for out-of-bounds tokens
-            if max(input_ids) >= vocab_size:
+            if max(input_ids_list) >= vocab_size:
                 print(
                     f"Warning: Prompt contains token ID >= vocab_size. Clipping values."
                 )
-                input_ids = [min(id, vocab_size - 1) for id in input_ids]
+                input_ids_list = [min(tok_id, vocab_size - 1) for tok_id in input_ids_list]
 
-            input_ids = torch.tensor([input_ids], dtype=torch.long).to(safe_device)
+            input_ids = torch.tensor([input_ids_list], dtype=torch.long).to(safe_device)
 
             # Generate text
             try:
