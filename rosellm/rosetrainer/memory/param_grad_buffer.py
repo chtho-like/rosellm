@@ -342,6 +342,9 @@ class ParamAndGradBuffer:
         self.buckets: List[GradientBucket] = []
         self._create_buckets()
 
+        # Track whether the last all-reduce used bucketed communication
+        self._last_all_reduce_bucketed: bool = False
+
         # Statistics
         self.stats = {
             "num_params": len(self.params),
@@ -484,6 +487,7 @@ class ParamAndGradBuffer:
 
     def _all_reduce_flat(self, async_op: bool = False) -> Optional[dist.Work]:
         """Perform flat all-reduce on entire gradient buffer."""
+        self._last_all_reduce_bucketed = False
         self.sync_gradients_to_buffer()
 
         handle = dist.all_reduce(
@@ -501,6 +505,7 @@ class ParamAndGradBuffer:
 
     def _all_reduce_bucketed(self, async_op: bool = False) -> Optional[List[dist.Work]]:
         """Perform bucketed all-reduce with overlapping communication."""
+        self._last_all_reduce_bucketed = True
         handles: List[dist.Work] = []
 
         # Pack gradients into buckets
@@ -726,11 +731,11 @@ class BufferManager:
             if handle is not None:
                 handle.wait()
 
-        # Handle bucketed and flat all-reduce differently
+        # Handle bucketed and flat all-reduce differently. Do not assume that
+        # the presence of buckets implies bucketed communication was used.
         if self.comm_handles:
             for buffer in self.buffers.values():
-                # If using bucketed all-reduce, finish bucket operations
-                if buffer.buckets:
+                if getattr(buffer, "_last_all_reduce_bucketed", False):
                     buffer.finish_bucketed_all_reduce()
                 else:
                     # For flat all-reduce, sync gradients back with scaling
