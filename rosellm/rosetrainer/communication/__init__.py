@@ -6,12 +6,37 @@ Provides optimized communication patterns for distributed training:
 - Point-to-point communication
 - Collective operations
 - Communication overlap strategies
+- Gradient bucketing for efficient communication
+- Multi-bucket coordination and grouping
 """
 
 from typing import Optional
 
 import torch
 import torch.distributed as dist
+
+from .bucket_groups import (
+    BucketGroup,
+    BucketGroupConfig,
+    BucketGroupManager,
+    GroupStrategy,
+    PriorityLevel,
+)
+
+# Import gradient bucketing components
+from .gradient_buckets import (
+    BucketCapacityError,
+    BucketConfig,
+    BucketFactory,
+    BucketingError,
+    BucketManager,
+    BucketStateError,
+    BucketStrategy,
+    CommunicationBackend,
+    CommunicationError,
+    GradientBucket,
+    GradientValidationError,
+)
 
 
 def all_reduce(
@@ -39,6 +64,25 @@ def broadcast(
 
 
 __all__ = [
+    # Basic communication operations
     "all_reduce",
     "broadcast",
+    # Gradient bucketing
+    "BucketConfig",
+    "BucketFactory",
+    "BucketManager",
+    "BucketStrategy",
+    "BucketingError",
+    "BucketCapacityError",
+    "BucketStateError",
+    "CommunicationBackend",
+    "CommunicationError",
+    "GradientBucket",
+    "GradientValidationError",
+    # Bucket groups
+    "BucketGroup",
+    "BucketGroupConfig",
+    "BucketGroupManager",
+    "GroupStrategy",
+    "PriorityLevel",
 ]
