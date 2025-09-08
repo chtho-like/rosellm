@@ -8,6 +8,12 @@ This module provides a comprehensive distributed training framework with support
 """
 
 from .engine import RoseTrainer
+from .optimizer import (  # Distributed optimizer
+    DistributedOptimizer,
+    DistributedOptimizerConfig,
+    ParameterPartitioner,
+    ParameterRange,
+)
 from .parallelism import ColumnParallelLinear  # Parallelism components
 from .parallelism import (
     DataParallelTrainer,
@@ -75,6 +81,11 @@ __all__ = [
     "gradient_accumulation_context",
     "get_gradient_stats",
     "sync_gradients",
+    # Distributed Optimizer
+    "DistributedOptimizer",
+    "DistributedOptimizerConfig",
+    "ParameterPartitioner",
+    "ParameterRange",
     # Parallel State Management
     "initialize_model_parallel",
     "is_initialized",

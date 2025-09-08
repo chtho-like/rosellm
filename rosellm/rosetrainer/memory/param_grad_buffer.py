@@ -18,7 +18,7 @@ References:
 import logging
 import math
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
