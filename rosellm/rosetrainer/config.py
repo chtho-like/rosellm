@@ -120,6 +120,80 @@ class GradientConfig(BaseModel):
         return v
 
 
+class MixedPrecisionConfig(BaseModel):
+    """Mixed precision training configuration with dynamic loss scaling support."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    # Precision settings
+    enabled: bool = Field(True, description="Enable mixed precision training")
+    precision_type: Literal["fp16", "bf16", "fp32", "mixed"] = Field(
+        "fp16", description="Precision type for mixed precision training"
+    )
+    autocast_enabled: bool = Field(True, description="Enable PyTorch autocast")
+
+    # Dynamic loss scaling configuration
+    use_dynamic_scaling: bool = Field(True, description="Use dynamic loss scaling")
+    initial_scale: float = Field(2**16, gt=0, description="Initial loss scale")
+    min_scale: float = Field(1.0, gt=0, description="Minimum loss scale")
+    max_scale: float = Field(2**24, gt=0, description="Maximum loss scale")
+    growth_factor: float = Field(
+        2.0, gt=1.0, le=10.0, description="Scale growth factor"
+    )
+    backoff_factor: float = Field(0.5, gt=0, lt=1.0, description="Scale backoff factor")
+    growth_interval: int = Field(2000, ge=1, description="Steps before scale growth")
+    hysteresis: int = Field(2, ge=1, description="Consecutive overflows before backoff")
+
+    # Multi-tensor optimization
+    use_multi_tensor: bool = Field(
+        True, description="Use multi-tensor operations when available"
+    )
+    chunk_size: int = Field(
+        2**20, gt=0, description="Chunk size for multi-tensor ops"
+    )
+
+    # Overflow detection
+    enable_inf_nan_check: bool = Field(
+        True, description="Check for inf/nan in gradients"
+    )
+    check_frequency: int = Field(1, ge=1, description="Overflow check frequency")
+    skip_first_n_steps: int = Field(
+        10, ge=0, description="Skip overflow check for first N steps"
+    )
+
+    # Performance optimizations
+    use_fused_kernels: bool = Field(
+        True, description="Use fused CUDA kernels when available"
+    )
+    cache_inv_scale: bool = Field(
+        True, description="Cache inverse scale for efficiency"
+    )
+
+    # Monitoring
+    log_scale_changes: bool = Field(True, description="Log scale changes")
+    detailed_overflow_info: bool = Field(
+        False, description="Log detailed overflow info"
+    )
+    track_overflow_history: int = Field(
+        100, ge=0, description="Track N recent overflow events"
+    )
+
+    @field_validator("max_scale")
+    def validate_max_scale(cls, v, info):
+        if "min_scale" in info.data and v < info.data["min_scale"]:
+            raise ValueError("max_scale must be >= min_scale")
+        return v
+
+    @field_validator("initial_scale")
+    def validate_initial_scale(cls, v, info):
+        data = info.data
+        if "min_scale" in data and v < data["min_scale"]:
+            raise ValueError("initial_scale must be >= min_scale")
+        if "max_scale" in data and v > data["max_scale"]:
+            raise ValueError("initial_scale must be <= max_scale")
+        return v
+
+
 class MemoryConfig(BaseModel):
     """Memory optimization configuration."""
 
@@ -335,6 +409,16 @@ def _default_scheduler() -> SchedulerConfig:
     return SchedulerConfig()  # type: ignore[call-arg]
 
 
+def _default_mixed_precision() -> MixedPrecisionConfig:
+    """Create default mixed precision configuration.
+
+    Returns:
+        MixedPrecisionConfig: Default mixed precision settings with FP16 and
+            dynamic scaling
+    """
+    return MixedPrecisionConfig()  # type: ignore[call-arg]
+
+
 def _default_bucketing() -> BucketingConfig:
     """Create default bucketing configuration.
 
@@ -369,6 +453,9 @@ class TrainingConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=_default_memory)
     parallelism: ParallelismConfig = Field(default_factory=_default_parallelism)
     scheduler: SchedulerConfig = Field(default_factory=_default_scheduler)
+    mixed_precision: MixedPrecisionConfig = Field(
+        default_factory=_default_mixed_precision
+    )
     bucketing: BucketingConfig = Field(default_factory=_default_bucketing)
 
     # Checkpointing
@@ -508,6 +595,12 @@ def validate_config(config: Union[dict, TrainingConfig]) -> TrainingConfig:
         # Validate scheduler config
         if hasattr(validated, "scheduler"):
             validated.scheduler = SchedulerConfig(**validated.scheduler.model_dump())
+
+        # Validate mixed precision config
+        if hasattr(validated, "mixed_precision"):
+            validated.mixed_precision = MixedPrecisionConfig(
+                **validated.mixed_precision.model_dump()
+            )
 
         # Validate bucketing config
         if hasattr(validated, "bucketing"):

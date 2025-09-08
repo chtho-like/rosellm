@@ -9,18 +9,18 @@ training with automatic loss scaling and overflow handling.
 import argparse
 import logging
 import os
-from typing import Tuple
+from typing import Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
+from rosellm.rosetrainer.mixed_precision import AbstractGradScaler
 from rosellm.rosetrainer.mixed_precision import (
-    AbstractGradScaler,
-    DynamicGradScaler,
-    GradScalerConfig,
+    EnhancedDynamicGradScaler as DynamicGradScaler,
 )
+from rosellm.rosetrainer.mixed_precision import GradScalerConfig
 from rosellm.rosetrainer.mixed_precision.gradient_scaler import check_for_inf_and_nan
 
 logging.basicConfig(
@@ -113,7 +113,7 @@ def train_step(
     model: nn.Module,
     batch: Tuple[torch.Tensor, torch.Tensor],
     optimizer: torch.optim.Optimizer,
-    scaler: AbstractGradScaler,
+    scaler: Union[AbstractGradScaler, DynamicGradScaler],
     device: torch.device,
     use_amp: bool = True,
 ) -> Tuple[float, bool]:
@@ -209,7 +209,7 @@ def main():
     scaler = scaler_config.create_scaler(device=str(device))
     if scaler is None:
         # Create a dynamic scaler if none was specified
-        scaler = DynamicGradScaler(initial_scale=1.0, device=str(device))
+        scaler = DynamicGradScaler(initial_scale=1.0, device=device)
 
     logger.info(
         f"Created {args.scaler_type} gradient scaler with "
@@ -284,7 +284,7 @@ def main():
     new_optimizer = torch.optim.Adam(new_model.parameters(), lr=args.lr)
     new_scaler = scaler_config.create_scaler(device=str(device))
     if new_scaler is None:
-        new_scaler = DynamicGradScaler(initial_scale=1.0, device=str(device))
+        new_scaler = DynamicGradScaler(initial_scale=1.0, device=device)
 
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)

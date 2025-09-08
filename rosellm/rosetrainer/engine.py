@@ -18,6 +18,7 @@ from .communication import (
     GroupStrategy,
 )
 from .config import TrainingConfig, validate_config
+from .mixed_precision import MixedPrecisionManager, create_mixed_precision_manager
 from .scheduler import OptimizerParamScheduler
 from .utils.gradient_utils import (
     GradientClipConfig,
@@ -113,6 +114,70 @@ class RoseTrainer:
         # Gradient tracking
         self.gradient_stats_step = 0
 
+        # Initialize mixed precision manager if enabled
+        self.mixed_precision_manager = None
+        if self.config.mixed_precision.enabled:
+            self.mixed_precision_manager = create_mixed_precision_manager(
+                precision=self.config.mixed_precision.precision_type,
+                use_dynamic_scaling=self.config.mixed_precision.use_dynamic_scaling,
+                initial_scale=self.config.mixed_precision.initial_scale,
+                device=None,  # Will auto-detect device later
+            )
+
+            # Override with detailed configuration if needed
+            from .mixed_precision.dynamic_scaler import DynamicScalerConfig
+            from .mixed_precision.mixed_precision import MixedPrecisionConfig
+
+            detailed_mp_config = MixedPrecisionConfig(
+                precision=self.config.mixed_precision.precision_type,
+                use_dynamic_scaling=self.config.mixed_precision.use_dynamic_scaling,
+                scaler_config=(
+                    DynamicScalerConfig(
+                        initial_scale=self.config.mixed_precision.initial_scale,
+                        min_scale=self.config.mixed_precision.min_scale,
+                        max_scale=self.config.mixed_precision.max_scale,
+                        growth_factor=self.config.mixed_precision.growth_factor,
+                        backoff_factor=self.config.mixed_precision.backoff_factor,
+                        growth_interval=self.config.mixed_precision.growth_interval,
+                        hysteresis=self.config.mixed_precision.hysteresis,
+                        use_multi_tensor=self.config.mixed_precision.use_multi_tensor,
+                        chunk_size=self.config.mixed_precision.chunk_size,
+                        enable_inf_nan_check=(
+                            self.config.mixed_precision.enable_inf_nan_check
+                        ),
+                        check_frequency=self.config.mixed_precision.check_frequency,
+                        skip_first_n_steps=(
+                            self.config.mixed_precision.skip_first_n_steps
+                        ),
+                        use_fused_kernels=self.config.mixed_precision.use_fused_kernels,
+                        cache_inv_scale=self.config.mixed_precision.cache_inv_scale,
+                        log_scale_changes=self.config.mixed_precision.log_scale_changes,
+                        detailed_overflow_info=(
+                            self.config.mixed_precision.detailed_overflow_info
+                        ),
+                        track_overflow_history=(
+                            self.config.mixed_precision.track_overflow_history
+                        ),
+                    )
+                    if self.config.mixed_precision.use_dynamic_scaling
+                    else None
+                ),
+                autocast_enabled=self.config.mixed_precision.autocast_enabled,
+                log_overflow_info=self.config.mixed_precision.log_scale_changes,
+                track_scale_history=True,
+            )
+
+            self.mixed_precision_manager = MixedPrecisionManager(
+                config=detailed_mp_config,
+                device=None,  # Will be set after device initialization
+            )
+
+            logger.info(
+                f"Initialized mixed precision manager: "
+                f"{self.config.mixed_precision.precision_type}, "
+                f"dynamic_scaling={self.config.mixed_precision.use_dynamic_scaling}"
+            )
+
         # Initialize scheduler if enabled
         self.scheduler = None
         if self.config.scheduler.enabled:
@@ -160,6 +225,10 @@ class RoseTrainer:
 
         # Move model to device
         self.model.to(self.device)
+
+        # Update mixed precision manager device after device is set
+        if self.mixed_precision_manager is not None:
+            self.mixed_precision_manager.device = self.device
 
         # Configure distributed model if needed
         if self.distributed:
@@ -348,9 +417,15 @@ class RoseTrainer:
         # Move batch to device
         batch = {k: v.to(self.device) for k, v in batch.items()}
 
-        # Forward pass
+        # Zero gradients
         self.optimizer.zero_grad()
-        outputs = self.model(**batch)
+
+        # Forward pass with mixed precision if enabled
+        if self.mixed_precision_manager is not None:
+            with self.mixed_precision_manager.autocast_context():
+                outputs = self.model(**batch)
+        else:
+            outputs = self.model(**batch)
 
         # Handle different output formats
         if hasattr(outputs, "loss"):
@@ -362,40 +437,66 @@ class RoseTrainer:
                 f"Model output must have 'loss' attribute or key, got {type(outputs)}"
             )
 
-        # Backward pass
-        loss.backward()
+        # Backward pass with mixed precision scaling if enabled
+        if self.mixed_precision_manager is not None:
+            self.mixed_precision_manager.backward_step(loss)
+        else:
+            loss.backward()
 
-        # Check gradient finiteness and apply advanced gradient clipping
-        try:
-            # Check for non-finite gradients
-            is_finite, finite_stats = check_gradient_finite(
-                self.model, raise_on_nonfinite=False
+        # Handle mixed precision overflow detection and gradient processing
+        overflow_detected = False
+        clip_stats = {"grad_norm": 0.0, "clipped": False}
+
+        if self.mixed_precision_manager is not None:
+            # Use mixed precision manager for overflow detection and handling
+            overflow_detected = self.mixed_precision_manager.check_overflow_and_step(
+                self.model, self.optimizer
             )
 
-            if not is_finite:
-                logger.warning(
-                    "Non-finite gradients detected: "
-                    f"{finite_stats['nan_parameters']} NaN, "
-                    f"{finite_stats['inf_parameters']} Inf parameters"
+            if overflow_detected:
+                # Mixed precision detected overflow - skip this step
+                logger.debug(
+                    "Mixed precision overflow detected, skipping optimizer step"
                 )
-                if self.config.gradient.error_if_nonfinite:
-                    self.optimizer.zero_grad()
-                    # Create return dict with consistent types
-                    error_metrics = {
-                        "loss": float("nan"),
-                        "grad_norm": float("nan"),
-                        "finite_gradients": False,
-                    }
-                    # Add gradient stats separately to avoid type mixing
-                    error_metrics.update(
-                        {
-                            f"gradient_stat_{k}": (
-                                float(v) if isinstance(v, (int, float)) else v
-                            )
-                            for k, v in finite_stats.items()
-                        }
+                return {
+                    "loss": loss.item(),
+                    "grad_norm": float("nan"),
+                    "grad_overflow": True,
+                    "optimizer_skipped": True,
+                }
+
+        # Gradient processing for non-mixed-precision or no overflow cases
+        try:
+            # Check for non-finite gradients (fallback or additional check)
+            if self.mixed_precision_manager is None:
+                is_finite, finite_stats = check_gradient_finite(
+                    self.model, raise_on_nonfinite=False
+                )
+
+                if not is_finite:
+                    logger.warning(
+                        "Non-finite gradients detected: "
+                        f"{finite_stats['nan_parameters']} NaN, "
+                        f"{finite_stats['inf_parameters']} Inf parameters"
                     )
-                    return error_metrics
+                    if self.config.gradient.error_if_nonfinite:
+                        self.optimizer.zero_grad()
+                        # Create return dict with consistent types
+                        error_metrics = {
+                            "loss": float("nan"),
+                            "grad_norm": float("nan"),
+                            "finite_gradients": False,
+                        }
+                        # Add gradient stats separately to avoid type mixing
+                        error_metrics.update(
+                            {
+                                f"gradient_stat_{k}": (
+                                    float(v) if isinstance(v, (int, float)) else v
+                                )
+                                for k, v in finite_stats.items()
+                            }
+                        )
+                        return error_metrics
 
             # Apply advanced gradient clipping
             clip_stats = apply_gradient_clipping(self.model, self.gradient_clip_config)
@@ -453,8 +554,26 @@ class RoseTrainer:
                 # Use traditional gradient synchronization
                 sync_gradients(self.model)
 
-        # Update parameters
-        self.optimizer.step()
+        # Update parameters with mixed precision handling
+        if self.mixed_precision_manager is not None and not overflow_detected:
+            # Mixed precision optimizer step (already handled overflow)
+            success = self.mixed_precision_manager.optimizer_step(
+                self.optimizer,
+                self.model,
+                unscale_gradients=False,  # Already handled in check_overflow_and_step
+                clip_gradients=False,  # Handle separately for consistency
+            )
+            if not success:
+                logger.debug("Mixed precision optimizer step skipped due to overflow")
+                return {
+                    "loss": loss.item(),
+                    "grad_norm": float("nan"),
+                    "grad_overflow": True,
+                    "optimizer_skipped": True,
+                }
+        elif not overflow_detected:
+            # Standard optimizer step
+            self.optimizer.step()
 
         # Step the scheduler if enabled
         if self.scheduler is not None:
@@ -506,6 +625,25 @@ class RoseTrainer:
         if self.scheduler is not None:
             metrics["learning_rate"] = self.scheduler.get_lr()
 
+        # Add mixed precision statistics if enabled
+        if self.mixed_precision_manager is not None:
+            mp_stats = self.mixed_precision_manager.get_statistics()
+            metrics.update(
+                {
+                    "mixed_precision_success_rate": mp_stats.get("success_rate", 1.0),
+                    "mixed_precision_overflow_count": mp_stats.get("overflow_count", 0),
+                    "mixed_precision_total_steps": mp_stats.get("total_steps", 0),
+                }
+            )
+
+            # Add current loss scale if available
+            if "scaler_info" in mp_stats:
+                scaler_info = mp_stats["scaler_info"]
+                if "current_scale" in scaler_info:
+                    metrics["loss_scale"] = scaler_info["current_scale"]
+            elif "current_scale" in mp_stats:
+                metrics["loss_scale"] = mp_stats["current_scale"]
+
         return metrics
 
     def save_checkpoint(self, filepath: str, compute_checksum: bool = True) -> None:
@@ -531,6 +669,10 @@ class RoseTrainer:
         # Save scheduler state if enabled
         if self.scheduler is not None:
             checkpoint["scheduler"] = self.scheduler.state_dict()
+
+        # Save mixed precision state if enabled
+        if self.mixed_precision_manager is not None:
+            checkpoint["mixed_precision"] = self.mixed_precision_manager.state_dict()
 
         # Add checksum for validation
         if compute_checksum:
@@ -574,6 +716,11 @@ class RoseTrainer:
         if "scheduler" in checkpoint and self.scheduler is not None:
             self.scheduler.load_state_dict(checkpoint["scheduler"])
             logger.info("Loaded scheduler state from checkpoint")
+
+        # Load mixed precision state if present and manager is enabled
+        if "mixed_precision" in checkpoint and self.mixed_precision_manager is not None:
+            self.mixed_precision_manager.load_state_dict(checkpoint["mixed_precision"])
+            logger.info("Loaded mixed precision state from checkpoint")
 
         # Update config with loaded config
         if "config" in checkpoint:

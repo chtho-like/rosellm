@@ -13,10 +13,13 @@ import unittest
 import torch
 import torch.nn as nn
 
+from rosellm.rosetrainer.mixed_precision import ConstantGradScaler
 from rosellm.rosetrainer.mixed_precision import (
-    ConstantGradScaler,
-    DynamicGradScaler,
-    GradScalerConfig,
+    EnhancedDynamicGradScaler as DynamicGradScaler,
+)
+from rosellm.rosetrainer.mixed_precision import GradScalerConfig
+from rosellm.rosetrainer.mixed_precision.gradient_scaler import (
+    DynamicGradScaler as LegacyDynamicGradScaler,
 )
 from rosellm.rosetrainer.mixed_precision.gradient_scaler import check_for_inf_and_nan
 
@@ -270,10 +273,10 @@ class TestGradScalerConfig(unittest.TestCase):
             scaler_type="dynamic", initial_scale=512.0, growth_interval=500
         )
         scaler = config.create_scaler()
-        self.assertIsInstance(scaler, DynamicGradScaler)
+        self.assertIsInstance(scaler, LegacyDynamicGradScaler)
         assert scaler is not None
         self.assertEqual(scaler.scale.item(), 512.0)
-        if isinstance(scaler, DynamicGradScaler):
+        if isinstance(scaler, LegacyDynamicGradScaler):
             self.assertEqual(scaler.growth_interval, 500)
 
     def test_create_none_scaler(self):
