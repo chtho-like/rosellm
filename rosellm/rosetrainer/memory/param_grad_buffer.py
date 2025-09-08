@@ -555,7 +555,8 @@ class ParamAndGradBuffer:
             Total norm of gradients before clipping
         """
         self.sync_gradients_to_buffer()
-        total_norm = torch.norm(self.grad_data, p=2).item()
+        # Compute norm in FP32 to avoid overflow/underflow for fp16/bf16 grads
+        total_norm = torch.linalg.vector_norm(self.grad_data.float(), ord=2).item()
 
         if total_norm > max_norm:
             clip_scale = max_norm / total_norm
@@ -753,11 +754,13 @@ class BufferManager:
         Returns:
             Total norm of gradients before clipping
         """
-        # Calculate global norm across all buffers
+        # Calculate global norm across all buffers (accumulate in Python float)
         total_norm_sq = 0.0
         for buffer in self.buffers.values():
             buffer.sync_gradients_to_buffer()
-            norm_sq = torch.norm(buffer.grad_data, p=2).item() ** 2
+            # Compute squared L2 norm in FP32 on-device
+            g32 = buffer.grad_data.float()
+            norm_sq = (g32 * g32).sum().item()
             total_norm_sq += norm_sq
 
         total_norm = math.sqrt(total_norm_sq)
