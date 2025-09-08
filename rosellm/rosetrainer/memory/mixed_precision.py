@@ -9,7 +9,11 @@ from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 
 from ..config import PrecisionType
-from ..mixed_precision import AbstractGradScaler, ConstantGradScaler, DynamicGradScaler
+from ..mixed_precision import (
+    AbstractGradScaler,
+    ConstantGradScaler,
+    EnhancedDynamicGradScaler,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +173,7 @@ class MixedPrecisionManager:
                     # Use custom gradient scaler
                     if isinstance(loss_scale, str):
                         if loss_scale == "dynamic":
-                            self.scaler = DynamicGradScaler(
+                            self.scaler = EnhancedDynamicGradScaler(
                                 initial_scale=init_scale,
                                 min_scale=1.0,
                                 growth_factor=growth_factor,
@@ -192,7 +196,7 @@ class MixedPrecisionManager:
                         )
                     else:
                         # Default to dynamic
-                        self.scaler = DynamicGradScaler(
+                        self.scaler = EnhancedDynamicGradScaler(
                             initial_scale=init_scale,
                             growth_factor=growth_factor,
                             backoff_factor=backoff_factor,
