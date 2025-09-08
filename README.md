@@ -10,9 +10,13 @@ A comprehensive RLHF (Reinforcement Learning from Human Feedback) framework with
 - `parallelism/model_parallel.py`: Tensor parallelism with row/column parallel layers
 - `parallelism/pipeline_parallel.py`: Pipeline parallelism with microbatching
 - `parallelism/zero.py`: Zero Redundancy Optimizer for parameter partitioning
+- `optimizer/distributed_optimizer.py`: Memory-efficient distributed optimizer with ZeRO-style partitioning
+- `optimizer/factory.py`: Intelligent optimizer factory with presets and auto-configuration
+- `optimizer/memory_profiler.py`: Comprehensive memory profiling and optimization recommendations
 - `memory/activation_checkpoint.py`: Activation checkpointing for memory efficiency
 - `memory/mixed_precision.py`: FP16 training with dynamic loss scaling
 - `memory/cpu_offload.py`: CPU offloading for optimizer states and parameters
+- `utils/gradient_utils.py`: Advanced gradient utilities with multi-tensor operations
 
 ### RoseInfer (Distributed Inference)
 - Optimized inference with tensor parallelism
@@ -135,6 +139,64 @@ convert_model_to_fp16(model)
 # CPU offloading
 from rosellm.rosetrainer.memory.cpu_offload import CPUOffloadOptimizer
 optimizer = CPUOffloadOptimizer(optimizer, offload_params=True)
+```
+
+### Distributed Optimizer with Memory Efficiency
+
+```python
+from rosellm.rosetrainer.optimizer import (
+    DistributedOptimizer,
+    DistributedOptimizerConfig,
+    OptimizerFactory,
+    MemoryProfiler
+)
+
+# Method 1: Using factory with presets
+optimizer = OptimizerFactory.create_from_model(
+    model,
+    optimizer_name="AdamW",
+    lr=1e-4,
+    preset="memory_efficient",  # Options: baseline, memory_efficient, extreme_scale, auto
+    process_group=process_group
+)
+
+# Method 2: Custom configuration
+config = DistributedOptimizerConfig(
+    partition_parameters=True,      # Partition parameters across ranks
+    partition_gradients=True,       # Partition gradients (ZeRO-2 style)
+    partition_optimizer_states=True, # Partition optimizer states (ZeRO-1 style)
+    mixed_precision=True,           # Use FP16 with FP32 master weights
+    grad_clip_value=1.0,           # Gradient clipping
+    contiguous_gradients=True,      # Pack gradients for efficient communication
+    cpu_offload=False              # Offload optimizer states to CPU
+)
+
+optimizer = DistributedOptimizer(
+    model.parameters(),
+    optimizer_class=torch.optim.AdamW,
+    optimizer_kwargs={"lr": 1e-4, "weight_decay": 0.01},
+    config=config,
+    process_group=dist.group.WORLD
+)
+
+# Memory profiling
+profiler = MemoryProfiler()
+profiler.set_baseline()
+
+# Analyze memory usage
+model_memory = profiler.analyze_model_memory(model)
+optimizer_memory = profiler.estimate_optimizer_memory(
+    sum(p.numel() for p in model.parameters()),
+    "AdamW"
+)
+
+print(f"Model memory: {model_memory['total_mb']:.2f} MB")
+print(f"Optimizer memory: {optimizer_memory:.2f} MB")
+
+# Get optimization recommendations
+recommendations = profiler.optimize_memory()
+for category, suggestion in recommendations.items():
+    print(f"{category}: {suggestion}")
 ```
 
 ## Testing
