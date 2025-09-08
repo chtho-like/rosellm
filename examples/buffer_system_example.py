@@ -125,7 +125,12 @@ class SimpleTransformer(nn.Module):
 
 
 def setup_distributed():
-    """Initialize distributed training environment."""
+    """Initialize distributed training environment.
+
+    - Uses torchrun env vars when available
+    - Selects NCCL for GPU or Gloo for CPU
+    - Returns (local_rank, world_size, device)
+    """
     if "LOCAL_RANK" in os.environ:
         local_rank = int(os.environ["LOCAL_RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
@@ -299,6 +304,8 @@ def main():
     model.to(device)
 
     # Create buffer configuration
+    # Note: overlap_comm enables bucketed async all-reduce that can overlap
+    # with compute. For small models/batch sizes, it may not help.
     bucket_config = BucketConfig(
         bucket_size_mb=args.bucket_size_mb,
         alignment=128,
@@ -329,6 +336,8 @@ def main():
         logger.info(f"    Memory: {buffer.stats['buffer_memory_mb']:.2f} MB")
 
     # Run benchmark
+    # The benchmark measures forward, backward, communication (all-reduce),
+    # and optimizer step times across several iterations.
     stats = benchmark_buffer_system(
         model=model,
         buffer_manager=buffer_manager,
@@ -357,7 +366,8 @@ def main():
         logger.info(f"  Bucket memory: {stats.get('bucket_memory_mb', 0):.2f} MB")
         logger.info(f"  Total memory: {stats.get('total_mb', 0):.2f} MB")
 
-    # Cleanup
+    # Cleanup distributed group (if created). torch.distributed will error if
+    # called twice across ranks, so only guard by is_initialized.
     if dist.is_initialized():
         dist.destroy_process_group()
 

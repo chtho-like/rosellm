@@ -475,6 +475,16 @@ class ParamAndGradBuffer:
 
         Returns:
             Communication handle(s) if async_op=True, None otherwise
+
+        Example:
+            >>> # Flat, synchronous reduce
+            >>> handle = buffer.all_reduce_gradients(async_op=False)
+            >>> assert handle is None
+
+            >>> # Bucketed, asynchronous reduce (when overlap_comm=True)
+            >>> handles = buffer.all_reduce_gradients(async_op=True)
+            >>> # Later, ensure completion and unpack
+            >>> buffer.finish_bucketed_all_reduce()
         """
         if self.data_parallel_group is None:
             return None
@@ -558,6 +568,11 @@ class ParamAndGradBuffer:
 
         Returns:
             Total norm of gradients before clipping
+
+        Example:
+            >>> total_norm = buffer.clip_gradients(max_norm=1.0)
+            >>> # total_norm is the L2 norm before clipping; gradients are scaled
+            >>> # in-place if needed so their new norm is ~ max_norm.
         """
         self.sync_gradients_to_buffer()
         # Compute norm in FP32 to avoid overflow/underflow for fp16/bf16 grads
@@ -577,6 +592,11 @@ class ParamAndGradBuffer:
         This method creates new independent tensors for each parameter, breaking
         the dependency on the buffer. Use this before deallocating the buffer
         to prevent dangling references.
+
+        Example:
+            >>> # Before disposing the buffer, detach parameter storage
+            >>> buffer.restore_params()
+            >>> del buffer  # Safe: parameters no longer view the buffer
         """
         for param, (start, end) in zip(self.params, self.param_offsets):
             # Create a new tensor with the current data
@@ -714,6 +734,11 @@ class BufferManager:
 
         Args:
             async_op: Whether to perform asynchronous operation
+
+        Example:
+            >>> manager.all_reduce_gradients(async_op=True)
+            >>> # Overlap communication with computation, then
+            >>> manager.wait_for_all_reduce()
         """
         self.comm_handles.clear()
 
@@ -726,7 +751,13 @@ class BufferManager:
                     self.comm_handles.append(handle)
 
     def wait_for_all_reduce(self) -> None:
-        """Wait for all asynchronous all-reduce operations to complete."""
+        """Wait for all asynchronous all-reduce operations to complete.
+
+        Example:
+            >>> manager.all_reduce_gradients(async_op=True)
+            >>> # ... run other work ...
+            >>> manager.wait_for_all_reduce()  # ensures gradients are unpacked
+        """
         for handle in self.comm_handles:
             if handle is not None:
                 handle.wait()
@@ -758,6 +789,10 @@ class BufferManager:
 
         Returns:
             Total norm of gradients before clipping
+
+        Example:
+            >>> total = manager.clip_gradients(max_norm=1.0)
+            >>> # Gradients in all buffers are rescaled in-place if needed.
         """
         # Calculate global norm across all buffers (accumulate in Python float)
         total_norm_sq = 0.0
@@ -827,6 +862,11 @@ class BufferManager:
         Yields:
             None (auto-scales gradients on exit). To avoid double-scaling,
             do not additionally divide the loss by num_steps when using this context.
+
+        Example:
+            >>> with manager.gradient_accumulation_context(num_steps=4):
+            ...     loss.backward()
+            >>> # After exit, gradients are scaled by 1/4.
         """
         scale = 1.0 / num_steps
         try:

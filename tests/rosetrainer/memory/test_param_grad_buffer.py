@@ -22,6 +22,13 @@ from rosellm.rosetrainer.memory.param_grad_buffer import (
     ParameterMappingError,
 )
 
+# Common test constants to avoid magic numbers
+TEST_BUCKET_SIZE_MB = 1.0
+TEST_ALIGNMENT = 128
+TEST_MAX_NORM = 1.0
+TEST_HALF_SCALE = 0.5
+TEST_ACC_STEPS = 4
+
 
 class SimpleModel(nn.Module):
     """Simple model for testing buffer system."""
@@ -67,8 +74,7 @@ class TestGradientBucket(unittest.TestCase):
 
     def test_bucket_creation(self):
         """Test bucket creation and initialization."""
-        bucket_size_mb = 1.0  # 1 MB bucket
-        bucket_size_bytes = int(bucket_size_mb * 1024 * 1024)
+        bucket_size_bytes = int(TEST_BUCKET_SIZE_MB * 1024 * 1024)
 
         bucket = GradientBucket(
             bucket_id=0,
@@ -91,7 +97,7 @@ class TestGradientBucket(unittest.TestCase):
             dtype=self.dtype,
             device=self.device,
             bucket_size_bytes=1024 * 1024,  # 1 MB
-            alignment=128,
+            alignment=TEST_ALIGNMENT,
         )
 
         # Create test parameters
@@ -113,7 +119,7 @@ class TestGradientBucket(unittest.TestCase):
             dtype=self.dtype,
             device=self.device,
             bucket_size_bytes=1024 * 1024,
-            alignment=128,
+            alignment=TEST_ALIGNMENT,
         )
 
         # Create parameters with gradients
@@ -139,11 +145,10 @@ class TestGradientBucket(unittest.TestCase):
         )
 
         # Unpack with scaling
-        scale = 0.5
-        bucket.unpack_gradients(scale=scale)
+        bucket.unpack_gradients(scale=TEST_HALF_SCALE)
 
-        self.assertTrue(torch.allclose(param1.grad, grad1_orig * scale))
-        self.assertTrue(torch.allclose(param2.grad, grad2_orig * scale))
+        self.assertTrue(torch.allclose(param1.grad, grad1_orig * TEST_HALF_SCALE))
+        self.assertTrue(torch.allclose(param2.grad, grad2_orig * TEST_HALF_SCALE))
 
 
 class TestParamAndGradBuffer(unittest.TestCase):
@@ -163,7 +168,7 @@ class TestParamAndGradBuffer(unittest.TestCase):
             dtype=torch.float32,
             params=params,
             data_parallel_group=None,
-            bucket_config=BucketConfig(bucket_size_mb=1.0),
+            bucket_config=BucketConfig(bucket_size_mb=TEST_BUCKET_SIZE_MB),
         )
 
         self.assertEqual(
@@ -248,7 +253,7 @@ class TestParamAndGradBuffer(unittest.TestCase):
         buffer.grad_data.fill_(4.0)
 
         # Sync back with scaling
-        buffer.sync_buffer_to_gradients(scale=0.5)
+        buffer.sync_buffer_to_gradients(scale=TEST_HALF_SCALE)
 
         # Verify scaled gradients
         for param in buffer.params:
@@ -269,16 +274,15 @@ class TestParamAndGradBuffer(unittest.TestCase):
             param.grad = torch.randn_like(param) * 10.0
 
         # Clip gradients
-        max_norm = 1.0
-        total_norm = buffer.clip_gradients(max_norm)
+        total_norm = buffer.clip_gradients(TEST_MAX_NORM)
 
         # Verify clipping
-        self.assertGreater(total_norm, max_norm)  # Original norm was larger
+        self.assertGreater(total_norm, TEST_MAX_NORM)  # Original norm was larger
 
         # Check new norm is approximately max_norm
         buffer.sync_gradients_to_buffer()
         new_norm = torch.norm(buffer.grad_data, p=2).item()
-        self.assertAlmostEqual(new_norm, max_norm, places=5)
+        self.assertAlmostEqual(new_norm, TEST_MAX_NORM, places=5)
 
     def test_bucket_creation(self):
         """Test gradient bucket creation."""
@@ -289,7 +293,7 @@ class TestParamAndGradBuffer(unittest.TestCase):
             dtype=torch.float32,
             params=params,
             data_parallel_group=MagicMock(),  # Mock process group
-            bucket_config=BucketConfig(bucket_size_mb=1.0),  # 1MB (minimum)
+            bucket_config=BucketConfig(bucket_size_mb=TEST_BUCKET_SIZE_MB),
         )
 
         # Should have at least one bucket
@@ -607,7 +611,7 @@ class TestContextManagers(unittest.TestCase):
                 param.grad = torch.ones_like(param) * 4.0
 
         # Use gradient accumulation context (auto-scales on exit; no external scaling)
-        with manager.gradient_accumulation_context(num_steps=4):
+        with manager.gradient_accumulation_context(num_steps=TEST_ACC_STEPS):
             pass
 
         # After context, gradients should be scaled
@@ -699,7 +703,7 @@ class TestEdgeCases(unittest.TestCase):
 
         manager = BufferManager(
             model=model,
-            bucket_config=BucketConfig(bucket_size_mb=1.0),
+            bucket_config=BucketConfig(bucket_size_mb=TEST_BUCKET_SIZE_MB),
         )
 
         # Should create multiple buckets
