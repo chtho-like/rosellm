@@ -8,10 +8,14 @@ This module provides a comprehensive distributed training framework with support
 """
 
 from .engine import RoseTrainer
-from .gradient import (  # Gradient finalization
+from .gradient import (  # Gradient finalization and decoupled storage
+    DecoupledGradientBuffer,
+    DecoupledGradientConfig,
+    DecoupledGradientManager,
     GradientFinalizationConfig,
     GradientFinalizer,
     GradientSyncStrategy,
+    StorageMode,
 )
 from .optimizer import (  # Distributed optimizer
     DistributedOptimizer,
@@ -82,6 +86,11 @@ __all__ = [
     "GradientFinalizationConfig",
     "GradientFinalizer",
     "GradientSyncStrategy",
+    # Decoupled Gradient Storage
+    "DecoupledGradientBuffer",
+    "DecoupledGradientConfig",
+    "DecoupledGradientManager",
+    "StorageMode",
     # Gradient Utilities
     "GradientClipConfig",
     "apply_gradient_clipping",

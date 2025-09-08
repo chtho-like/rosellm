@@ -4,6 +4,12 @@ Advanced gradient handling with multi-dimensional parallelism support.
 """
 
 from .config import GradientFinalizationConfig
+from .decoupled_grad import (
+    DecoupledGradientBuffer,
+    DecoupledGradientConfig,
+    DecoupledGradientManager,
+    StorageMode,
+)
 from .finalizer import GradientFinalizer
 from .strategies import (
     BucketedGradientSync,
@@ -19,4 +25,8 @@ __all__ = [
     "SimpleGradientSync",
     "BucketedGradientSync",
     "HierarchicalGradientSync",
+    "DecoupledGradientBuffer",
+    "DecoupledGradientConfig",
+    "DecoupledGradientManager",
+    "StorageMode",
 ]

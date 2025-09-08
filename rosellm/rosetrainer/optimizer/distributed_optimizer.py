@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.optim import Optimizer
 
+from ..gradient.decoupled_grad import DecoupledGradientConfig, DecoupledGradientManager
 from ..utils.gradient_utils import (
     GradientClipConfig,
     apply_gradient_clipping,
@@ -60,6 +61,8 @@ class DistributedOptimizer(Optimizer):
         optimizer_kwargs: Dict[str, Any],
         config: DistributedOptimizerConfig,
         process_group: Optional[dist.ProcessGroup] = None,
+        decoupled_grad_config: Optional[DecoupledGradientConfig] = None,
+        model: Optional[nn.Module] = None,
     ):
         """Initialize distributed optimizer.
 
@@ -69,11 +72,39 @@ class DistributedOptimizer(Optimizer):
             optimizer_kwargs: Arguments for base optimizer.
             config: Configuration for distributed optimizer.
             process_group: Process group for communication.
+            decoupled_grad_config: Configuration for decoupled gradient storage.
+            model: Model for decoupled gradient management.
         """
         self.config = config
         self.process_group = process_group or dist.group.WORLD
         self.world_size = dist.get_world_size(self.process_group)
         self.rank = dist.get_rank(self.process_group)
+
+        # Initialize decoupled gradient manager if configured
+        self.decoupled_grad_manager: Optional[DecoupledGradientManager] = None
+        self.decoupled_grad_config = decoupled_grad_config
+        self._using_decoupled_grads = False
+
+        if (
+            decoupled_grad_config
+            and decoupled_grad_config.enabled
+            and model is not None
+        ):
+            try:
+                self.decoupled_grad_manager = DecoupledGradientManager(
+                    model, decoupled_grad_config
+                )
+                self._using_decoupled_grads = True
+                logger.info(
+                    f"Initialized DistributedOptimizer with decoupled gradient storage"
+                )
+            except RuntimeError as e:
+                logger.warning(
+                    f"Failed to initialize decoupled gradient manager: {e}. "
+                    f"Falling back to standard gradient storage."
+                )
+                self.decoupled_grad_manager = None
+                self._using_decoupled_grads = False
 
         # Convert params to parameter groups
         if not isinstance(params, list):
@@ -261,6 +292,11 @@ class DistributedOptimizer(Optimizer):
         Args:
             set_to_none: Whether to set gradients to None instead of zero.
         """
+        # Zero decoupled gradients if enabled
+        if self._using_decoupled_grads and self.decoupled_grad_manager is not None:
+            # Don't use set_to_none for decoupled gradients as we want to keep buffers
+            self.decoupled_grad_manager.zero_gradients(set_to_none=False)
+
         # Zero local gradients
         for param in self.local_params:
             if set_to_none:
@@ -277,14 +313,20 @@ class DistributedOptimizer(Optimizer):
         if self.world_size == 1:
             return
 
+        # Sync decoupled gradients to parameters if needed
+        if self._using_decoupled_grads and self.decoupled_grad_manager is not None:
+            # Use non-cloning sync for efficiency during reduction
+            self.decoupled_grad_manager.sync_gradients_to_params(clone=False)
+
         # Reduce gradients
         if self.config.contiguous_gradients and self.grad_buffer is not None:
             # Pack gradients into contiguous buffer
             offset = 0
             for param in self.local_params:
-                if param.grad is not None:
+                grad = self._get_gradient(param)
+                if grad is not None:
                     numel = param.numel()
-                    self.grad_buffer[offset : offset + numel] = param.grad.view(-1)
+                    self.grad_buffer[offset : offset + numel] = grad.view(-1)
                     offset += numel
 
             # All-reduce buffer
@@ -295,26 +337,82 @@ class DistributedOptimizer(Optimizer):
             # Unpack gradients
             offset = 0
             for param in self.local_params:
-                if param.grad is not None:
+                if self._has_gradient(param):
                     numel = param.numel()
                     grad_view = self.grad_buffer[offset : offset + numel].view_as(param)
-                    param.grad.data = grad_view
+                    self._set_gradient(param, grad_view)
                     offset += numel
         else:
             # Reduce individual gradients
             for param in self.local_params:
-                if param.grad is not None:
+                grad = self._get_gradient(param)
+                if grad is not None:
                     dist.all_reduce(
-                        param.grad, op=dist.ReduceOp.SUM, group=self.process_group
+                        grad, op=dist.ReduceOp.SUM, group=self.process_group
                     )
+                    self._set_gradient(param, grad)
 
         # Scale gradients by world size
         scale_factor = 1.0 / self.world_size
         scale_factor *= self.config.gradient_postdivide_factor
 
-        for param in self.local_params:
-            if param.grad is not None:
-                param.grad.mul_(scale_factor)
+        if self._using_decoupled_grads and self.decoupled_grad_manager is not None:
+            self.decoupled_grad_manager.scale_gradients(scale_factor)
+            # Also scale any param.grad that might exist
+            for param in self.local_params:
+                if param.grad is not None:
+                    param.grad.mul_(scale_factor)
+        else:
+            for param in self.local_params:
+                if param.grad is not None:
+                    param.grad.mul_(scale_factor)
+
+    def _get_gradient(self, param: nn.Parameter) -> Optional[Tensor]:
+        """Get gradient for a parameter, supporting decoupled storage.
+
+        Args:
+            param: Parameter to get gradient for.
+
+        Returns:
+            Gradient tensor or None.
+        """
+        if self._using_decoupled_grads and self.decoupled_grad_manager is not None:
+            grad = self.decoupled_grad_manager.get_gradient(param)
+            # Fall back to param.grad if decoupled gradient not available
+            return grad if grad is not None else param.grad
+        return param.grad
+
+    def _set_gradient(self, param: nn.Parameter, grad: Tensor) -> None:
+        """Set gradient for a parameter, supporting decoupled storage.
+
+        Args:
+            param: Parameter to set gradient for.
+            grad: Gradient tensor.
+        """
+        if self._using_decoupled_grads and self.decoupled_grad_manager is not None:
+            try:
+                self.decoupled_grad_manager.set_gradient(param, grad)
+            except (ValueError, RuntimeError) as e:
+                # Fall back to standard gradient storage on error
+                logger.debug(f"Failed to set decoupled gradient: {e}")
+                param.grad = grad
+        else:
+            param.grad = grad
+
+    def _has_gradient(self, param: nn.Parameter) -> bool:
+        """Check if parameter has a gradient.
+
+        Args:
+            param: Parameter to check.
+
+        Returns:
+            True if parameter has gradient.
+        """
+        if self._using_decoupled_grads and self.decoupled_grad_manager is not None:
+            has_decoupled = self.decoupled_grad_manager.get_gradient(param) is not None
+            # Check both decoupled and standard storage
+            return has_decoupled or param.grad is not None
+        return param.grad is not None
 
     def _check_gradients(self, check_scaled: bool = False) -> bool:
         """Check gradients for NaN/Inf values.
@@ -531,11 +629,10 @@ class DistributedOptimizer(Optimizer):
             # First unscale gradients to FP32 for accurate overflow detection
             with self._lock:
                 for param in self.local_params:
-                    if param in self.fp32_params and param.grad is not None:
+                    grad = self._get_gradient(param)
+                    if param in self.fp32_params and grad is not None:
                         # Unscale gradient and convert to FP32
-                        self.fp32_params[param].grad = (
-                            param.grad.float() / self.loss_scale
-                        )
+                        self.fp32_params[param].grad = grad.float() / self.loss_scale
 
                 # Now check for overflow in unscaled FP32 gradients
                 had_overflow = not self._check_gradients(check_scaled=True)
