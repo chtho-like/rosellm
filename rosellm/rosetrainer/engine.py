@@ -18,6 +18,12 @@ from .communication import (
     GroupStrategy,
 )
 from .config import TrainingConfig, validate_config
+from .gradient import (
+    AdvancedGradientFinalizer,
+    GradientDataTypeManager,
+    GradientFinalizationConfig,
+    create_gradient_data_type_manager,
+)
 from .mixed_precision import MixedPrecisionManager, create_mixed_precision_manager
 from .scheduler import OptimizerParamScheduler
 from .utils.gradient_utils import (
@@ -241,6 +247,13 @@ class RoseTrainer:
         if self.config.bucketing.enabled and self.distributed:
             self._initialize_gradient_bucketing()
 
+        # Initialize advanced gradient finalization if enabled
+        self.advanced_gradient_finalizer: Optional[AdvancedGradientFinalizer] = None
+        self.gradient_data_type_manager: Optional[GradientDataTypeManager] = None
+
+        if self.config.gradient.enable_advanced_finalization:
+            self._initialize_advanced_gradient_finalization()
+
     def _initialize_gradient_bucketing(self) -> None:
         """Initialize gradient bucketing components."""
         try:
@@ -312,6 +325,54 @@ class RoseTrainer:
             logger.error(f"Failed to initialize gradient bucketing: {e}")
             self.bucket_manager = None
             self.bucket_group_manager = None
+            raise
+
+    def _initialize_advanced_gradient_finalization(self) -> None:
+        """Initialize advanced gradient finalization components."""
+        try:
+            # Create gradient data type manager
+            self.gradient_data_type_manager = create_gradient_data_type_manager(
+                master_precision=self.config.gradient.master_precision,
+                communication_precision=self.config.gradient.communication_precision,
+                enable_compression=self.config.gradient.enable_gradient_compression,
+                compression_threshold_mb=self.config.gradient.compression_threshold_mb,
+                preserve_master_precision=True,
+            )
+
+            # Create gradient finalization config
+            grad_finalization_config = GradientFinalizationConfig(
+                sync_strategy="hierarchical",
+                reduction_op="mean",
+                dimension_order="hierarchical",
+                bucket_size_mb=25.0,
+                overlap_grad_sync=True,
+                sync_grad_before_clip=True,
+                use_contiguous_buffers=True,
+                check_gradient_norm=True,
+                fp16_compression=self.config.gradient.enable_gradient_compression,
+                enable_gradient_stats=self.config.gradient.track_gradient_stats,
+                verbose=self.config.gradient.finalization_verbose,
+            )
+
+            # Create advanced gradient finalizer
+            self.advanced_gradient_finalizer = AdvancedGradientFinalizer(
+                model=self.model,
+                config=grad_finalization_config,
+                data_type_manager=self.gradient_data_type_manager,
+                enable_advanced_sync=True,
+                verbose=self.config.gradient.finalization_verbose,
+            )
+
+            logger.info(
+                f"Initialized advanced gradient finalization with "
+                f"master_precision={self.config.gradient.master_precision}, "
+                f"compression={self.config.gradient.enable_gradient_compression}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to initialize advanced gradient finalization: {e}")
+            self.advanced_gradient_finalizer = None
+            self.gradient_data_type_manager = None
             raise
 
     def _update_performance_stats(self, batch_size: int) -> None:
@@ -402,7 +463,7 @@ class RoseTrainer:
                 f"DDP initialization failed: {e}"
             ) from e
 
-    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, Any]:
         # Track step time for performance metrics
         self._step_start_time = time.time()
         """
@@ -467,55 +528,94 @@ class RoseTrainer:
 
         # Gradient processing for non-mixed-precision or no overflow cases
         try:
-            # Check for non-finite gradients (fallback or additional check)
-            if self.mixed_precision_manager is None:
-                is_finite, finite_stats = check_gradient_finite(
-                    self.model, raise_on_nonfinite=False
+            # Use advanced gradient finalization if enabled
+            if self.advanced_gradient_finalizer is not None:
+                finalization_stats = (
+                    self.advanced_gradient_finalizer.finalize_gradients(
+                        clip_gradients=True,
+                        check_finite=(self.mixed_precision_manager is None),
+                        normalize_gradients=self.config.gradient.normalize_gradients,
+                        collect_stats=self.config.gradient.track_gradient_stats,
+                        custom_sync_order=self.config.gradient.advanced_sync_order,
+                    )
                 )
 
-                if not is_finite:
-                    logger.warning(
-                        "Non-finite gradients detected: "
-                        f"{finite_stats['nan_parameters']} NaN, "
-                        f"{finite_stats['inf_parameters']} Inf parameters"
-                    )
+                # Extract clip stats from finalization results
+                clip_stats = {
+                    "grad_norm": finalization_stats.get("gradient_norm", 0.0),
+                    "clipped": finalization_stats.get("clipped", False),
+                }
+
+                # Handle non-finite gradients from advanced finalization
+                if not finalization_stats.get("finite", True):
                     if self.config.gradient.error_if_nonfinite:
                         self.optimizer.zero_grad()
-                        # Create return dict with consistent types
-                        error_metrics = {
+                        return {
                             "loss": float("nan"),
                             "grad_norm": float("nan"),
                             "finite_gradients": False,
+                            "advanced_finalization": finalization_stats,
                         }
-                        # Add gradient stats separately to avoid type mixing
-                        error_metrics.update(
-                            {
-                                f"gradient_stat_{k}": (
-                                    float(v) if isinstance(v, (int, float)) else v
-                                )
-                                for k, v in finite_stats.items()
-                            }
-                        )
-                        return error_metrics
 
-            # Apply advanced gradient clipping
-            clip_stats = apply_gradient_clipping(self.model, self.gradient_clip_config)
-
-            # Add gradient statistics to metrics if enabled
-            if self.config.gradient.track_gradient_stats:
-                if (
-                    self.gradient_stats_step
-                    % self.config.gradient.gradient_stats_interval
-                    == 0
-                ):
-                    grad_stats = get_gradient_stats(
-                        self.model,
-                        include_histograms=(
-                            self.config.gradient.include_gradient_histograms
-                        ),
+                # Log finalization stats if verbose
+                if self.config.gradient.finalization_verbose:
+                    logger.debug(
+                        f"Advanced gradient finalization stats: {finalization_stats}"
                     )
-                    logger.info(f"Gradient stats: {grad_stats}")
-                self.gradient_stats_step += 1
+
+            else:
+                # Fallback to traditional gradient processing
+                # Check for non-finite gradients (fallback or additional check)
+                if self.mixed_precision_manager is None:
+                    is_finite, finite_stats = check_gradient_finite(
+                        self.model, raise_on_nonfinite=False
+                    )
+
+                    if not is_finite:
+                        logger.warning(
+                            "Non-finite gradients detected: "
+                            f"{finite_stats['nan_parameters']} NaN, "
+                            f"{finite_stats['inf_parameters']} Inf parameters"
+                        )
+                        if self.config.gradient.error_if_nonfinite:
+                            self.optimizer.zero_grad()
+                            # Create return dict with consistent types
+                            error_metrics = {
+                                "loss": float("nan"),
+                                "grad_norm": float("nan"),
+                                "finite_gradients": False,
+                            }
+                            # Add gradient stats separately to avoid type mixing
+                            error_metrics.update(
+                                {
+                                    f"gradient_stat_{k}": (
+                                        float(v) if isinstance(v, (int, float)) else v
+                                    )
+                                    for k, v in finite_stats.items()
+                                }
+                            )
+                            return error_metrics
+
+                # Apply advanced gradient clipping
+                clip_stats = apply_gradient_clipping(
+                    self.model, self.gradient_clip_config
+                )
+
+                # Add gradient statistics to metrics if enabled
+                if self.config.gradient.track_gradient_stats:
+                    if (
+                        self.gradient_stats_step
+                        % self.config.gradient.gradient_stats_interval
+                        == 0
+                    ):
+                        grad_stats = get_gradient_stats(
+                            self.model,
+                            include_histograms=(
+                                self.config.gradient.include_gradient_histograms
+                            ),
+                        )
+                        logger.info(f"Gradient stats: {grad_stats}")
+                    self.gradient_stats_step += 1
 
         except Exception as e:
             logger.error(f"Advanced gradient processing failed: {e}")
@@ -754,6 +854,14 @@ class RoseTrainer:
 
     def cleanup(self) -> None:
         """Clean up distributed training resources."""
+        # Clean up advanced gradient finalization resources
+        if self.advanced_gradient_finalizer is not None:
+            try:
+                self.advanced_gradient_finalizer.cleanup()
+                logger.info("Cleaned up advanced gradient finalizer")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup advanced gradient finalizer: {e}")
+
         if self.distributed and dist.is_initialized():
             try:
                 # Synchronize all processes before cleanup
