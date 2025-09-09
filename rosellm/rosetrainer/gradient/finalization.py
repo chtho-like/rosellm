@@ -29,9 +29,10 @@ Performance Characteristics:
 
 import logging
 import time
+from abc import abstractmethod
 from contextlib import contextmanager
 from enum import Enum
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Protocol, Tuple
 from weakref import WeakKeyDictionary
 
 import torch
@@ -49,6 +50,49 @@ from .config import GradientFinalizationConfig
 from .finalizer import GradientFinalizer
 
 logger = logging.getLogger(__name__)
+
+
+class DataTypeConversionStrategy(Protocol):
+    """Protocol for gradient data type conversion strategies."""
+
+    @abstractmethod
+    def convert_to_master(
+        self, model: nn.Module, store_originals: bool = True
+    ) -> Dict[str, torch.Tensor]:
+        """Convert gradients to master precision."""
+        ...
+
+    @abstractmethod
+    def convert_for_communication(
+        self, gradients: Dict[str, torch.Tensor]
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
+        """Convert gradients for communication."""
+        ...
+
+    @abstractmethod
+    def restore_from_communication(
+        self,
+        model: nn.Module,
+        received_gradients: Dict[str, torch.Tensor],
+        metadata: Dict[str, Any],
+    ) -> None:
+        """Restore gradients from communication format."""
+        ...
+
+    @abstractmethod
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get conversion statistics."""
+        ...
+
+    @abstractmethod
+    def reset_statistics(self) -> None:
+        """Reset statistics."""
+        ...
+
+    @abstractmethod
+    def cleanup(self) -> None:
+        """Clean up resources."""
+        ...
 
 
 class GradientProcessingError(Exception):
@@ -92,8 +136,10 @@ def _retry_on_cuda_error(max_retries: int = 3, delay: float = 0.1):
                             f"CUDA operation failed after {max_retries} attempts"
                         )
                         break
-            raise last_exception if last_exception else RuntimeError(
-                "Unknown error in retry mechanism"
+            raise (
+                last_exception
+                if last_exception
+                else RuntimeError("Unknown error in retry mechanism")
             )
 
         return wrapper
@@ -129,7 +175,7 @@ class GradientDataTypeManager:
         enable_compression: bool = False,
         compression_threshold_mb: float = 10.0,
         preserve_master_precision: bool = True,
-    ):
+    ) -> None:
         """Initialize gradient data type manager.
 
         Args:
@@ -216,7 +262,7 @@ class GradientDataTypeManager:
         return self._dtype_map[dtype]
 
     @_retry_on_cuda_error(max_retries=2)
-    def convert_gradients_to_master(
+    def convert_to_master(
         self, model: nn.Module, store_originals: bool = True
     ) -> Dict[str, torch.Tensor]:
         """Convert model gradients to master precision with error handling.
@@ -285,7 +331,7 @@ class GradientDataTypeManager:
                 "Failed to convert gradients to master precision"
             ) from e
 
-    def convert_gradients_for_communication(
+    def convert_for_communication(
         self, gradients: Dict[str, torch.Tensor]
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
         """Convert gradients to communication precision with optional compression.
@@ -356,7 +402,7 @@ class GradientDataTypeManager:
 
         return converted_grads, metadata
 
-    def restore_gradients_from_communication(
+    def restore_from_communication(
         self,
         model: nn.Module,
         received_gradients: Dict[str, torch.Tensor],
@@ -428,15 +474,89 @@ class GradientDataTypeManager:
 
     def cleanup(self) -> None:
         """Clean up stored gradients and free memory."""
+        # Count references before clearing for logging
+        total_refs = len(self._gradient_refs)
+
         # Clear weak references (automatically handled but explicit for clarity)
         self._master_gradients.clear()
         # Clear name-based references
         self._gradient_refs.clear()
-        # Force garbage collection for large tensor cleanup
-        if len(self._gradient_refs) > 100:  # Only for large cleanups
+
+        # Reset conversion stats to avoid memory accumulation
+        self.reset_statistics()
+
+        # Force garbage collection for large cleanups
+        if total_refs > 100:  # Only for large cleanups
             import gc
 
-            gc.collect()
+            collected = gc.collect()
+            logger.debug(
+                f"Cleanup: collected {collected} objects from {total_refs} references"
+            )
+
+
+class AdvancedGradientFinalizerBuilder:
+    """Builder for AdvancedGradientFinalizer with fluent API."""
+
+    def __init__(self, model: nn.Module) -> None:
+        """Initialize builder with required model."""
+        self._model = model
+        self._config: Optional[GradientFinalizationConfig] = None
+        self._data_type_manager: Optional[DataTypeConversionStrategy] = None
+        self._enable_advanced_sync = True
+        self._verbose = False
+
+    def with_config(
+        self, config: GradientFinalizationConfig
+    ) -> "AdvancedGradientFinalizerBuilder":
+        """Set finalization configuration."""
+        self._config = config
+        return self
+
+    def with_data_type_manager(
+        self, manager: DataTypeConversionStrategy
+    ) -> "AdvancedGradientFinalizerBuilder":
+        """Set data type conversion strategy."""
+        self._data_type_manager = manager
+        return self
+
+    def with_advanced_sync(
+        self, enabled: bool = True
+    ) -> "AdvancedGradientFinalizerBuilder":
+        """Enable or disable advanced synchronization."""
+        self._enable_advanced_sync = enabled
+        return self
+
+    def with_verbose_logging(
+        self, enabled: bool = True
+    ) -> "AdvancedGradientFinalizerBuilder":
+        """Enable or disable verbose logging."""
+        self._verbose = enabled
+        return self
+
+    def with_mixed_precision(
+        self,
+        master_dtype: GradientDataType = GradientDataType.FP32,
+        communication_dtype: Optional[GradientDataType] = None,
+        enable_compression: bool = False,
+    ) -> "AdvancedGradientFinalizerBuilder":
+        """Configure mixed precision settings."""
+        self._data_type_manager = GradientDataTypeManager(
+            master_dtype=master_dtype,
+            communication_dtype=communication_dtype,
+            enable_compression=enable_compression,
+        )
+        return self
+
+    def build(self) -> "AdvancedGradientFinalizer":
+        """Build the configured AdvancedGradientFinalizer."""
+        return AdvancedGradientFinalizer(
+            model=self._model,
+            config=self._config,
+            data_type_manager=self._data_type_manager,
+            enable_advanced_sync=self._enable_advanced_sync,
+            verbose=self._verbose,
+        )
 
 
 class AdvancedGradientFinalizer:
@@ -451,7 +571,7 @@ class AdvancedGradientFinalizer:
         self,
         model: nn.Module,
         config: Optional[GradientFinalizationConfig] = None,
-        data_type_manager: Optional[GradientDataTypeManager] = None,
+        data_type_manager: Optional[DataTypeConversionStrategy] = None,
         enable_advanced_sync: bool = True,
         verbose: bool = False,
     ) -> None:
@@ -655,9 +775,7 @@ class AdvancedGradientFinalizer:
             # Step 1: Convert gradients to master precision
             dtype_start = time.perf_counter()
             # Convert gradients to master precision
-            self.data_type_manager.convert_gradients_to_master(
-                self.model, store_originals=True
-            )
+            self.data_type_manager.convert_to_master(self.model, store_originals=True)
             dtype_time = time.perf_counter() - dtype_start
             stats["dtype_conversion_time"] = dtype_time
 
@@ -780,7 +898,7 @@ class AdvancedGradientFinalizer:
         (
             comm_gradients,
             comm_metadata,
-        ) = self.data_type_manager.convert_gradients_for_communication(
+        ) = self.data_type_manager.convert_for_communication(
             {
                 name: param.grad
                 for name, param in self.model.named_parameters()
@@ -838,7 +956,7 @@ class AdvancedGradientFinalizer:
                     )
 
         # Restore gradients from communication format
-        self.data_type_manager.restore_gradients_from_communication(
+        self.data_type_manager.restore_from_communication(
             self.model, comm_gradients, comm_metadata
         )
 
@@ -1034,9 +1152,9 @@ class AdvancedGradientFinalizer:
             "total_time_seconds": total_time,
             "average_time_per_iteration_ms": (total_time / max(1, successful_runs))
             * 1000,
-            "iterations_per_second": successful_runs / total_time
-            if total_time > 0
-            else 0,
+            "iterations_per_second": (
+                successful_runs / total_time if total_time > 0 else 0
+            ),
             "successful_runs": successful_runs,
             "success_rate": successful_runs / num_iterations,
             "data_type_stats": self.data_type_manager.get_statistics(),
@@ -1075,7 +1193,7 @@ class AdvancedGradientFinalizer:
 def finalize_gradients_advanced(
     model: nn.Module,
     config: Optional[GradientFinalizationConfig] = None,
-    data_type_manager: Optional[GradientDataTypeManager] = None,
+    data_type_manager: Optional[DataTypeConversionStrategy] = None,
     clip_gradients: bool = True,
     check_finite: bool = True,
     normalize_gradients: bool = False,
@@ -1097,13 +1215,15 @@ def finalize_gradients_advanced(
     Returns:
         Dictionary with finalization results.
     """
-    finalizer = AdvancedGradientFinalizer(
-        model=model,
-        config=config,
-        data_type_manager=data_type_manager,
-        enable_advanced_sync=True,
-        verbose=verbose,
-    )
+    # Use builder pattern for better configuration management
+    builder = AdvancedGradientFinalizerBuilder(model).with_verbose_logging(verbose)
+
+    if config is not None:
+        builder = builder.with_config(config)
+    if data_type_manager is not None:
+        builder = builder.with_data_type_manager(data_type_manager)
+
+    finalizer = builder.build()
 
     try:
         return finalizer.finalize_gradients(

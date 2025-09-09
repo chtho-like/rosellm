@@ -32,13 +32,33 @@ from .rng_tracker import get_cuda_rng_tracker
 logger = logging.getLogger(__name__)
 
 
+# Constants for better maintainability
+_DEFAULT_TENSOR_PARALLEL_OFFSET = 0
+_DEFAULT_PIPELINE_PARALLEL_OFFSET = 100000
+_DEFAULT_DATA_PARALLEL_OFFSET = 200000
+_DEFAULT_CONTEXT_PARALLEL_OFFSET = 300000
+_DEFAULT_EXPERT_PARALLEL_OFFSET = 400000
+
+
+class RNGSeedError(RuntimeError):
+    """Base exception for RNG seed operations."""
+
+    pass
+
+
+class ParallelStateNotInitializedError(RNGSeedError):
+    """Raised when parallel state is not initialized."""
+
+    pass
+
+
 def model_parallel_cuda_manual_seed(
     seed: int,
-    tensor_parallel_seed_offset: int = 0,
-    pipeline_parallel_seed_offset: int = 100000,
-    data_parallel_seed_offset: int = 200000,
-    context_parallel_seed_offset: int = 300000,
-    expert_parallel_seed_offset: int = 400000,
+    tensor_parallel_seed_offset: int = _DEFAULT_TENSOR_PARALLEL_OFFSET,
+    pipeline_parallel_seed_offset: int = _DEFAULT_PIPELINE_PARALLEL_OFFSET,
+    data_parallel_seed_offset: int = _DEFAULT_DATA_PARALLEL_OFFSET,
+    context_parallel_seed_offset: int = _DEFAULT_CONTEXT_PARALLEL_OFFSET,
+    expert_parallel_seed_offset: int = _DEFAULT_EXPERT_PARALLEL_OFFSET,
     enable_deterministic: bool = True,
     verbose: bool = False,
 ) -> Dict[str, int]:
@@ -65,9 +85,25 @@ def model_parallel_cuda_manual_seed(
     Raises:
         RuntimeError: If parallel state is not initialized
     """
+    # Input validation
+    if not isinstance(seed, int) or seed < 0:
+        raise ValueError(f"Seed must be a non-negative integer, got {seed}")
+
+    # Validate offsets to prevent seed collisions
+    offsets = [
+        tensor_parallel_seed_offset,
+        pipeline_parallel_seed_offset,
+        data_parallel_seed_offset,
+        context_parallel_seed_offset,
+        expert_parallel_seed_offset,
+    ]
+    if len(set(offsets)) != len(offsets):
+        raise ValueError("Seed offsets must be unique to prevent RNG state collisions")
+
     if not parallel_state.is_initialized():
-        raise RuntimeError(
-            "Parallel state must be initialized before setting RNG seeds"
+        raise ParallelStateNotInitializedError(
+            "Parallel state must be initialized before setting RNG seeds. "
+            "Call parallel_state.initialize_model_parallel() first."
         )
 
     # Get parallel ranks and sizes
@@ -524,6 +560,100 @@ def _is_dimension_active(parallel_dims: List[str]) -> bool:
     }
 
     return any(size_map.get(dim, 1) > 1 or dim == "global" for dim in parallel_dims)
+
+
+class RNGConfigurationFactory:
+    """Factory for creating RNG configurations for different use cases."""
+
+    @staticmethod
+    def create_default_config(
+        seed: int, enable_deterministic: bool = True
+    ) -> Dict[str, Any]:
+        """Create default RNG configuration."""
+        return {
+            "seed": seed,
+            "tensor_parallel_seed_offset": _DEFAULT_TENSOR_PARALLEL_OFFSET,
+            "pipeline_parallel_seed_offset": _DEFAULT_PIPELINE_PARALLEL_OFFSET,
+            "data_parallel_seed_offset": _DEFAULT_DATA_PARALLEL_OFFSET,
+            "context_parallel_seed_offset": _DEFAULT_CONTEXT_PARALLEL_OFFSET,
+            "expert_parallel_seed_offset": _DEFAULT_EXPERT_PARALLEL_OFFSET,
+            "enable_deterministic": enable_deterministic,
+            "verbose": False,
+        }
+
+    @staticmethod
+    def create_training_config(
+        seed: int, enable_deterministic: bool = True
+    ) -> Dict[str, Any]:
+        """Create RNG configuration optimized for training reproducibility."""
+        return {
+            "seed": seed,
+            "tensor_parallel_seed_offset": 1000,
+            "pipeline_parallel_seed_offset": 2000,
+            "data_parallel_seed_offset": 3000,
+            "context_parallel_seed_offset": 4000,
+            "expert_parallel_seed_offset": 5000,
+            "enable_deterministic": enable_deterministic,
+            "verbose": True,
+        }
+
+    @staticmethod
+    def create_inference_config(seed: int) -> Dict[str, Any]:
+        """Create RNG configuration optimized for inference."""
+        return {
+            "seed": seed,
+            "tensor_parallel_seed_offset": 100,
+            "pipeline_parallel_seed_offset": 200,
+            "data_parallel_seed_offset": 300,
+            "context_parallel_seed_offset": 400,
+            "expert_parallel_seed_offset": 500,
+            "enable_deterministic": False,  # Less strict for inference
+            "verbose": False,
+        }
+
+
+def setup_model_parallel_rng(config_type: str = "default", **kwargs) -> Dict[str, int]:
+    """
+    Convenient function to set up model parallel RNG with predefined configurations.
+
+    Args:
+        config_type: Type of configuration ("default", "training", "inference")
+        **kwargs: Additional arguments to override configuration
+
+    Returns:
+        Dictionary mapping dimension names to their computed seeds
+
+    Raises:
+        ValueError: If config_type is invalid
+    """
+    factory = RNGConfigurationFactory()
+
+    config_methods: Dict[str, Any] = {
+        "default": factory.create_default_config,
+        "training": factory.create_training_config,
+        "inference": factory.create_inference_config,
+    }
+
+    if config_type not in config_methods:
+        raise ValueError(
+            f"Invalid config_type: {config_type}. "
+            f"Must be one of: {list(config_methods.keys())}"
+        )
+
+    # Get base config and override with kwargs
+    config_func = config_methods[config_type]
+    # Extract seed if provided, otherwise use default
+    seed = kwargs.pop("seed", 42)
+    # Call the config function with seed
+    if config_type == "inference":
+        config = config_func(seed)
+    else:
+        enable_deterministic = kwargs.pop("enable_deterministic", True)
+        config = config_func(seed, enable_deterministic)
+    # Update with any remaining kwargs
+    config.update(kwargs)
+
+    return model_parallel_cuda_manual_seed(**config)
 
 
 def _enable_deterministic_operations() -> None:

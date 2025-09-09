@@ -643,9 +643,13 @@ class CudaRNGStatesTracker:
             return
 
         # Find states to remove (oldest, non-current, non-parent states)
-        removable_states = []
+        removable_states: List[str] = []
+        states_to_remove = len(self._states) - self.cache_capacity
 
         for name in self._lru_order:
+            if len(removable_states) >= states_to_remove:
+                break
+
             state_info = self._state_info[name]
 
             # Don't remove current states
@@ -665,12 +669,20 @@ class CudaRNGStatesTracker:
             removable_states.append(name)
 
         # Remove oldest states until under capacity
-        states_to_remove = len(self._states) - self.cache_capacity
-        for name in removable_states[:states_to_remove]:
-            self.remove(name, cleanup_children=False)
+        removed_count = 0
+        for name in removable_states:
+            try:
+                self.remove(name, cleanup_children=False)
+                removed_count += 1
+            except KeyError:
+                # State might have been removed by another operation
+                continue
 
-        if self.verbose and states_to_remove > 0:
-            logger.info(f"Cleaned up {states_to_remove} cached RNG states")
+        if self.verbose and removed_count > 0:
+            logger.info(
+                f"Cleaned up {removed_count} cached RNG states "
+                f"(capacity: {self.cache_capacity})"
+            )
 
 
 # Global tracker instance

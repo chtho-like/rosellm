@@ -126,12 +126,12 @@ class TestGradientDataTypeManager(unittest.TestCase):
         with self.assertRaises(ValueError):
             manager.get_torch_dtype("invalid_type")  # type: ignore
 
-    def test_convert_gradients_to_master(self):
+    def test_convert_to_master(self):
         """Test gradient conversion to master precision."""
         manager = GradientDataTypeManager(master_dtype=GradientDataType.FP32)
 
         # Convert gradients
-        converted_grads = manager.convert_gradients_to_master(self.model)
+        converted_grads = manager.convert_to_master(self.model)
 
         # Verify conversion
         self.assertIsInstance(converted_grads, dict)
@@ -141,7 +141,7 @@ class TestGradientDataTypeManager(unittest.TestCase):
         for name, grad in converted_grads.items():
             self.assertEqual(grad.dtype, torch.float32)
 
-    def test_convert_gradients_for_communication(self):
+    def test_convert_for_communication(self):
         """Test gradient conversion for communication."""
         manager = GradientDataTypeManager(
             master_dtype=GradientDataType.FP32,
@@ -150,10 +150,10 @@ class TestGradientDataTypeManager(unittest.TestCase):
         )
 
         # First convert to master
-        master_grads = manager.convert_gradients_to_master(self.model)
+        master_grads = manager.convert_to_master(self.model)
 
         # Then convert for communication
-        comm_grads, metadata = manager.convert_gradients_for_communication(master_grads)
+        comm_grads, metadata = manager.convert_for_communication(master_grads)
 
         # Verify conversion
         self.assertIsInstance(comm_grads, dict)
@@ -161,7 +161,7 @@ class TestGradientDataTypeManager(unittest.TestCase):
         self.assertIn("compression_ratio", metadata)
         self.assertIn("compressed_params", metadata)
 
-    def test_restore_gradients_from_communication(self):
+    def test_restore_from_communication(self):
         """Test gradient restoration from communication."""
         manager = GradientDataTypeManager(
             master_dtype=GradientDataType.FP32,
@@ -169,11 +169,11 @@ class TestGradientDataTypeManager(unittest.TestCase):
         )
 
         # Convert gradients through the pipeline
-        master_grads = manager.convert_gradients_to_master(self.model)
-        comm_grads, metadata = manager.convert_gradients_for_communication(master_grads)
+        master_grads = manager.convert_to_master(self.model)
+        comm_grads, metadata = manager.convert_for_communication(master_grads)
 
         # Restore gradients
-        manager.restore_gradients_from_communication(self.model, comm_grads, metadata)
+        manager.restore_from_communication(self.model, comm_grads, metadata)
 
         # Verify restoration - gradients should be back to master precision
         for param in self.model.parameters():
@@ -185,7 +185,7 @@ class TestGradientDataTypeManager(unittest.TestCase):
         manager = GradientDataTypeManager()
 
         # Perform some operations
-        manager.convert_gradients_to_master(self.model)
+        manager.convert_to_master(self.model)
 
         stats = manager.get_statistics()
 
@@ -200,7 +200,7 @@ class TestGradientDataTypeManager(unittest.TestCase):
         manager = GradientDataTypeManager()
 
         # Perform operations to generate stats
-        manager.convert_gradients_to_master(self.model)
+        manager.convert_to_master(self.model)
 
         # Reset statistics
         manager.reset_statistics()
@@ -211,7 +211,7 @@ class TestGradientDataTypeManager(unittest.TestCase):
     def test_cleanup(self):
         """Test cleanup functionality."""
         manager = GradientDataTypeManager()
-        manager.convert_gradients_to_master(self.model, store_originals=True)
+        manager.convert_to_master(self.model, store_originals=True)
 
         # Should have stored gradients
         self.assertGreater(len(manager._master_gradients), 0)
@@ -531,7 +531,7 @@ class TestErrorHandling(unittest.TestCase):
         manager = GradientDataTypeManager()
 
         # Should handle empty gradients gracefully
-        converted_grads = manager.convert_gradients_to_master(clean_model)
+        converted_grads = manager.convert_to_master(clean_model)
         self.assertIsInstance(converted_grads, dict)
         self.assertEqual(len(converted_grads), 0)
 
@@ -559,8 +559,8 @@ class TestGPUSpecific(unittest.TestCase):
         )
 
         # Convert gradients
-        master_grads = manager.convert_gradients_to_master(self.model)
-        comm_grads, metadata = manager.convert_gradients_for_communication(master_grads)
+        master_grads = manager.convert_to_master(self.model)
+        comm_grads, metadata = manager.convert_for_communication(master_grads)
 
         # Verify GPU tensors
         for grad in comm_grads.values():
@@ -609,7 +609,7 @@ class TestBF16Support(unittest.TestCase):
         )
 
         # Convert gradients
-        master_grads = manager.convert_gradients_to_master(self.model)
+        master_grads = manager.convert_to_master(self.model)
 
         # Verify BF16 conversion
         for grad in master_grads.values():

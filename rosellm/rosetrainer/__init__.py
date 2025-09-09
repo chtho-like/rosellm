@@ -30,6 +30,21 @@ from .gradient import (  # Gradient finalization and decoupled storage
     StorageMode,
     create_gradient_buckets,
 )
+from .monitoring import (  # Energy Monitoring System
+    DistributedConfig,
+    DistributedEnergyAggregator,
+    DistributedEnergyMeasurement,
+    EnergyMeasurement,
+    EnergyMonitor,
+    EnergyMonitoringConfig,
+    EnergyMonitoringMode,
+    FallbackStrategy,
+    GPUEnergyTracker,
+    GPUTrackerConfig,
+    IntegrationConfig,
+    ParallelismInfo,
+    ParallelismType,
+)
 from .optimizer import (  # Distributed optimizer
     DistributedOptimizer,
     DistributedOptimizerConfig,
@@ -189,4 +204,18 @@ __all__ = [
     "synchronize_parallel_rng_states",
     "get_rng_state_summary",
     "parallel_rng_context",
+    # Energy Monitoring System
+    "EnergyMonitor",
+    "EnergyMonitoringConfig",
+    "EnergyMonitoringMode",
+    "GPUEnergyTracker",
+    "DistributedEnergyAggregator",
+    "EnergyMeasurement",
+    "DistributedEnergyMeasurement",
+    "FallbackStrategy",
+    "GPUTrackerConfig",
+    "DistributedConfig",
+    "IntegrationConfig",
+    "ParallelismType",
+    "ParallelismInfo",
 ]

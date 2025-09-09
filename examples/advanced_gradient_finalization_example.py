@@ -352,20 +352,20 @@ def demonstrate_gradient_data_types():
             )
 
             # Convert to master precision
-            master_grads = dtm.convert_gradients_to_master(model)
+            master_grads = dtm.convert_to_master(model)
             logger.info(
                 f"  Converted {len(master_grads)} gradients to master precision"
             )
 
             # Convert for communication
-            comm_grads, metadata = dtm.convert_gradients_for_communication(master_grads)
+            comm_grads, metadata = dtm.convert_for_communication(master_grads)
             logger.info(
                 f"  Communication conversion - "
                 f"compression ratio: {metadata['compression_ratio']:.3f}"
             )
 
             # Restore from communication
-            dtm.restore_gradients_from_communication(model, comm_grads, metadata)
+            dtm.restore_from_communication(model, comm_grads, metadata)
             logger.info(f"  Restored gradients from communication")
 
             # Get statistics
