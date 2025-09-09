@@ -507,9 +507,9 @@ class Timers:
         min_values: List[float] = []
         max_values: List[float] = []
 
-        stat_mapping: List[
-            Tuple[str, str, str]
-        ] = []  # (timer_name, stat_key, agg_type)
+        stat_mapping: List[Tuple[str, str, str]] = (
+            []
+        )  # (timer_name, stat_key, agg_type)
 
         for name, stats in local_stats.items():
             for key, value in stats.items():

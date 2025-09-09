@@ -122,9 +122,9 @@ class MixedPrecisionConfig:
                 DeprecationWarning,
                 stacklevel=2,
             )
-            self.scaler_config: Union[
-                GradScalerConfig, DynamicScalerConfig
-            ] = GradScalerConfig(scaler_type="constant", initial_scale=loss_scale)
+            self.scaler_config: Union[GradScalerConfig, DynamicScalerConfig] = (
+                GradScalerConfig(scaler_type="constant", initial_scale=loss_scale)
+            )
         else:
             self.scaler_config = scaler_config or self._get_default_scaler_config()
 
@@ -667,9 +667,9 @@ def create_mixed_precision_manager(
         Configured MixedPrecisionManager
     """
     if use_dynamic_scaling:
-        scaler_config: Union[
-            GradScalerConfig, DynamicScalerConfig
-        ] = DynamicScalerConfig(initial_scale=initial_scale)
+        scaler_config: Union[GradScalerConfig, DynamicScalerConfig] = (
+            DynamicScalerConfig(initial_scale=initial_scale)
+        )
     else:
         scaler_config = GradScalerConfig(
             scaler_type="constant", initial_scale=initial_scale

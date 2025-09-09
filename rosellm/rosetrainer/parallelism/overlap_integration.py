@@ -436,7 +436,13 @@ class OverlappedPipelineEngine:
         # Backward pass
         input_grad = None
         if output_grad is not None:
-            output_grad.backward(retain_graph=True)
+            # For non-scalar tensors, we need to provide gradient argument
+            if output_grad.numel() == 1:
+                output_grad.backward(retain_graph=True)
+            else:
+                # Use ones_like as gradient argument for pipeline backward
+                grad_tensors = torch.ones_like(output_grad)
+                output_grad.backward(gradient=grad_tensors, retain_graph=True)
 
             # Get input gradient if not first stage
             if not self.is_first_stage:

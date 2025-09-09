@@ -17,7 +17,7 @@ References:
 import logging
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from enum import Enum
@@ -51,6 +51,33 @@ class OverlapConfig:
     sync_interval: int = 10  # Sync interval for aggressive mode
     use_pinned_memory: bool = True  # Use pinned memory for CPU-GPU transfers
     gather_batch_size: int = 4  # Batch multiple small gathers
+
+    def __post_init__(self) -> None:
+        """Validate configuration parameters."""
+        if self.num_streams <= 0:
+            raise ValueError("num_streams must be positive")
+        if self.num_streams > 32:
+            logger.warning(
+                f"num_streams={self.num_streams} is very high, consider reducing"
+            )
+
+        if self.prefetch_depth <= 0:
+            raise ValueError("prefetch_depth must be positive")
+        if self.prefetch_depth > 10:
+            logger.warning(f"prefetch_depth={self.prefetch_depth} is very high")
+
+        if self.cache_size_mb <= 0:
+            raise ValueError("cache_size_mb must be positive")
+        if self.cache_size_mb > 8192:  # 8GB
+            logger.warning(f"cache_size_mb={self.cache_size_mb} is very large")
+
+        if self.sync_interval <= 0:
+            raise ValueError("sync_interval must be positive")
+
+        if self.gather_batch_size <= 0:
+            raise ValueError("gather_batch_size must be positive")
+        if self.gather_batch_size > 32:
+            logger.warning(f"gather_batch_size={self.gather_batch_size} is very high")
 
 
 @dataclass
@@ -113,7 +140,7 @@ class StreamPool:
 
 
 class ParameterCache:
-    """LRU cache for gathered parameters."""
+    """Efficient LRU cache for gathered parameters using OrderedDict."""
 
     def __init__(self, max_size_mb: int) -> None:
         """
@@ -122,9 +149,11 @@ class ParameterCache:
         Args:
             max_size_mb: Maximum cache size in megabytes.
         """
+        if max_size_mb <= 0:
+            raise ValueError("max_size_mb must be positive")
+
         self.max_size_bytes = max_size_mb * 1024 * 1024
-        self.cache: Dict[str, torch.Tensor] = {}
-        self.access_times: Dict[str, float] = {}
+        self.cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         self.sizes: Dict[str, int] = {}
         self.total_size = 0
         self.lock = threading.Lock()
@@ -132,47 +161,48 @@ class ParameterCache:
         self.misses = 0
 
     def get(self, key: str) -> Optional[torch.Tensor]:
-        """Get tensor from cache."""
+        """Get tensor from cache, marking it as recently used."""
         with self.lock:
             if key in self.cache:
-                self.access_times[key] = time.time()
+                # Move to end (most recently used)
+                tensor = self.cache[key]
+                self.cache.move_to_end(key)
                 self.hits += 1
-                return self.cache[key]
+                return tensor
             self.misses += 1
             return None
 
     def put(self, key: str, tensor: torch.Tensor) -> None:
         """Put tensor into cache, evicting LRU entries if needed."""
+        if tensor is None:
+            raise ValueError("Cannot cache None tensor")
+
         size = tensor.numel() * tensor.element_size()
+        if size <= 0:
+            logger.warning(f"Skipping cache entry with invalid size: {size}")
+            return
 
         with self.lock:
-            # Check if we need to evict entries
-            while self.total_size + size > self.max_size_bytes and self.cache:
-                # Find LRU entry
-                lru_key = min(
-                    self.access_times.keys(), key=lambda k: self.access_times[k]
-                )
-                self._evict(lru_key)
+            # If key already exists, update it
+            if key in self.cache:
+                self.total_size -= self.sizes[key]
 
-            # Add new entry
+            # Evict LRU entries until we have space
+            while self.total_size + size > self.max_size_bytes and self.cache:
+                # Remove least recently used (first item in OrderedDict)
+                lru_key, _ = self.cache.popitem(last=False)
+                self.total_size -= self.sizes[lru_key]
+                del self.sizes[lru_key]
+
+            # Add new entry (most recently used)
             self.cache[key] = tensor
-            self.access_times[key] = time.time()
             self.sizes[key] = size
             self.total_size += size
-
-    def _evict(self, key: str) -> None:
-        """Evict an entry from cache (must be called with lock held)."""
-        if key in self.cache:
-            del self.cache[key]
-            del self.access_times[key]
-            self.total_size -= self.sizes[key]
-            del self.sizes[key]
 
     def clear(self) -> None:
         """Clear the entire cache."""
         with self.lock:
             self.cache.clear()
-            self.access_times.clear()
             self.sizes.clear()
             self.total_size = 0
 
@@ -186,7 +216,13 @@ class ParameterCache:
                 "misses": self.misses,
                 "hit_rate": hit_rate,
                 "size_mb": self.total_size / (1024 * 1024),
+                "max_size_mb": self.max_size_bytes / (1024 * 1024),
                 "num_entries": len(self.cache),
+                "utilization": (
+                    self.total_size / self.max_size_bytes
+                    if self.max_size_bytes > 0
+                    else 0
+                ),
             }
 
 
@@ -196,6 +232,11 @@ class AsyncParameterGatherer:
 
     This class manages overlapping parameter gathering operations with
     computation to hide communication latency in distributed training.
+
+    Can be used as a context manager for automatic resource cleanup:
+        with AsyncParameterGatherer(config) as gatherer:
+            future = gatherer.gather_async("param1", tensor)
+            result = future.result()
     """
 
     def __init__(
@@ -251,22 +292,38 @@ class AsyncParameterGatherer:
     def _worker_loop(self) -> None:
         """Background worker loop for processing gather requests."""
         while not self.stop_event.is_set():
-            with self.lock:
-                if not self.pending_requests:
-                    time.sleep(0.001)  # Small sleep to avoid busy waiting
-                    continue
+            try:
+                with self.lock:
+                    if not self.pending_requests:
+                        time.sleep(0.001)  # Small sleep to avoid busy waiting
+                        continue
 
-                request = self.pending_requests.popleft()
-                self.active_requests[request.param_id] = request
+                    request = self.pending_requests.popleft()
+                    self.active_requests[request.param_id] = request
 
-            # Process the request
-            self._process_request(request)
+                # Process the request
+                self._process_request(request)
 
-            # Clean up
-            with self.lock:
-                if request.param_id in self.active_requests:
-                    del self.active_requests[request.param_id]
-                self.completed_requests.add(request.param_id)
+                # Clean up
+                with self.lock:
+                    if request.param_id in self.active_requests:
+                        del self.active_requests[request.param_id]
+                    self.completed_requests.add(request.param_id)
+
+            except Exception as e:
+                logger.error(f"Error in worker loop: {e}")
+                # Set future exception if available
+                if "request" in locals() and request.future:
+                    try:
+                        request.future.set_exception(e)
+                    except Exception:
+                        pass  # Future may already be set
+
+                # Clean up failed request
+                if "request" in locals():
+                    with self.lock:
+                        if request.param_id in self.active_requests:
+                            del self.active_requests[request.param_id]
 
     def _process_request(self, request: GatherRequest) -> None:
         """
@@ -276,34 +333,54 @@ class AsyncParameterGatherer:
             request: The gather request to process.
         """
         start_time = time.time()
-
-        # Check cache first
-        cached_tensor = self.cache.get(request.param_id)
-        if cached_tensor is not None:
-            if request.callback:
-                request.callback(cached_tensor)
-            if request.future:
-                request.future.set_result(cached_tensor)
-            return
-
-        # Acquire stream for async operation
-        stream = (
-            self.stream_pool.acquire_stream() if self.device.type == "cuda" else None
-        )
-        request.stream = stream
+        stream = None
 
         try:
+            # Check cache first
+            cached_tensor = self.cache.get(request.param_id)
+            if cached_tensor is not None:
+                if request.callback:
+                    try:
+                        request.callback(cached_tensor)
+                    except Exception as e:
+                        logger.error(f"Error in callback for {request.param_id}: {e}")
+                if request.future:
+                    request.future.set_result(cached_tensor)
+                return
+
+            # Validate request
+            if request.tensor is None:
+                raise ValueError(f"Tensor is None for request {request.param_id}")
+            if request.target_device is None:
+                raise ValueError(
+                    f"Target device is None for request {request.param_id}"
+                )
+
+            # Acquire stream for async operation
+            stream = (
+                self.stream_pool.acquire_stream()
+                if self.device.type == "cuda"
+                else None
+            )
+            request.stream = stream
+
             # Perform gather operation
             gathered_tensor = self._gather_tensor(
                 request.tensor, request.target_device, stream
             )
+
+            if gathered_tensor is None:
+                raise RuntimeError(f"Gather operation failed for {request.param_id}")
 
             # Cache the result
             self.cache.put(request.param_id, gathered_tensor)
 
             # Execute callback if provided
             if request.callback:
-                request.callback(gathered_tensor)
+                try:
+                    request.callback(gathered_tensor)
+                except Exception as e:
+                    logger.error(f"Error in callback for {request.param_id}: {e}")
 
             # Set future result if provided
             if request.future:
@@ -313,6 +390,12 @@ class AsyncParameterGatherer:
             if self.config.enable_profiling:
                 self.gather_times.append(time.time() - start_time)
 
+        except Exception as e:
+            logger.error(f"Error processing request {request.param_id}: {e}")
+            # Set exception on future if available
+            if request.future:
+                request.future.set_exception(e)
+            # Don't re-raise - let worker loop continue
         finally:
             if stream:
                 self.stream_pool.release_stream(stream)
@@ -334,25 +417,64 @@ class AsyncParameterGatherer:
         Returns:
             Gathered tensor on target device.
         """
-        if stream and self.device.type == "cuda":
-            with torch.cuda.stream(stream):
-                # Use pinned memory for faster transfers
-                if self.config.use_pinned_memory and tensor.is_cuda:
-                    size = tensor.numel()
-                    if size not in self.pinned_buffers:
-                        self.pinned_buffers[size] = torch.empty(
-                            size,
-                            dtype=tensor.dtype,
-                            pin_memory=True,
-                        )
-                    pinned_buf = self.pinned_buffers[size]
-                    pinned_buf.copy_(tensor.view(-1))
-                    result = pinned_buf.to(target_device, non_blocking=True)
-                    return result.view(tensor.shape)
-                else:
-                    return tensor.to(target_device, non_blocking=True)
-        else:
-            return tensor.to(target_device)
+        try:
+            # Early return if already on target device
+            if tensor.device == target_device:
+                return tensor
+
+            if stream and self.device.type == "cuda" and tensor.is_cuda:
+                with torch.cuda.stream(stream):
+                    # Use pinned memory for faster transfers
+                    if self.config.use_pinned_memory and target_device.type == "cpu":
+                        size = tensor.numel()
+
+                        # Create pinned buffer if not exists
+                        if size not in self.pinned_buffers:
+                            try:
+                                self.pinned_buffers[size] = torch.empty(
+                                    size,
+                                    dtype=tensor.dtype,
+                                    pin_memory=True,
+                                )
+                            except RuntimeError as e:
+                                logger.warning(
+                                    f"Failed to create pinned memory buffer: {e}"
+                                )
+                                return tensor.to(target_device)
+
+                        pinned_buf = self.pinned_buffers[size]
+
+                        # Ensure buffer has correct shape and dtype
+                        if pinned_buf.dtype != tensor.dtype:
+                            logger.warning(
+                                f"Dtype mismatch in pinned buffer: "
+                                f"{pinned_buf.dtype} vs {tensor.dtype}"
+                            )
+                            return tensor.to(target_device, non_blocking=True)
+
+                        try:
+                            pinned_buf.copy_(tensor.view(-1))
+                            result = pinned_buf.to(target_device, non_blocking=True)
+                            return result.view(tensor.shape)
+                        except RuntimeError as e:
+                            logger.warning(f"Failed to use pinned memory transfer: {e}")
+                            return tensor.to(target_device, non_blocking=True)
+                    else:
+                        return tensor.to(target_device, non_blocking=True)
+            else:
+                # Synchronous transfer for CPU or when no stream
+                return tensor.to(target_device)
+
+        except Exception as e:
+            logger.error(f"Error in tensor gather: {e}")
+            # Fallback to synchronous transfer
+            try:
+                return tensor.to(target_device)
+            except Exception as e2:
+                logger.error(f"Fallback tensor transfer also failed: {e2}")
+                raise RuntimeError(
+                    f"Unable to transfer tensor to {target_device}"
+                ) from e2
 
     def gather_async(
         self,
@@ -374,10 +496,33 @@ class AsyncParameterGatherer:
 
         Returns:
             Future that will contain the gathered tensor.
-        """
-        target_device = target_device or self.device
-        future: Future = Future()
 
+        Raises:
+            ValueError: If parameters are invalid.
+            RuntimeError: If gatherer is shut down.
+        """
+        # Validate inputs
+        if not param_id or not isinstance(param_id, str):
+            raise ValueError("param_id must be a non-empty string")
+        if tensor is None or not isinstance(tensor, torch.Tensor):
+            raise ValueError("tensor must be a valid PyTorch tensor")
+        if tensor.numel() == 0:
+            raise ValueError("tensor cannot be empty")
+        if self.stop_event.is_set():
+            raise RuntimeError("AsyncParameterGatherer is shut down")
+
+        target_device = target_device or self.device
+        if not isinstance(target_device, torch.device):
+            raise ValueError("target_device must be a torch.device")
+
+        # Check if already in cache (fast path)
+        cached = self.cache.get(param_id)
+        if cached is not None and cached.device == target_device:
+            future: Future[torch.Tensor] = Future()
+            future.set_result(cached)
+            return future
+
+        future = Future()
         request = GatherRequest(
             param_id=param_id,
             tensor=tensor,
@@ -388,7 +533,13 @@ class AsyncParameterGatherer:
         )
 
         with self.lock:
-            # Insert based on priority
+            # Check for duplicate requests
+            if param_id in self.active_requests:
+                logger.warning(
+                    f"Duplicate gather request for {param_id}, creating new future"
+                )
+
+            # Insert based on priority (higher priority first)
             if priority > 0:
                 # Find insertion point for priority queue behavior
                 insert_idx = 0
@@ -489,13 +640,43 @@ class AsyncParameterGatherer:
 
     def shutdown(self) -> None:
         """Shutdown the gatherer and clean up resources."""
-        self.stop_event.set()
-        if self.worker_thread:
-            self.worker_thread.join(timeout=5.0)
+        if self.stop_event.is_set():
+            return  # Already shut down
 
-        self.synchronize()
+        self.stop_event.set()
+
+        # Clear all pending requests to prevent new work
+        with self.lock:
+            self.pending_requests.clear()
+
+        # Wait for worker thread with timeout
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=10.0)
+            if self.worker_thread.is_alive():
+                logger.warning("Worker thread did not terminate within timeout")
+
+        # Synchronize remaining operations
+        try:
+            self.synchronize()
+        except Exception as e:
+            logger.warning(f"Error during synchronization in shutdown: {e}")
+
+        # Clean up resources
         self.cache.clear()
         self.pinned_buffers.clear()
+
+        # Clean up completed requests set
+        with self.lock:
+            self.completed_requests.clear()
+            self.active_requests.clear()
+
+    def __enter__(self) -> "AsyncParameterGatherer":
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context manager exit with automatic cleanup."""
+        self.shutdown()
 
 
 class OverlappedLinear(nn.Module):
@@ -554,38 +735,75 @@ class OverlappedLinear(nn.Module):
         """
         Forward pass with overlapped parameter gathering.
 
+        This method implements computation-communication overlap by asynchronously
+        gathering parameters while other computations proceed. The overlap provides
+        performance benefits in distributed settings where parameter transfer
+        has non-negligible latency.
+
         Args:
-            input: Input tensor.
+            input: Input tensor of shape [..., in_features].
 
         Returns:
-            Output tensor.
+            Output tensor of shape [..., out_features].
+
+        Raises:
+            RuntimeError: If parameter gathering fails.
         """
-        if self.gatherer and self.gatherer.config.mode != OverlapMode.NONE:
-            # Async gather weight
-            weight_future = self.gatherer.gather_async(
-                param_id=f"linear_weight_{id(self)}",
-                tensor=self.weight,
-                target_device=input.device,
-                priority=1,
+        if not isinstance(input, torch.Tensor):
+            raise ValueError("Input must be a PyTorch tensor")
+        if input.size(-1) != self.in_features:
+            raise ValueError(
+                f"Input features ({input.size(-1)}) must match "
+                f"in_features ({self.in_features})"
             )
 
-            # Optionally gather bias
-            bias_future = None
-            if self.bias is not None:
-                bias_future = self.gatherer.gather_async(
-                    param_id=f"linear_bias_{id(self)}",
-                    tensor=self.bias,
+        # Use overlapped gathering if gatherer is available and enabled
+        if self.gatherer and self.gatherer.config.mode != OverlapMode.NONE:
+            try:
+                # Create unique parameter IDs based on layer instance
+                weight_id = f"linear_weight_{id(self)}"
+                bias_id = f"linear_bias_{id(self)}" if self.bias is not None else None
+
+                # Async gather weight (high priority for immediate use)
+                weight_future = self.gatherer.gather_async(
+                    param_id=weight_id,
+                    tensor=self.weight,
                     target_device=input.device,
-                    priority=1,
+                    priority=2,  # High priority for immediate use
                 )
 
-            # Wait for parameters
-            weight = weight_future.result()
-            bias = bias_future.result() if bias_future else None
+                # Async gather bias if present
+                bias_future = None
+                if self.bias is not None and bias_id is not None:
+                    bias_future = self.gatherer.gather_async(
+                        param_id=bias_id,
+                        tensor=self.bias,
+                        target_device=input.device,
+                        priority=2,
+                    )
 
-            return torch.nn.functional.linear(input, weight, bias)
+                # Wait for parameters (this is where overlap happens)
+                weight = weight_future.result()
+                bias = bias_future.result() if bias_future else None
+
+                # Validate gathered parameters
+                if weight is None:
+                    raise RuntimeError("Weight gathering returned None")
+                if weight.device != input.device:
+                    logger.warning(
+                        f"Weight device mismatch: {weight.device} vs {input.device}"
+                    )
+
+                return torch.nn.functional.linear(input, weight, bias)
+
+            except Exception as e:
+                logger.warning(
+                    f"Overlapped forward failed: {e}, falling back to standard"
+                )
+                # Fall back to standard forward pass
+                return torch.nn.functional.linear(input, self.weight, self.bias)
         else:
-            # Standard forward pass
+            # Standard forward pass (no overlap)
             return torch.nn.functional.linear(input, self.weight, self.bias)
 
 

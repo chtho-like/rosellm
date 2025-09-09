@@ -550,9 +550,9 @@ class GPUEnergyTracker:
             # Return all devices
             result: Dict[int, float] = {}
             for dev_id in self.devices:
-                device_power: Union[
-                    float, Dict[int, float], None
-                ] = self.get_current_power(dev_id)
+                device_power: Union[float, Dict[int, float], None] = (
+                    self.get_current_power(dev_id)
+                )
                 if device_power is not None and isinstance(device_power, (int, float)):
                     result[dev_id] = float(device_power)
             return result

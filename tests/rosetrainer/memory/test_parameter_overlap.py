@@ -479,9 +479,25 @@ class TestPerformanceBenchmark(unittest.TestCase):
         )
 
         # Copy weights for fair comparison
-        for std_layer, ovl_layer in zip(standard_model, overlapped_model):
-            ovl_layer.weight.data = std_layer.weight.data.clone()
-            ovl_layer.bias.data = std_layer.bias.data.clone()
+        for std_layer, ovl_layer in zip(
+            standard_model.children(), overlapped_model.children()
+        ):
+            if (
+                hasattr(ovl_layer, "weight")
+                and hasattr(std_layer, "weight")
+                and isinstance(ovl_layer.weight, torch.nn.Parameter)
+                and isinstance(std_layer.weight, torch.nn.Parameter)
+            ):
+                ovl_layer.weight.data.copy_(std_layer.weight.data)
+            if (
+                hasattr(ovl_layer, "bias")
+                and hasattr(std_layer, "bias")
+                and ovl_layer.bias is not None
+                and std_layer.bias is not None
+                and isinstance(ovl_layer.bias, torch.nn.Parameter)
+                and isinstance(std_layer.bias, torch.nn.Parameter)
+            ):
+                ovl_layer.bias.data.copy_(std_layer.bias.data)
 
         # Warm up
         input_tensor = torch.randn(batch_size, seq_len, hidden_dim, device=self.device)
