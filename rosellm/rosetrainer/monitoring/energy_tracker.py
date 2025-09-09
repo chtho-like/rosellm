@@ -72,7 +72,7 @@ class DeviceInfo:
 class NVMLInterface:
     """Thread-safe NVML interface with error handling."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._initialized = False
         self._lock = threading.Lock()
         self._device_handles: Dict[int, object] = {}
@@ -260,7 +260,7 @@ class GPUEnergyTracker:
         sampling_interval: float = 1.0,
         enable_detailed_metrics: bool = True,
         fallback_power_estimate: float = 250.0,
-    ):
+    ) -> None:
         """
         Initialize GPU Energy Tracker.
 
