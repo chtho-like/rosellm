@@ -27,6 +27,11 @@ import torch
 import torch.nn as nn
 from torch.cuda.amp import autocast
 
+from ..utils.multi_tensor_ops import (
+    MultiTensorOperator,
+    multi_tensor_clip_grad_norm,
+    multi_tensor_scale,
+)
 from .dynamic_scaler import DynamicGradScaler as EnhancedDynamicGradScaler
 from .dynamic_scaler import DynamicScalerConfig
 from .gradient_scaler import AbstractGradScaler, GradScalerConfig
@@ -218,6 +223,12 @@ class MixedPrecisionManager:
         # Autocast context configuration
         self._autocast_kwargs = self._get_autocast_kwargs()
 
+        # Initialize multi-tensor operator for optimized operations
+        self.multi_tensor_operator = MultiTensorOperator(
+            device=self.device,
+            enable_benchmarking=self.config.track_scale_history,
+        )
+
         logger.info(
             f"MixedPrecisionManager initialized: "
             f"precision={self.config.precision.value}, "
@@ -304,20 +315,51 @@ class MixedPrecisionManager:
         optimizer: Optional[torch.optim.Optimizer] = None,
     ) -> None:
         """
-        Unscale gradients before optimizer step.
+        Unscale gradients before optimizer step using optimized multi-tensor operations.
 
         Args:
             parameters: Model parameters or optimizer
             optimizer: Optimizer (for compatibility, uses parameters if provided)
         """
         if self.scaler is not None:
-            target = optimizer if optimizer is not None else parameters
-            if hasattr(self.scaler, "unscale_gradients"):
-                # Enhanced scaler with direct gradient unscaling
-                self.scaler.unscale_gradients(parameters)  # type: ignore[attr-defined]
-            elif hasattr(self.scaler, "unscale_"):
-                # PyTorch-style scaler
-                self.scaler.unscale_(target)  # type: ignore[attr-defined]
+            # Get the inverse scale for unscaling
+            inv_scale = (
+                1.0 / self.scaler.scale if hasattr(self.scaler, "scale") else None
+            )
+
+            if inv_scale is not None:
+                # Use multi-tensor operations for efficient unscaling
+                if isinstance(parameters, nn.Module):
+                    params_with_grad = [
+                        p for p in parameters.parameters() if p.grad is not None
+                    ]
+                else:
+                    # Cast to Any to handle tensor list type checking
+                    params_list: Any = parameters
+                    params_with_grad = [
+                        p
+                        for p in params_list
+                        if hasattr(p, "grad") and p.grad is not None
+                    ]
+
+                if params_with_grad:
+                    # Filter out None grads and ensure we have a list of tensors
+                    grads: List[torch.Tensor] = []
+                    for p in params_with_grad:
+                        if p.grad is not None:
+                            grads.append(p.grad)
+
+                    if grads:
+                        multi_tensor_scale(grads, inv_scale, self.multi_tensor_operator)
+            else:
+                # Fallback to original method
+                target = optimizer if optimizer is not None else parameters
+                if hasattr(self.scaler, "unscale_gradients"):
+                    # Enhanced scaler with direct gradient unscaling
+                    self.scaler.unscale_gradients(parameters)  # type: ignore
+                elif hasattr(self.scaler, "unscale_"):
+                    # PyTorch-style scaler
+                    self.scaler.unscale_(target)  # type: ignore[attr-defined]
 
     def clip_gradients(
         self,
@@ -325,7 +367,7 @@ class MixedPrecisionManager:
         max_norm: Optional[float] = None,
     ) -> Optional[torch.Tensor]:
         """
-        Clip gradients with optional norm calculation.
+        Clip gradients using optimized multi-tensor operations.
 
         Args:
             parameters: Model parameters to clip
@@ -339,24 +381,30 @@ class MixedPrecisionManager:
 
         clip_value = max_norm or self.config.gradient_clip_value
 
+        # Convert to appropriate format for multi_tensor_clip_grad_norm
         if isinstance(parameters, nn.Module):
-            param_list: List[torch.Tensor] = [
-                p for p in parameters.parameters() if p.grad is not None
-            ]
+            # Use multi-tensor clipping for efficiency
+            clip_stats = multi_tensor_clip_grad_norm(
+                parameters,
+                clip_value,
+                norm_type=2.0,
+                operator=self.multi_tensor_operator,
+            )
         else:
-            # Filter tensors/parameters with gradients
-            param_list = [
-                p for p in parameters if hasattr(p, "grad") and p.grad is not None
+            # Convert List[torch.Tensor] to List[torch.nn.Parameter] if needed
+            params_to_clip = [
+                p if isinstance(p, torch.nn.Parameter) else torch.nn.Parameter(p)
+                for p in parameters
             ]
+            # Use multi-tensor clipping for efficiency
+            clip_stats = multi_tensor_clip_grad_norm(
+                params_to_clip,
+                clip_value,
+                norm_type=2.0,
+                operator=self.multi_tensor_operator,
+            )
 
-        if not param_list:
-            return None
-
-        # Calculate and clip gradients
-        total_norm = torch.nn.utils.clip_grad_norm_(
-            param_list, clip_value
-        )  # type: ignore[arg-type]
-        return total_norm  # type: ignore[no-any-return]
+        return torch.tensor(clip_stats["total_norm"], device=self.device)
 
     def check_overflow_and_step(
         self,
