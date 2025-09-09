@@ -8,6 +8,14 @@ This module provides a comprehensive distributed training framework with support
 """
 
 from .engine import RoseTrainer
+from .fusions import (  # Fused operations
+    FusedLayerNorm,
+    InvalidConfigurationError,
+    KernelNotAvailableError,
+    LayerNormConfig,
+    LayerNormException,
+    LayerNormKernelType,
+)
 from .gradient import (  # Gradient finalization and decoupled storage
     DecoupledGradientBuffer,
     DecoupledGradientConfig,
@@ -130,4 +138,11 @@ __all__ = [
     "ParallelismDimension",
     "set_nccl_config",
     "get_nccl_config",
+    # Fused Operations
+    "FusedLayerNorm",
+    "LayerNormConfig",
+    "LayerNormKernelType",
+    "LayerNormException",
+    "KernelNotAvailableError",
+    "InvalidConfigurationError",
 ]
