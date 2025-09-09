@@ -20,10 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from rosellm.rosetrainer.utils.multi_tensor_ops import (
-    Backend,
-    MultiTensorOperator,
-)
+from rosellm.rosetrainer.utils.multi_tensor_ops import Backend, MultiTensorOperator
 
 
 @dataclass
@@ -69,6 +66,8 @@ class BenchmarkSuite:
 
     def create_test_tensors(self, size_key: str) -> List[torch.Tensor]:
         """Create test tensors for benchmarking."""
+        if self.config.tensor_sizes is None:
+            raise ValueError("tensor_sizes not configured")
         num_tensors, tensor_size = self.config.tensor_sizes[size_key]
 
         # Create tensors with varying scales for realistic scenarios
@@ -85,6 +84,8 @@ class BenchmarkSuite:
 
     def create_test_model(self, size_key: str) -> nn.Module:
         """Create test model for gradient operations."""
+        if self.config.tensor_sizes is None:
+            raise ValueError("tensor_sizes not configured")
         num_tensors, tensor_size = self.config.tensor_sizes[size_key]
 
         # Create a simple model with multiple layers
@@ -224,9 +225,7 @@ class BenchmarkSuite:
                 if p.grad is not None:
                     p.grad = torch.randn_like(p.grad) * 10.0
 
-            result = self.time_operation(
-                operator.clip_grad_norm, params, max_norm=1.0
-            )
+            result = self.time_operation(operator.clip_grad_norm, params, max_norm=1.0)
             elapsed = result[0]
             times.append(elapsed)
 
@@ -391,6 +390,8 @@ class BenchmarkSuite:
         print(f"Benchmark iterations: {self.config.num_iterations}")
 
         for size_key in ["small", "medium", "large"]:
+            if self.config.tensor_sizes is None:
+                raise ValueError("tensor_sizes not configured")
             num_tensors, tensor_size = self.config.tensor_sizes[size_key]
 
             print("\n" + "=" * 60)

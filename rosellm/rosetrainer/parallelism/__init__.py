@@ -9,6 +9,7 @@ This module provides various parallelism strategies for distributed training:
 - Expert Parallelism (EP)
 - ZeRO Optimizer
 - Advanced Parallel State Management
+- Parameter Gathering Overlap with Computation
 """
 
 from .data_parallel import DataParallelTrainer
@@ -27,6 +28,12 @@ from .microbatch_calculator import (
     update_microbatch_calculator,
 )
 from .model_parallel import ColumnParallelLinear, RowParallelLinear, TensorParallelism
+from .overlap_integration import (
+    OverlappedColumnParallelLinear,
+    OverlappedPipelineEngine,
+    OverlappedRowParallelLinear,
+    convert_to_overlapped_model,
+)
 from .parallel_state import (
     NCCLConfig,
     ParallelismDimension,
@@ -82,6 +89,11 @@ __all__ = [
     "TensorParallelism",
     "ColumnParallelLinear",
     "RowParallelLinear",
+    # Overlap Integration
+    "OverlappedColumnParallelLinear",
+    "OverlappedRowParallelLinear",
+    "OverlappedPipelineEngine",
+    "convert_to_overlapped_model",
     # Pipeline Parallel
     "PipelineParallel",
     "PipelineStage",

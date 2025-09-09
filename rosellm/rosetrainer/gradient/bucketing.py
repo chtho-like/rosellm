@@ -685,9 +685,9 @@ class GradientBucketManager:
                         group=self.process_group,
                     )
                     # Store reduced portion back
-                    bucket.grad_buffer[
-                        : bucket.numel // self.world_size
-                    ] = output_tensor
+                    bucket.grad_buffer[: bucket.numel // self.world_size] = (
+                        output_tensor
+                    )
                 else:
                     # All-reduce
                     dist.all_reduce(bucket.grad_buffer, group=self.process_group)

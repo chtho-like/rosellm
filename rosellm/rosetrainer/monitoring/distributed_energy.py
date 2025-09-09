@@ -182,38 +182,38 @@ class DistributedEnergyAggregator:
             # Tensor Parallel
             tp_size = get_tensor_model_parallel_size()
             if tp_size > 1:
-                self.parallelism_info[
-                    ParallelismType.TENSOR_PARALLEL
-                ] = ParallelismInfo(
-                    parallel_type=ParallelismType.TENSOR_PARALLEL,
-                    rank=get_tensor_model_parallel_rank(),
-                    size=tp_size,
-                    group=get_tensor_model_parallel_group(),
+                self.parallelism_info[ParallelismType.TENSOR_PARALLEL] = (
+                    ParallelismInfo(
+                        parallel_type=ParallelismType.TENSOR_PARALLEL,
+                        rank=get_tensor_model_parallel_rank(),
+                        size=tp_size,
+                        group=get_tensor_model_parallel_group(),
+                    )
                 )
 
             # Pipeline Parallel
             pp_size = get_pipeline_model_parallel_size()
             if pp_size > 1:
-                self.parallelism_info[
-                    ParallelismType.PIPELINE_PARALLEL
-                ] = ParallelismInfo(
-                    parallel_type=ParallelismType.PIPELINE_PARALLEL,
-                    rank=get_pipeline_model_parallel_rank(),
-                    size=pp_size,
-                    group=get_pipeline_model_parallel_group(),
+                self.parallelism_info[ParallelismType.PIPELINE_PARALLEL] = (
+                    ParallelismInfo(
+                        parallel_type=ParallelismType.PIPELINE_PARALLEL,
+                        rank=get_pipeline_model_parallel_rank(),
+                        size=pp_size,
+                        group=get_pipeline_model_parallel_group(),
+                    )
                 )
 
             # Context Parallel
             try:
                 cp_size = get_context_parallel_size()
                 if cp_size > 1:
-                    self.parallelism_info[
-                        ParallelismType.CONTEXT_PARALLEL
-                    ] = ParallelismInfo(
-                        parallel_type=ParallelismType.CONTEXT_PARALLEL,
-                        rank=get_context_parallel_rank(),
-                        size=cp_size,
-                        group=get_context_parallel_group(),
+                    self.parallelism_info[ParallelismType.CONTEXT_PARALLEL] = (
+                        ParallelismInfo(
+                            parallel_type=ParallelismType.CONTEXT_PARALLEL,
+                            rank=get_context_parallel_rank(),
+                            size=cp_size,
+                            group=get_context_parallel_group(),
+                        )
                     )
             except Exception:
                 pass  # Context parallelism may not be available
@@ -222,13 +222,13 @@ class DistributedEnergyAggregator:
             try:
                 ep_size = get_expert_model_parallel_size()
                 if ep_size > 1:
-                    self.parallelism_info[
-                        ParallelismType.EXPERT_PARALLEL
-                    ] = ParallelismInfo(
-                        parallel_type=ParallelismType.EXPERT_PARALLEL,
-                        rank=get_expert_model_parallel_rank(),
-                        size=ep_size,
-                        group=get_expert_model_parallel_group(),
+                    self.parallelism_info[ParallelismType.EXPERT_PARALLEL] = (
+                        ParallelismInfo(
+                            parallel_type=ParallelismType.EXPERT_PARALLEL,
+                            rank=get_expert_model_parallel_rank(),
+                            size=ep_size,
+                            group=get_expert_model_parallel_group(),
+                        )
                     )
             except Exception:
                 pass  # Expert parallelism may not be available
@@ -539,12 +539,12 @@ class DistributedEnergyAggregator:
             # Simplified approach - more sophisticated grouping possible
             if self.global_rank in measurement.measurements_by_rank:
                 local_measurement = measurement.measurements_by_rank[self.global_rank]
-                dimension_stats[
-                    "power_contribution_watts"
-                ] = local_measurement.power_watts
-                dimension_stats[
-                    "energy_contribution_joules"
-                ] = local_measurement.cumulative_energy_joules
+                dimension_stats["power_contribution_watts"] = (
+                    local_measurement.power_watts
+                )
+                dimension_stats["energy_contribution_joules"] = (
+                    local_measurement.cumulative_energy_joules
+                )
 
             return dimension_stats
 
