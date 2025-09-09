@@ -8,6 +8,34 @@ This module provides a comprehensive distributed training framework with support
 """
 
 from .engine import RoseTrainer
+from .fusions import (  # Fused operations
+    FusedLayerNorm,
+    InvalidConfigurationError,
+    KernelNotAvailableError,
+    LayerNormConfig,
+    LayerNormException,
+    LayerNormKernelType,
+)
+from .gradient import (  # Gradient finalization and decoupled storage
+    BucketingStrategy,
+    DecoupledGradientBuffer,
+    DecoupledGradientConfig,
+    DecoupledGradientManager,
+    GradientBucket,
+    GradientBucketConfig,
+    GradientBucketManager,
+    GradientFinalizationConfig,
+    GradientFinalizer,
+    GradientSyncStrategy,
+    StorageMode,
+    create_gradient_buckets,
+)
+from .optimizer import (  # Distributed optimizer
+    DistributedOptimizer,
+    DistributedOptimizerConfig,
+    ParameterPartitioner,
+    ParameterRange,
+)
 from .parallelism import ColumnParallelLinear  # Parallelism components
 from .parallelism import (
     DataParallelTrainer,
@@ -67,6 +95,33 @@ __all__ = [
     "MicrobatchInfo",
     # ZeRO
     "ZeROOptimizer",
+    # Gradient Bucketing
+    "BucketingStrategy",
+    "GradientBucket",
+    "GradientBucketConfig",
+    "GradientBucketManager",
+    "create_gradient_buckets",
+    # Gradient Finalization
+    "GradientFinalizationConfig",
+    "GradientFinalizer",
+    "GradientSyncStrategy",
+    # Decoupled Gradient Storage
+    "DecoupledGradientBuffer",
+    "DecoupledGradientConfig",
+    "DecoupledGradientManager",
+    "StorageMode",
+    # Distributed Optimizer
+    "DistributedOptimizer",
+    "DistributedOptimizerConfig",
+    "ParameterPartitioner",
+    "ParameterRange",
+    # Fused Operations
+    "FusedLayerNorm",
+    "LayerNormConfig",
+    "LayerNormKernelType",
+    "InvalidConfigurationError",
+    "KernelNotAvailableError",
+    "LayerNormException",
     # Gradient Utilities
     "GradientClipConfig",
     "apply_gradient_clipping",

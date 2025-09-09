@@ -103,6 +103,7 @@ class ActivationCheckpointing:
     def __init__(self):
         self.profiler = MemoryProfiler()
         self.profiling_enabled = False
+        self.selective_manager = None
 
     def enable_profiling(self, enabled: bool = True):
         """Enable or disable memory profiling."""
@@ -403,4 +404,12 @@ class ActivationCheckpointing:
 
     def get_profiling_report(self) -> Dict[str, Any]:
         """Get memory profiling report."""
-        return self.profiler.get_memory_report()  # type: ignore[no-any-return]
+        report = self.profiler.get_memory_report()
+
+        # Add selective checkpointing report if available
+        if self.selective_manager is not None:
+            report[
+                "selective_checkpointing"
+            ] = self.selective_manager.get_profiling_report()
+
+        return report  # type: ignore[no-any-return]

@@ -16,7 +16,7 @@ Key Features:
 import logging
 import threading
 from collections import defaultdict
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, overload
 
 import torch
 import torch.distributed as dist
@@ -287,11 +287,16 @@ class DistributedOptimizer(Optimizer):
                     duration, len(self.all_params), bytes_reduced
                 )
 
-    def step(  # type: ignore[override]
-        self, closure: Optional[Callable[[], float]] = None
-    ) -> Optional[float]:
-        """
-        Perform a single optimization step.
+    @overload
+    def step(self, closure: None = None) -> None:
+        ...
+
+    @overload
+    def step(self, closure: Callable[[], float]) -> float:
+        ...
+
+    def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]:
+        """Perform optimization step.
 
         Args:
             closure: A closure that reevaluates the model and returns the loss

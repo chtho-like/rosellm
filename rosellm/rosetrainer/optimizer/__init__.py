@@ -5,6 +5,9 @@ This module provides optimized distributed optimizers with gradient bucketing
 and communication-computation overlap for efficient large-scale training.
 """
 
+from dataclasses import dataclass
+from typing import List
+
 from rosellm.rosetrainer.optimizer.distributed_optimizer import DistributedOptimizer
 from rosellm.rosetrainer.optimizer.exceptions import (
     CommunicationError,
@@ -37,9 +40,37 @@ from rosellm.rosetrainer.optimizer.partitioning_strategies import (
     SizeBalancedPartitioning,
 )
 
+
+# Configuration classes
+@dataclass
+class DistributedOptimizerConfig:
+    """Configuration for distributed optimizer."""
+
+    bucket_size_mb: float = 25.0
+    overlap_grad_reduce: bool = True
+    partition_optimizer_states: bool = True
+
+
+@dataclass
+class ParameterRange:
+    """Range of parameters for partitioning."""
+
+    start_idx: int
+    end_idx: int
+
+
+class ParameterPartitioner:
+    """Base class for parameter partitioning strategies."""
+
+    pass
+
+
 __all__ = [
     # Main classes
     "DistributedOptimizer",
+    "DistributedOptimizerConfig",
+    "ParameterPartitioner",
+    "ParameterRange",
     "GradientBuffer",
     "Bucket",
     # Partitioning strategies

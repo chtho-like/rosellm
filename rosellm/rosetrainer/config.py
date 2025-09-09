@@ -120,6 +120,155 @@ class GradientConfig(BaseModel):
         return v
 
 
+class MixedPrecisionConfig(BaseModel):
+    """Mixed precision training configuration with dynamic loss scaling support."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    # Precision settings
+    enabled: bool = Field(True, description="Enable mixed precision training")
+    precision_type: Literal["fp16", "bf16", "fp32", "mixed"] = Field(
+        "fp16", description="Precision type for mixed precision training"
+    )
+    autocast_enabled: bool = Field(True, description="Enable PyTorch autocast")
+
+    # Dynamic loss scaling configuration
+    use_dynamic_scaling: bool = Field(True, description="Use dynamic loss scaling")
+    initial_scale: float = Field(2**16, gt=0, description="Initial loss scale")
+    min_scale: float = Field(1.0, gt=0, description="Minimum loss scale")
+    max_scale: float = Field(2**24, gt=0, description="Maximum loss scale")
+    growth_factor: float = Field(
+        2.0, gt=1.0, le=10.0, description="Scale growth factor"
+    )
+    backoff_factor: float = Field(0.5, gt=0, lt=1.0, description="Scale backoff factor")
+    growth_interval: int = Field(2000, ge=1, description="Steps before scale growth")
+    hysteresis: int = Field(2, ge=1, description="Consecutive overflows before backoff")
+
+    # Multi-tensor optimization
+    use_multi_tensor: bool = Field(
+        True, description="Use multi-tensor operations when available"
+    )
+    chunk_size: int = Field(
+        2**20, gt=0, description="Chunk size for multi-tensor ops"
+    )
+
+    # Overflow detection
+    enable_inf_nan_check: bool = Field(
+        True, description="Check for inf/nan in gradients"
+    )
+    check_frequency: int = Field(1, ge=1, description="Overflow check frequency")
+    skip_first_n_steps: int = Field(
+        10, ge=0, description="Skip overflow check for first N steps"
+    )
+
+    # Performance optimizations
+    use_fused_kernels: bool = Field(
+        True, description="Use fused CUDA kernels when available"
+    )
+    cache_inv_scale: bool = Field(
+        True, description="Cache inverse scale for efficiency"
+    )
+
+    # Monitoring
+    log_scale_changes: bool = Field(True, description="Log scale changes")
+    detailed_overflow_info: bool = Field(
+        False, description="Log detailed overflow info"
+    )
+    track_overflow_history: int = Field(
+        100, ge=0, description="Track N recent overflow events"
+    )
+
+    @field_validator("max_scale")
+    def validate_max_scale(cls, v, info):
+        if "min_scale" in info.data and v < info.data["min_scale"]:
+            raise ValueError("max_scale must be >= min_scale")
+        return v
+
+    @field_validator("initial_scale")
+    def validate_initial_scale(cls, v, info):
+        data = info.data
+        if "min_scale" in data and v < data["min_scale"]:
+            raise ValueError("initial_scale must be >= min_scale")
+        if "max_scale" in data and v > data["max_scale"]:
+            raise ValueError("initial_scale must be <= max_scale")
+        return v
+
+
+class PositionEmbeddingConfig(BaseModel):
+    """Position embedding configuration."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    # Position embedding type
+    embedding_type: Literal["none", "learned", "sinusoidal", "rotary", "alibi"] = Field(
+        "none", description="Type of position embedding to use"
+    )
+
+    # Common parameters
+    max_position_embeddings: int = Field(
+        2048, ge=1, description="Maximum sequence length for position embeddings"
+    )
+    hidden_size: Optional[int] = Field(
+        None, ge=1, description="Hidden size for learned/sinusoidal embeddings"
+    )
+
+    # RoPE specific configuration
+    rope_dim: Optional[int] = Field(
+        None, ge=2, description="Dimension for RoPE (must be even)"
+    )
+    rope_base: float = Field(
+        10000.0, gt=0, description="Base for RoPE frequency computation"
+    )
+    rope_scaling: Optional[Dict[str, Any]] = Field(
+        None, description="RoPE scaling configuration for context extension"
+    )
+    rope_interpolation_type: Literal[
+        "none", "linear", "ntk", "dynamic_ntk", "yarn"
+    ] = Field("none", description="RoPE interpolation method")
+    rope_scaling_factor: float = Field(
+        1.0, gt=0, description="Scaling factor for RoPE positions"
+    )
+    rope_partial_factor: float = Field(
+        1.0, gt=0, le=1.0, description="Fraction of dimensions to apply RoPE to"
+    )
+    rope_use_fused: bool = Field(
+        True, description="Use fused RoPE operations for better performance"
+    )
+
+    # ALiBi specific
+    alibi_num_heads: Optional[int] = Field(
+        None, ge=1, description="Number of heads for ALiBi"
+    )
+
+    # Learned embeddings specific
+    learned_dropout: float = Field(
+        0.0, ge=0, le=1.0, description="Dropout for learned embeddings"
+    )
+
+    @field_validator("rope_dim")
+    def validate_rope_dim(cls, v):
+        if v is not None and v % 2 != 0:
+            raise ValueError(f"rope_dim must be even, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def validate_embedding_params(self):
+        """Validate embedding-specific parameters."""
+        if (
+            self.embedding_type in ["learned", "sinusoidal"]
+            and self.hidden_size is None
+        ):
+            raise ValueError(f"{self.embedding_type} embeddings require hidden_size")
+
+        if self.embedding_type == "rotary" and self.rope_dim is None:
+            raise ValueError("Rotary embeddings require rope_dim")
+
+        if self.embedding_type == "alibi" and self.alibi_num_heads is None:
+            raise ValueError("ALiBi embeddings require alibi_num_heads")
+
+        return self
+
+
 class MemoryConfig(BaseModel):
     """Memory optimization configuration."""
 
@@ -130,6 +279,70 @@ class MemoryConfig(BaseModel):
     zero_optimization_stage: Literal[0, 1, 2, 3] = 0
     gradient_checkpointing_ratio: float = Field(0.0, ge=0, le=1.0)
     memory_efficient_attention: bool = True
+
+
+class BucketingConfig(BaseModel):
+    """Gradient bucketing configuration."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    # Enable gradient bucketing
+    enabled: bool = Field(False, description="Enable gradient bucketing")
+
+    # Bucket strategy
+    strategy: Literal["size_based", "layer_based", "mixed", "custom"] = Field(
+        "size_based", description="Bucketing strategy"
+    )
+
+    # Bucket size limits
+    max_bucket_size_mb: float = Field(
+        25.0, gt=0, le=200.0, description="Maximum bucket size in MB"
+    )
+    min_bucket_size_mb: float = Field(
+        1.0, gt=0, description="Minimum bucket size in MB"
+    )
+
+    # Communication settings
+    backend: Literal["nccl", "gloo", "auto"] = Field(
+        "auto", description="Communication backend"
+    )
+    overlap_communication: bool = Field(
+        True, description="Overlap communication with computation"
+    )
+    compress_gradients: bool = Field(False, description="Enable gradient compression")
+
+    # Advanced features
+    dynamic_bucketing: bool = Field(False, description="Dynamically adapt bucket sizes")
+    gradient_predivision: bool = Field(
+        True, description="Pre-divide gradients for numerical stability"
+    )
+
+    # Group management
+    enable_groups: bool = Field(False, description="Enable bucket grouping")
+    group_strategy: Literal[
+        "parallel", "sequential", "hierarchical", "adaptive"
+    ] = Field("adaptive", description="Group communication strategy")
+    max_groups: int = Field(8, ge=1, le=32, description="Maximum number of groups")
+
+    # Performance tuning
+    communication_timeout_ms: int = Field(
+        30000, ge=1000, description="Communication timeout in milliseconds"
+    )
+    bucket_cap_mb: float = Field(
+        100.0, gt=0, description="Hard limit on bucket size in MB"
+    )
+
+    @field_validator("max_bucket_size_mb")
+    def validate_max_bucket_size(cls, v, info):
+        if "min_bucket_size_mb" in info.data and v < info.data["min_bucket_size_mb"]:
+            raise ValueError("max_bucket_size_mb must be >= min_bucket_size_mb")
+        return v
+
+    @field_validator("bucket_cap_mb")
+    def validate_bucket_cap(cls, v, info):
+        if "max_bucket_size_mb" in info.data and v < info.data["max_bucket_size_mb"]:
+            raise ValueError("bucket_cap_mb must be >= max_bucket_size_mb")
+        return v
 
 
 class ParallelismConfig(BaseModel):
