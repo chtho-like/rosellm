@@ -25,6 +25,7 @@ from .gradient import (
     create_gradient_data_type_manager,
 )
 from .mixed_precision import MixedPrecisionManager, create_mixed_precision_manager
+from .parallelism import parallel_state
 from .scheduler import OptimizerParamScheduler
 from .utils.gradient_utils import (
     GradientClipConfig,
@@ -221,6 +222,9 @@ class RoseTrainer:
         self.distributed = self.world_size > 1
 
         self._initialize_distributed()
+
+        # Initialize RNG state management
+        self._initialize_rng_state_management()
 
         # Default device
         self.device = (
@@ -462,6 +466,36 @@ class RoseTrainer:
             raise DistributedInitializationError(
                 f"DDP initialization failed: {e}"
             ) from e
+
+    def _initialize_rng_state_management(self) -> None:
+        """Initialize RNG state management for deterministic training."""
+        try:
+            # Initialize RNG with configuration from training config
+            if hasattr(self.config, "random") and self.config.random.enabled:
+                parallel_state.initialize_parallel_rng(
+                    seed=self.config.random.seed,
+                    enable_cuda_graphs=self.config.random.enable_cuda_graphs,
+                    cache_capacity=self.config.random.cache_capacity,
+                    auto_cleanup=self.config.random.auto_cleanup,
+                    enable_deterministic=self.config.random.enable_deterministic,
+                    verbose=self.config.random.verbose,
+                )
+                logger.info(
+                    f"Initialized parallel RNG state management with seed "
+                    f"{self.config.random.seed}"
+                )
+            else:
+                # Use default RNG initialization with global seed
+                parallel_state.initialize_parallel_rng(
+                    seed=self.config.seed, enable_deterministic=True, verbose=False
+                )
+                logger.info(
+                    f"Initialized default parallel RNG state management with seed "
+                    f"{self.config.seed}"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to initialize RNG state management: {e}")
+            logger.warning("Continuing without advanced RNG state management")
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, Any]:
         # Track step time for performance metrics
@@ -774,6 +808,11 @@ class RoseTrainer:
         if self.mixed_precision_manager is not None:
             checkpoint["mixed_precision"] = self.mixed_precision_manager.state_dict()
 
+        # Save RNG state if available
+        rng_checkpoint = parallel_state.checkpoint_parallel_rng()
+        if rng_checkpoint is not None:
+            checkpoint["rng_state"] = rng_checkpoint
+
         # Add checksum for validation
         if compute_checksum:
             checkpoint_str = str(checkpoint)
@@ -821,6 +860,14 @@ class RoseTrainer:
         if "mixed_precision" in checkpoint and self.mixed_precision_manager is not None:
             self.mixed_precision_manager.load_state_dict(checkpoint["mixed_precision"])
             logger.info("Loaded mixed precision state from checkpoint")
+
+        # Load RNG state if present
+        if "rng_state" in checkpoint:
+            try:
+                parallel_state.restore_parallel_rng(checkpoint["rng_state"])
+                logger.info("Loaded RNG state from checkpoint")
+            except Exception as e:
+                logger.warning(f"Failed to load RNG state from checkpoint: {e}")
 
         # Update config with loaded config
         if "config" in checkpoint:

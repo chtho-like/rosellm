@@ -561,14 +561,15 @@ class AdaptiveMicrobatchCalculator(MicrobatchCalculatorBase):
         return self.current_micro_batch_size
 
     def _get_memory_usage(self) -> float:
-        """Get current GPU memory usage as fraction.
+        """Get current GPU memory usage as fraction with enhanced error handling.
 
         Returns:
-            Memory usage as fraction (0-1)
+            Memory usage as fraction (0-1), or 0.0 if CUDA unavailable or error occurs.
 
         Note:
             Uses reserved memory rather than allocated for more accurate
-            measurement of actual memory pressure.
+            measurement of actual memory pressure. Includes fallback mechanisms
+            for different CUDA configurations.
         """
         if not torch.cuda.is_available():
             return 0.0
@@ -576,18 +577,49 @@ class AdaptiveMicrobatchCalculator(MicrobatchCalculatorBase):
         try:
             # Get current device to avoid hardcoded device 0
             current_device = torch.cuda.current_device()
-            reserved_bytes = torch.cuda.memory_reserved(current_device)
-            total_bytes = torch.cuda.get_device_properties(current_device).total_memory
+
+            # Try multiple memory measurement approaches for robustness
+            try:
+                reserved_bytes = torch.cuda.memory_reserved(current_device)
+                total_bytes = torch.cuda.get_device_properties(
+                    current_device
+                ).total_memory
+            except RuntimeError:
+                # Fallback to allocated memory if reserved fails
+                logger.debug(
+                    "Reserved memory query failed, falling back to allocated memory"
+                )
+                reserved_bytes = torch.cuda.memory_allocated(current_device)
+                total_bytes = torch.cuda.get_device_properties(
+                    current_device
+                ).total_memory
 
             if total_bytes <= 0:
-                logger.warning(f"Invalid total memory: {total_bytes}")
+                logger.warning(
+                    f"Invalid total memory: {total_bytes} bytes on device "
+                    f"{current_device}"
+                )
                 return 0.0
 
             usage_fraction = float(reserved_bytes) / float(total_bytes)
+
+            # Validate result is reasonable
+            if (
+                usage_fraction < 0.0 or usage_fraction > 1.1
+            ):  # Allow slight overflow for safety
+                logger.warning(
+                    f"Suspicious memory usage: {usage_fraction:.3f} on device "
+                    f"{current_device}"
+                )
+                return min(1.0, max(0.0, usage_fraction))
+
             return min(1.0, max(0.0, usage_fraction))  # Clamp to [0, 1]
 
-        except (RuntimeError, AttributeError) as e:
-            logger.warning(f"Failed to get memory usage: {e}")
+        except (RuntimeError, AttributeError, ZeroDivisionError) as e:
+            logger.warning(
+                f"Failed to get memory usage on device "
+                f"{torch.cuda.current_device()}: {e}"
+            )
             return 0.0
 
     def _adjust_microbatch_size(self, memory_usage: float) -> None:

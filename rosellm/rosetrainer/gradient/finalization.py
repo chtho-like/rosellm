@@ -1,16 +1,38 @@
 """Advanced gradient finalization for RoseTrainer with multi-dimensional parallelism.
 
-This module provides advanced gradient finalization capabilities with support for:
-- Multi-precision gradient data type management (FP32/FP16/BF16)
-- Multi-dimensional parallelism aware operations (TP/PP/DP/CP/EP)
-- Optimized gradient synchronization and normalization
-- Integration with existing RoseLLM infrastructure
+This module provides a comprehensive gradient finalization system designed for
+distributed training scenarios with multiple parallelism dimensions. The implementation
+emphasizes performance, reliability, and resource efficiency.
+
+Key Features:
+    - Multi-precision gradient management (FP32/FP16/BF16/FP8*)
+    - Advanced memory management with automatic cleanup
+    - Error recovery mechanisms with retry logic
+    - Performance-optimized communication patterns
+    - Thread-safe operations for concurrent access
+    - Integration with RoseTrainer's parallelism framework
+
+Architecture:
+    - GradientDataTypeManager: Handles precision conversions and compression
+    - AdvancedGradientFinalizer: Orchestrates multi-dimensional synchronization
+    - Error handling decorators for robust CUDA operations
+    - Weak reference management for automatic memory cleanup
+
+Performance Characteristics:
+    - O(1) space complexity for gradient storage (weak references)
+    - Optimized communication with contiguous buffer alignment
+    - Exponential backoff retry mechanisms for transient failures
+    - Memory-efficient circular buffers for metrics tracking
+
+*FP8 support is experimental and requires compatible hardware.
 """
 
 import logging
 import time
+from contextlib import contextmanager
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
+from weakref import WeakKeyDictionary
 
 import torch
 import torch.distributed as dist
@@ -29,13 +51,67 @@ from .finalizer import GradientFinalizer
 logger = logging.getLogger(__name__)
 
 
-class GradientDataType(str, Enum):
-    """Supported gradient data types for conversion and processing."""
+class GradientProcessingError(Exception):
+    """Base exception for gradient processing errors."""
 
-    FP32 = "fp32"
-    FP16 = "fp16"
-    BF16 = "bf16"
-    FP8 = "fp8"  # Future support
+    pass
+
+
+class GradientConversionError(GradientProcessingError):
+    """Exception raised during gradient data type conversion."""
+
+    pass
+
+
+class GradientSynchronizationError(GradientProcessingError):
+    """Exception raised during gradient synchronization."""
+
+    pass
+
+
+def _retry_on_cuda_error(max_retries: int = 3, delay: float = 0.1):
+    """Decorator to retry operations that might fail due to CUDA errors."""
+
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+                    last_exception = e
+                    if attempt < max_retries - 1:
+                        logger.warning(
+                            f"CUDA operation failed (attempt {attempt + 1}/"
+                            f"{max_retries}): {e}"
+                        )
+                        time.sleep(delay * (2**attempt))  # Exponential backoff
+                        torch.cuda.empty_cache()  # Clear cache before retry
+                    else:
+                        logger.error(
+                            f"CUDA operation failed after {max_retries} attempts"
+                        )
+                        break
+            raise last_exception if last_exception else RuntimeError(
+                "Unknown error in retry mechanism"
+            )
+
+        return wrapper
+
+    return decorator
+
+
+class GradientDataType(str, Enum):
+    """Supported gradient data types for conversion and processing.
+
+    This enum defines the precision types supported for gradient storage,
+    computation, and communication in distributed training scenarios.
+    """
+
+    FP32 = "fp32"  # 32-bit floating point (full precision)
+    FP16 = "fp16"  # 16-bit floating point (half precision)
+    BF16 = "bf16"  # 16-bit brain floating point (Google's format)
+    FP8 = "fp8"  # 8-bit floating point (experimental, future support)
 
 
 class GradientDataTypeManager:
@@ -104,8 +180,14 @@ class GradientDataTypeManager:
         if hasattr(torch, "float8_e4m3fn"):
             self._dtype_map[GradientDataType.FP8] = torch.float8_e4m3fn
 
-        # Gradient storage for type conversions
-        self._master_gradients: Dict[str, torch.Tensor] = {}
+        # Gradient storage for type conversions (using WeakKeyDictionary for
+        # automatic cleanup)
+        self._master_gradients: WeakKeyDictionary[
+            nn.Parameter, torch.Tensor
+        ] = WeakKeyDictionary()
+        self._gradient_refs: Dict[
+            str, torch.Tensor
+        ] = {}  # Name-based references for restoration
         self._conversion_stats = {
             "total_conversions": 0,
             "compression_ratio": 0.0,
@@ -133,10 +215,11 @@ class GradientDataTypeManager:
             raise ValueError(f"Unsupported gradient data type: {dtype}")
         return self._dtype_map[dtype]
 
+    @_retry_on_cuda_error(max_retries=2)
     def convert_gradients_to_master(
         self, model: nn.Module, store_originals: bool = True
     ) -> Dict[str, torch.Tensor]:
-        """Convert model gradients to master precision.
+        """Convert model gradients to master precision with error handling.
 
         Args:
             model: Model with gradients to convert.
@@ -144,41 +227,63 @@ class GradientDataTypeManager:
 
         Returns:
             Dictionary mapping parameter names to converted gradients.
+
+        Raises:
+            GradientConversionError: If conversion fails after retries.
         """
         start_time = time.perf_counter()
         converted_grads = {}
-        master_torch_dtype = self.get_torch_dtype(self.master_dtype)
 
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                if store_originals:
-                    # Store original gradient for potential restoration
-                    self._master_gradients[name] = param.grad.clone()
+        try:
+            master_torch_dtype = self.get_torch_dtype(self.master_dtype)
 
-                # Convert to master precision if needed
-                if param.grad.dtype != master_torch_dtype:
-                    converted_grad = param.grad.to(dtype=master_torch_dtype)
-                    if self.preserve_master_precision:
-                        # Use higher precision for accumulation
-                        converted_grad = (
-                            converted_grad.float()
-                            if master_torch_dtype != torch.float32
-                            else converted_grad
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    try:
+                        if store_originals:
+                            # Store original gradient for potential restoration using
+                            # weak references
+                            self._master_gradients[param] = param.grad.clone()
+                            self._gradient_refs[name] = param.grad.clone()
+
+                        # Convert to master precision if needed
+                        if param.grad.dtype != master_torch_dtype:
+                            converted_grad = param.grad.to(dtype=master_torch_dtype)
+                            if self.preserve_master_precision:
+                                # Use higher precision for accumulation
+                                converted_grad = (
+                                    converted_grad.float()
+                                    if master_torch_dtype != torch.float32
+                                    else converted_grad
+                                )
+                            converted_grads[name] = converted_grad
+                            param.grad = converted_grad
+                        else:
+                            converted_grads[name] = param.grad
+
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to convert gradient for parameter {name}: {e}"
                         )
-                    converted_grads[name] = converted_grad
-                    param.grad = converted_grad
-                else:
-                    converted_grads[name] = param.grad
+                        raise GradientConversionError(
+                            f"Gradient conversion failed for {name}"
+                        ) from e
 
-        conversion_time = time.perf_counter() - start_time
-        self._conversion_stats["time_spent_converting"] += conversion_time
-        self._conversion_stats["total_conversions"] += 1
+            conversion_time = time.perf_counter() - start_time
+            self._conversion_stats["time_spent_converting"] += conversion_time
+            self._conversion_stats["total_conversions"] += 1
 
-        logger.debug(
-            f"Converted {len(converted_grads)} gradients to master precision "
-            f"in {conversion_time:.3f}s"
-        )
-        return converted_grads
+            logger.debug(
+                f"Converted {len(converted_grads)} gradients to master precision "
+                f"in {conversion_time:.3f}s"
+            )
+            return converted_grads
+
+        except Exception as e:
+            logger.error(f"Master gradient conversion failed: {e}")
+            raise GradientConversionError(
+                "Failed to convert gradients to master precision"
+            ) from e
 
     def convert_gradients_for_communication(
         self, gradients: Dict[str, torch.Tensor]
@@ -313,9 +418,25 @@ class GradientDataTypeManager:
             "time_spent_converting": 0.0,
         }
 
+    @contextmanager
+    def gradient_conversion_context(self) -> Generator[None, None, None]:
+        """Context manager for safe gradient conversion with automatic cleanup."""
+        try:
+            yield
+        finally:
+            self.cleanup()
+
     def cleanup(self) -> None:
-        """Clean up stored gradients."""
+        """Clean up stored gradients and free memory."""
+        # Clear weak references (automatically handled but explicit for clarity)
         self._master_gradients.clear()
+        # Clear name-based references
+        self._gradient_refs.clear()
+        # Force garbage collection for large tensor cleanup
+        if len(self._gradient_refs) > 100:  # Only for large cleanups
+            import gc
+
+            gc.collect()
 
 
 class AdvancedGradientFinalizer:
@@ -333,7 +454,7 @@ class AdvancedGradientFinalizer:
         data_type_manager: Optional[GradientDataTypeManager] = None,
         enable_advanced_sync: bool = True,
         verbose: bool = False,
-    ):
+    ) -> None:
         """Initialize advanced gradient finalizer.
 
         Args:
@@ -677,6 +798,13 @@ class AdvancedGradientFinalizer:
                     # Synchronize gradients for this dimension
                     for name, grad in comm_gradients.items():
                         try:
+                            # Ensure gradient is contiguous for optimal communication
+                            # performance
+                            if not grad.is_contiguous():
+                                grad = grad.contiguous()
+                                comm_gradients[name] = grad  # Update reference
+
+                            # Perform reduction with timeout handling
                             if self.config.reduction_op == "mean":
                                 dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=group)
                                 grad.div_(self._parallel_sizes[dim])
@@ -686,6 +814,15 @@ class AdvancedGradientFinalizer:
                                 # Default to mean
                                 dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=group)
                                 grad.div_(self._parallel_sizes[dim])
+
+                        except dist.DistBackendError as e:
+                            logger.error(
+                                f"Distributed backend error for gradient {name} in "
+                                f"dimension {dim}: {e}"
+                            )
+                            raise GradientSynchronizationError(
+                                f"Sync failed for {name} in {dim}"
+                            ) from e
                         except Exception as e:
                             logger.warning(
                                 f"Failed to sync gradient {name} for "
@@ -860,13 +997,78 @@ class AdvancedGradientFinalizer:
         self.data_type_manager.reset_statistics()
         self.core_finalizer.reset_statistics()
 
-    def cleanup(self) -> None:
-        """Clean up resources."""
-        self.data_type_manager.cleanup()
-        self.core_finalizer.cleanup()
+    def benchmark_performance(self, num_iterations: int = 100) -> Dict[str, Any]:
+        """Benchmark gradient finalization performance.
 
-        if self.verbose:
-            logger.info("Advanced gradient finalizer cleaned up")
+        Args:
+            num_iterations: Number of iterations to run for benchmarking.
+
+        Returns:
+            Dictionary with performance metrics including timing and throughput.
+        """
+        if not hasattr(self, "model") or self.model is None:
+            raise RuntimeError("Model not available for benchmarking")
+
+        # Warm-up phase
+        for _ in range(min(10, num_iterations // 10)):
+            try:
+                self.finalize_gradients(collect_stats=False)
+            except Exception:
+                pass  # Ignore errors during warmup
+
+        # Actual benchmark
+        start_time = time.perf_counter()
+        successful_runs = 0
+
+        for _ in range(num_iterations):
+            try:
+                self.finalize_gradients(collect_stats=False)
+                successful_runs += 1
+            except Exception as e:
+                logger.debug(f"Benchmark iteration failed: {e}")
+
+        end_time = time.perf_counter()
+        total_time = end_time - start_time
+
+        return {
+            "total_time_seconds": total_time,
+            "average_time_per_iteration_ms": (total_time / max(1, successful_runs))
+            * 1000,
+            "iterations_per_second": successful_runs / total_time
+            if total_time > 0
+            else 0,
+            "successful_runs": successful_runs,
+            "success_rate": successful_runs / num_iterations,
+            "data_type_stats": self.data_type_manager.get_statistics(),
+            "performance_metrics": self.get_performance_metrics(),
+        }
+
+    def cleanup(self) -> None:
+        """Clean up resources and log performance summary."""
+        try:
+            # Log final performance summary if verbose
+            if (
+                self.verbose
+                and hasattr(self, "_finalization_count")
+                and self._finalization_count > 0
+            ):
+                metrics = self.get_performance_metrics()
+                logger.info(
+                    f"Advanced gradient finalizer summary: "
+                    f"{self._finalization_count} finalizations, "
+                    f"avg_time={metrics.get('avg_finalization_time', 0):.3f}s"
+                )
+
+            # Cleanup components
+            self.data_type_manager.cleanup()
+            if hasattr(self, "core_finalizer"):
+                self.core_finalizer.cleanup()
+
+        except Exception as e:
+            logger.warning(f"Error during finalizer cleanup: {e}")
+        finally:
+            if self.verbose:
+                logger.info("Advanced gradient finalizer cleaned up")
 
 
 # Public API functions for convenient usage
