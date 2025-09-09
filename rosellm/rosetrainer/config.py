@@ -22,6 +22,7 @@ from .constants import (
     DEFAULT_WARMUP_STEPS,
     DEFAULT_WEIGHT_DECAY,
 )
+from .utils.timer_config import TimerConfig
 
 
 class PrecisionType(str, Enum):
@@ -638,6 +639,15 @@ def _default_random() -> RandomConfig:
     return RandomConfig()  # type: ignore[call-arg]
 
 
+def _default_timer() -> TimerConfig:
+    """Create default timer configuration.
+
+    Returns:
+        TimerConfig: Default timer settings with interval logging
+    """
+    return TimerConfig()  # type: ignore[call-arg]
+
+
 class TrainingConfig(BaseModel):
     """Main training configuration with validation."""
 
@@ -671,6 +681,7 @@ class TrainingConfig(BaseModel):
         default_factory=_default_position_embedding
     )
     random: RandomConfig = Field(default_factory=_default_random)
+    timers: TimerConfig = Field(default_factory=_default_timer)
 
     # Checkpointing
     checkpoint_interval: int = Field(DEFAULT_CHECKPOINT_INTERVAL, ge=1)
@@ -829,6 +840,18 @@ def validate_config(config: Union[dict, TrainingConfig]) -> TrainingConfig:
         # Validate random config
         if hasattr(validated, "random"):
             validated.random = RandomConfig(**validated.random.model_dump())
+
+        # Validate timer config
+        if hasattr(validated, "timers"):
+            # TimerConfig is a dataclass, not a Pydantic model
+            if hasattr(validated.timers, "__dict__"):
+                # Re-create to ensure validation
+                from dataclasses import asdict
+
+                validated.timers = TimerConfig(**asdict(validated.timers))
+            else:
+                # Already a TimerConfig instance
+                pass
 
     except Exception as e:
         raise ValueError(f"Sub-configuration validation failed: {e}")

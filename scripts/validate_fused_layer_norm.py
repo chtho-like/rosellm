@@ -14,7 +14,7 @@ import torch.nn as nn
 
 # Add paths for imports
 sys.path.append("/data/projects/rosellm")
-sys.path.append("/data/projects/Megatron-LM")
+sys.path.append("/data/projects/rosellm/.vscode/Megatron-LM")
 
 from rosellm.rosetrainer.fusions import FusedLayerNorm, LayerNormConfig  # noqa: E402
 
@@ -45,9 +45,9 @@ def compare_with_megatron(
     try:
         # Try to import Megatron-LM's implementation
         from megatron.core.fusions.fused_layer_norm import (
-            FusedLayerNorm as MegatronLayerNorm,  # type: ignore
+            FusedLayerNorm as MegatronLayerNorm,  # type: ignore[import]
         )
-        from megatron.core.transformer import TransformerConfig  # type: ignore
+        from megatron.core.transformer import TransformerConfig  # type: ignore[import]
 
         # Create Megatron config
         megatron_config = TransformerConfig(

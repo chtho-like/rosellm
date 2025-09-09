@@ -34,6 +34,7 @@ from .utils.gradient_utils import (
     get_gradient_stats,
     sync_gradients,
 )
+from .utils.timers import Timers, set_timers
 
 # References:
 # [1] Shoeybi, M. et al. "Megatron-LM: Training Multi-Billion Parameter Language Models
@@ -107,6 +108,10 @@ class RoseTrainer:
             "total_steps": 0,
         }
         self._step_start_time: Optional[float] = None
+
+        # Initialize timers
+        self.timers = Timers(self.config.timers)
+        set_timers(self.timers)  # Set as global timers for compatibility
 
         # Create gradient clipping configuration from validated config
         self.gradient_clip_config = GradientClipConfig(
@@ -498,8 +503,6 @@ class RoseTrainer:
             logger.warning("Continuing without advanced RNG state management")
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, Any]:
-        # Track step time for performance metrics
-        self._step_start_time = time.time()
         """
         Perform a single training step.
 
@@ -509,6 +512,11 @@ class RoseTrainer:
         Returns:
             Dictionary containing loss and metrics.
         """
+        # Track step time for performance metrics
+        self._step_start_time = time.time()
+
+        # Start overall training step timer
+        self.timers.start("training-step")
         # Move batch to device
         batch = {k: v.to(self.device) for k, v in batch.items()}
 
@@ -516,11 +524,13 @@ class RoseTrainer:
         self.optimizer.zero_grad()
 
         # Forward pass with mixed precision if enabled
+        self.timers.start("forward-compute")
         if self.mixed_precision_manager is not None:
             with self.mixed_precision_manager.autocast_context():
                 outputs = self.model(**batch)
         else:
             outputs = self.model(**batch)
+        self.timers.stop("forward-compute")
 
         # Handle different output formats
         if hasattr(outputs, "loss"):
@@ -533,10 +543,12 @@ class RoseTrainer:
             )
 
         # Backward pass with mixed precision scaling if enabled
+        self.timers.start("backward-compute")
         if self.mixed_precision_manager is not None:
             self.mixed_precision_manager.backward_step(loss)
         else:
             loss.backward()
+        self.timers.stop("backward-compute")
 
         # Handle mixed precision overflow detection and gradient processing
         overflow_detected = False
@@ -631,9 +643,11 @@ class RoseTrainer:
                             return error_metrics
 
                 # Apply advanced gradient clipping
+                self.timers.start("gradient-clip")
                 clip_stats = apply_gradient_clipping(
                     self.model, self.gradient_clip_config
                 )
+                self.timers.stop("gradient-clip")
 
                 # Add gradient statistics to metrics if enabled
                 if self.config.gradient.track_gradient_stats:
@@ -681,14 +695,17 @@ class RoseTrainer:
             self.config.gradient.sync_on_accumulation
             or (self.gradient_stats_step % self.config.gradient.accumulation_steps == 0)
         ):
+            self.timers.start("gradient-sync")
             if self.bucket_manager is not None:
                 # Use gradient bucketing for synchronization
                 self._synchronize_gradients_with_bucketing()
             else:
                 # Use traditional gradient synchronization
                 sync_gradients(self.model)
+            self.timers.stop("gradient-sync")
 
         # Update parameters with mixed precision handling
+        self.timers.start("optimizer-step")
         if self.mixed_precision_manager is not None and not overflow_detected:
             # Mixed precision optimizer step (already handled overflow)
             success = self.mixed_precision_manager.optimizer_step(
@@ -708,6 +725,7 @@ class RoseTrainer:
         elif not overflow_detected:
             # Standard optimizer step
             self.optimizer.step()
+        self.timers.stop("optimizer-step")
 
         # Step the scheduler if enabled
         if self.scheduler is not None:
@@ -777,6 +795,13 @@ class RoseTrainer:
                     metrics["loss_scale"] = scaler_info["current_scale"]
             elif "current_scale" in mp_stats:
                 metrics["loss_scale"] = mp_stats["current_scale"]
+
+        # Stop overall training step timer
+        self.timers.stop("training-step")
+
+        # Log timers if configured
+        if self.config.timers.should_log(int(self.performance_stats["total_steps"])):
+            self.timers.log(step=int(self.performance_stats["total_steps"]))
 
         return metrics
 

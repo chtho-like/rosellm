@@ -16,6 +16,8 @@ from .gradient_utils import (
     gradient_accumulation_context,
     sync_gradients,
 )
+from .timer_config import TimerAggregation, TimerConfig, TimerLogLevel
+from .timers import Timer, Timers, get_timers, log_timers, reset_timers, set_timers
 
 __all__ = [
     "GradientClipConfig",
@@ -27,4 +29,13 @@ __all__ = [
     "gradient_accumulation_context",
     "sync_gradients",
     "CustomGradientScaler",
+    "Timer",
+    "Timers",
+    "TimerConfig",
+    "TimerLogLevel",
+    "TimerAggregation",
+    "get_timers",
+    "set_timers",
+    "reset_timers",
+    "log_timers",
 ]
