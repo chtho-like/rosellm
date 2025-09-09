@@ -194,6 +194,81 @@ class MixedPrecisionConfig(BaseModel):
         return v
 
 
+class PositionEmbeddingConfig(BaseModel):
+    """Position embedding configuration."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    # Position embedding type
+    embedding_type: Literal["none", "learned", "sinusoidal", "rotary", "alibi"] = Field(
+        "none", description="Type of position embedding to use"
+    )
+
+    # Common parameters
+    max_position_embeddings: int = Field(
+        2048, ge=1, description="Maximum sequence length for position embeddings"
+    )
+    hidden_size: Optional[int] = Field(
+        None, ge=1, description="Hidden size for learned/sinusoidal embeddings"
+    )
+
+    # RoPE specific configuration
+    rope_dim: Optional[int] = Field(
+        None, ge=2, description="Dimension for RoPE (must be even)"
+    )
+    rope_base: float = Field(
+        10000.0, gt=0, description="Base for RoPE frequency computation"
+    )
+    rope_scaling: Optional[Dict[str, Any]] = Field(
+        None, description="RoPE scaling configuration for context extension"
+    )
+    rope_interpolation_type: Literal[
+        "none", "linear", "ntk", "dynamic_ntk", "yarn"
+    ] = Field("none", description="RoPE interpolation method")
+    rope_scaling_factor: float = Field(
+        1.0, gt=0, description="Scaling factor for RoPE positions"
+    )
+    rope_partial_factor: float = Field(
+        1.0, gt=0, le=1.0, description="Fraction of dimensions to apply RoPE to"
+    )
+    rope_use_fused: bool = Field(
+        True, description="Use fused RoPE operations for better performance"
+    )
+
+    # ALiBi specific
+    alibi_num_heads: Optional[int] = Field(
+        None, ge=1, description="Number of heads for ALiBi"
+    )
+
+    # Learned embeddings specific
+    learned_dropout: float = Field(
+        0.0, ge=0, le=1.0, description="Dropout for learned embeddings"
+    )
+
+    @field_validator("rope_dim")
+    def validate_rope_dim(cls, v):
+        if v is not None and v % 2 != 0:
+            raise ValueError(f"rope_dim must be even, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def validate_embedding_params(self):
+        """Validate embedding-specific parameters."""
+        if (
+            self.embedding_type in ["learned", "sinusoidal"]
+            and self.hidden_size is None
+        ):
+            raise ValueError(f"{self.embedding_type} embeddings require hidden_size")
+
+        if self.embedding_type == "rotary" and self.rope_dim is None:
+            raise ValueError("Rotary embeddings require rope_dim")
+
+        if self.embedding_type == "alibi" and self.alibi_num_heads is None:
+            raise ValueError("ALiBi embeddings require alibi_num_heads")
+
+        return self
+
+
 class MemoryConfig(BaseModel):
     """Memory optimization configuration."""
 
@@ -428,6 +503,15 @@ def _default_bucketing() -> BucketingConfig:
     return BucketingConfig()  # type: ignore[call-arg]
 
 
+def _default_position_embedding() -> PositionEmbeddingConfig:
+    """Create default position embedding configuration.
+
+    Returns:
+        PositionEmbeddingConfig: Default position embedding settings with none type
+    """
+    return PositionEmbeddingConfig()  # type: ignore[call-arg]
+
+
 class TrainingConfig(BaseModel):
     """Main training configuration with validation."""
 
@@ -457,6 +541,9 @@ class TrainingConfig(BaseModel):
         default_factory=_default_mixed_precision
     )
     bucketing: BucketingConfig = Field(default_factory=_default_bucketing)
+    position_embedding: PositionEmbeddingConfig = Field(
+        default_factory=_default_position_embedding
+    )
 
     # Checkpointing
     checkpoint_interval: int = Field(DEFAULT_CHECKPOINT_INTERVAL, ge=1)
@@ -605,6 +692,12 @@ def validate_config(config: Union[dict, TrainingConfig]) -> TrainingConfig:
         # Validate bucketing config
         if hasattr(validated, "bucketing"):
             validated.bucketing = BucketingConfig(**validated.bucketing.model_dump())
+
+        # Validate position embedding config
+        if hasattr(validated, "position_embedding"):
+            validated.position_embedding = PositionEmbeddingConfig(
+                **validated.position_embedding.model_dump()
+            )
 
     except Exception as e:
         raise ValueError(f"Sub-configuration validation failed: {e}")

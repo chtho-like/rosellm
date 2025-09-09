@@ -194,9 +194,9 @@ def compare_scaling_strategies(
             )
         else:
             mp_config = MixedPrecisionConfig(
-                precision=PrecisionType.FP16
-                if device.type == "cuda"
-                else PrecisionType.FP32,
+                precision=(
+                    PrecisionType.FP16 if device.type == "cuda" else PrecisionType.FP32
+                ),
                 use_dynamic_scaling=(scaler_config is not None),
                 scaler_config=scaler_config,
             )

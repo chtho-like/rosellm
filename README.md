@@ -25,6 +25,8 @@ A comprehensive RLHF (Reinforcement Learning from Human Feedback) framework with
 - `gradient/decoupled_grad.py`: **NEW** Decoupled gradient storage for memory optimization
 - `communication/gradient_buckets.py`: **NEW** Intelligent gradient communication bucketing for distributed training
 - `communication/bucket_groups.py`: **NEW** Hierarchical bucket organization and advanced communication patterns
+- `embeddings/rope.py`: **NEW** Rotary Position Embeddings (RoPE) with multiple interpolation methods (Linear, NTK, YaRN)
+- `embeddings/position_embeddings.py`: **NEW** Unified position embedding interface supporting RoPE, learned, sinusoidal, and ALiBi
 
 ### RoseInfer (Distributed Inference)
 - Optimized inference with tensor parallelism
@@ -95,6 +97,68 @@ trainer.load_checkpoint("checkpoint.pt")
 ```
 
 ## Advanced Features
+
+### Rotary Position Embeddings (RoPE)
+
+RoseLLM provides state-of-the-art Rotary Position Embeddings with advanced context extension capabilities:
+
+```python
+from rosellm.rosetrainer.embeddings import (
+    RoPEConfig, RoPEInterpolationType, RotaryEmbedding, FusedRoPE
+)
+
+# Basic RoPE configuration
+rope_config = RoPEConfig(
+    dim=128,  # head_dim
+    max_position_embeddings=2048,
+    base=10000.0,
+    use_fused=True  # Enable optimized operations
+)
+
+# Initialize RoPE
+rope = RotaryEmbedding(rope_config)
+
+# Apply to query and key tensors in attention
+q_rotated, k_rotated = rope(query, key, position_ids=position_ids)
+
+# Advanced: Context length extension with YaRN
+extended_config = RoPEConfig(
+    dim=128,
+    max_position_embeddings=2048,
+    interpolation_type=RoPEInterpolationType.YaRN,
+    scaling_factor=4.0,  # Extend to 8192 tokens
+    yarn_beta_fast=32.0,
+    yarn_beta_slow=1.0,
+    use_fused=True
+)
+
+# Use with transformer models
+from rosellm.rosetrainer.embeddings import PositionEmbeddingFactory
+
+position_embedding = PositionEmbeddingFactory.create(
+    embedding_type="rotary",
+    dim=128,
+    max_position_embeddings=2048,
+    interpolation_type="yarn",
+    scaling_factor=4.0
+)
+```
+
+#### Supported Interpolation Methods:
+- **Linear**: Simple position scaling for moderate extension (2-4x)
+- **NTK (Neural Tangent Kernel)**: Frequency-adjusted scaling with theoretical grounding
+- **Dynamic NTK**: Adaptive frequency adjustment based on actual sequence length
+- **YaRN**: State-of-the-art method preserving both high and low frequency components
+
+#### Key Features:
+- **Zero Parameters**: No additional trainable parameters
+- **Relative Position Encoding**: Natural relative position through dot products
+- **Context Extension**: Handle sequences beyond training length
+- **Optimized Implementation**: Fused operations and efficient caching
+- **Thread-Safe**: Multi-threaded inference support with synchronized caching
+- **Partial RoPE**: Apply to subset of dimensions for improved performance
+
+For comprehensive technical details and interview preparation, see [`docs/rope-position-embeddings-deep-dive.md`](/data/projects/rosellm/docs/rope-position-embeddings-deep-dive.md).
 
 ### Data Parallelism
 
@@ -528,7 +592,8 @@ bucket = BucketFactory.create_bucket(
 - **Adaptive Optimization**: Dynamic bucket sizing based on performance metrics
 
 For comprehensive technical details, implementation guides, and interview preparation materials, see:
-- [`docs/dynamic-loss-scaling-deep-dive.md`](/data/projects/rosellm/docs/dynamic-loss-scaling-deep-dive.md) - **NEW** Complete technical deep dive on Dynamic Loss Scaling with interview-ready questions, architectural analysis, and production best practices
+- [`docs/rope-position-embeddings-deep-dive.md`](/data/projects/rosellm/docs/rope-position-embeddings-deep-dive.md) - **NEW** Complete technical deep dive on Rotary Position Embeddings with interview-ready questions, mathematical foundations, and production optimizations
+- [`docs/dynamic-loss-scaling-deep-dive.md`](/data/projects/rosellm/docs/dynamic-loss-scaling-deep-dive.md) - Complete technical deep dive on Dynamic Loss Scaling with interview-ready questions, architectural analysis, and production best practices
 - [`docs/gradient-communication-bucketing-deep-dive.md`](/data/projects/rosellm/docs/gradient-communication-bucketing-deep-dive.md) - Technical deep dive with architecture details and interview questions
 - [`docs/gradient-bucketing-implementation-guide.md`](/data/projects/rosellm/docs/gradient-bucketing-implementation-guide.md) - Practical implementation patterns and code examples
 
