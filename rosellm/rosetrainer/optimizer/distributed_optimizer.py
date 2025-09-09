@@ -18,6 +18,7 @@ from ..utils.gradient_utils import (
     apply_gradient_clipping,
     check_gradient_finite,
 )
+from ..utils.multi_tensor_ops import MultiTensorOperator, multi_tensor_scale
 from .config import DistributedOptimizerConfig
 from .param_range import ParameterPartitioner, ParameterRange
 
@@ -146,6 +147,12 @@ class DistributedOptimizer(Optimizer):
         # Thread safety for distributed operations
         self._lock = threading.RLock()
         self._comm_lock = threading.Lock()
+
+        # Initialize multi-tensor operator for optimized operations
+        self.multi_tensor_operator = MultiTensorOperator(
+            device=self.local_params[0].device if self.local_params else None,
+            enable_benchmarking=config.verbose,
+        )
 
     def _setup_partitioning(self) -> None:
         """Setup parameter partitioning across ranks."""
@@ -352,20 +359,25 @@ class DistributedOptimizer(Optimizer):
                     )
                     self._set_gradient(param, grad)
 
-        # Scale gradients by world size
+        # Scale gradients by world size using multi-tensor operations
         scale_factor = 1.0 / self.world_size
         scale_factor *= self.config.gradient_postdivide_factor
 
         if self._using_decoupled_grads and self.decoupled_grad_manager is not None:
             self.decoupled_grad_manager.scale_gradients(scale_factor)
             # Also scale any param.grad that might exist
-            for param in self.local_params:
-                if param.grad is not None:
-                    param.grad.mul_(scale_factor)
+            grads_to_scale = [p.grad for p in self.local_params if p.grad is not None]
+            if grads_to_scale:
+                multi_tensor_scale(
+                    grads_to_scale, scale_factor, self.multi_tensor_operator
+                )
         else:
-            for param in self.local_params:
-                if param.grad is not None:
-                    param.grad.mul_(scale_factor)
+            # Use multi-tensor scaling for efficiency
+            grads_to_scale = [p.grad for p in self.local_params if p.grad is not None]
+            if grads_to_scale:
+                multi_tensor_scale(
+                    grads_to_scale, scale_factor, self.multi_tensor_operator
+                )
 
     def _get_gradient(self, param: nn.Parameter) -> Optional[Tensor]:
         """Get gradient for a parameter, supporting decoupled storage.
