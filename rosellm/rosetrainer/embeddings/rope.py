@@ -131,7 +131,7 @@ class RotaryEmbedding(nn.Module):
             f"interpolation={config.interpolation_type.value}"
         )
 
-    def _init_rope_parameters(self):
+    def _init_rope_parameters(self) -> None:
         """Initialize RoPE frequency parameters."""
         base = self.config.base
         dim = self.rope_dim
