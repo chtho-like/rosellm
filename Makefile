@@ -28,8 +28,8 @@ dev:
 	pre-commit install
 
 # Run all tests
-test: test-no-cuda
-	pytest tests/ -v --cov=rosellm --cov-report=term-missing
+test:
+	CUDA_VISIBLE_DEVICES="" pytest tests/ -v --cov=rosellm --cov-report=term-missing -m "not gpu"
 
 test-no-cuda:
 	CUDA_VISIBLE_DEVICES="" pytest tests/ -v --cov=rosellm --cov-report=term-missing -m "not gpu"

@@ -39,7 +39,7 @@ class EnergyMonitor:
     infrastructure.
     """
 
-    def __init__(self, config: Optional[EnergyMonitoringConfig] = None):
+    def __init__(self, config: Optional[EnergyMonitoringConfig] = None) -> None:
         """
         Initialize Energy Monitor.
 
@@ -82,7 +82,7 @@ class EnergyMonitor:
             and parallel_state_initialized()
         )
 
-    def _initialize_components(self):
+    def _initialize_components(self) -> None:
         """Initialize monitoring components based on configuration."""
         self.local_tracker: Optional[GPUEnergyTracker] = None
         self.distributed_aggregator: Optional[DistributedEnergyAggregator] = None

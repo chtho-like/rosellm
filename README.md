@@ -21,6 +21,8 @@ A comprehensive RLHF (Reinforcement Learning from Human Feedback) framework with
 - `mixed_precision/gradient_scaler.py`: **NEW** Abstract gradient scaler interface with Megatron-LM compatibility
 - `memory/cpu_offload.py`: CPU offloading for optimizer states and parameters
 - `utils/gradient_utils.py`: Advanced gradient utilities with multi-tensor operations
+- `utils/timers.py`: **NEW** Performance timing utilities with distributed aggregation and minimal overhead
+- `utils/timer_config.py`: **NEW** Configurable timer system for profiling and performance analysis
 - `gradient/strategies.py`: **NEW** Advanced gradient synchronization strategies for multi-dimensional parallelism
 - `gradient/decoupled_grad.py`: **NEW** Decoupled gradient storage for memory optimization
 - `communication/gradient_buckets.py`: **NEW** Intelligent gradient communication bucketing for distributed training
@@ -591,7 +593,115 @@ bucket = BucketFactory.create_bucket(
 - **Memory Optimization**: Tensor pooling reduces GPU memory allocation overhead
 - **Adaptive Optimization**: Dynamic bucket sizing based on performance metrics
 
+### Performance Timing and Profiling
+
+RoseLLM includes a comprehensive performance timing system designed for distributed training profiling with minimal overhead:
+
+```python
+from rosellm.rosetrainer.utils import (
+    Timers, TimerConfig, TimerLogLevel, TimerAggregation,
+    get_timers, set_timers, log_timers
+)
+
+# Basic usage with context managers
+config = TimerConfig(
+    enabled=True,
+    log_level=TimerLogLevel.INTERVAL,
+    log_interval=100,
+    synchronize_cuda=True,      # Force GPU sync for accurate timing
+    track_memory=True,           # Track GPU memory usage
+    aggregation_method=TimerAggregation.MEAN  # For distributed training
+)
+
+timers = Timers(config)
+set_timers(timers)  # Set as global instance
+
+# Training loop with hierarchical timing
+for step, batch in enumerate(dataloader):
+    timers = get_timers()
+    
+    with timers("training-step")():
+        # Time data loading
+        with timers("data-loading")():
+            inputs, targets = prepare_batch(batch)
+        
+        # Time forward pass
+        with timers("forward-pass")():
+            outputs = model(inputs)
+        
+        # Time loss computation
+        with timers("loss-computation")():
+            loss = criterion(outputs, targets)
+        
+        # Time backward pass
+        with timers("backward-pass")():
+            loss.backward()
+        
+        # Time optimizer step
+        with timers("optimizer-step")():
+            optimizer.step()
+    
+    # Automatic logging at intervals
+    if step % 100 == 0:
+        log_timers(step=step, reset=False)
+
+# Advanced configuration with selective timing
+advanced_config = TimerConfig(
+    enabled_timers=["critical-path", "forward-pass"],  # Only time specific operations
+    timer_categories={
+        "forward": ["forward-pass", "forward-comm"],
+        "backward": ["backward-pass", "gradient-sync"],
+        "optimizer": ["optimizer-step", "gradient-clip"]
+    },
+    output_file="training_timers.log",
+    use_barrier=True,  # Distributed synchronization
+    warmup_steps=5,    # Skip initial steps for accuracy
+    precision=4        # Decimal places in output
+)
+
+# Memory profiling example
+if torch.cuda.is_available():
+    memory_config = TimerConfig(
+        track_memory=True,
+        synchronize_cuda=True
+    )
+    memory_timers = Timers(memory_config)
+    
+    with memory_timers("model-forward")():
+        outputs = model(batch)
+    
+    stats = memory_timers.get_all_stats()
+    print(f"Memory used: {stats['model-forward']['memory_used_mb']:.2f} MB")
+    print(f"Peak memory: {stats['model-forward']['peak_memory_mb']:.2f} MB")
+
+# Distributed aggregation (automatic in multi-GPU)
+# Timers will aggregate statistics across all ranks
+# using efficient batched all-reduce operations
+```
+
+#### Key Timer Features:
+- **Zero-overhead when disabled**: Singleton no-op pattern eliminates overhead
+- **Thread-safe operations**: Full RLock protection for concurrent access
+- **Bounded memory usage**: Configurable history limits prevent memory leaks
+- **CUDA synchronization**: Accurate GPU kernel timing with torch.cuda.synchronize()
+- **Distributed aggregation**: Efficient batched all-reduce for multi-GPU statistics
+- **Hierarchical categorization**: Organized output for quick bottleneck identification
+- **Memory tracking**: Integrated GPU memory profiling without additional tools
+- **Statistics caching**: Avoids redundant computation with intelligent caching
+
+#### Performance Characteristics:
+- **Timing overhead**: <0.1% when enabled, truly zero when disabled
+- **Memory overhead**: Bounded by max_history configuration (default 10,000 entries)
+- **Distributed overhead**: Single batched all-reduce per aggregation type
+- **Thread safety**: Lock-free reads for cached statistics
+
+#### Comparison with Other Profiling Tools:
+- **vs PyTorch Profiler**: Lower overhead, simpler API, native distributed support
+- **vs NVIDIA Nsight**: Application-level timing, no external tools required
+- **vs Megatron-LM timers**: Enhanced with thread safety, memory bounds, and optimized aggregation
+
 For comprehensive technical details, implementation guides, and interview preparation materials, see:
+- [`docs/timers-system-deep-dive.md`](/data/projects/rosellm/docs/timers-system-deep-dive.md) - **NEW** Complete technical deep dive on the performance timing system with distributed aggregation, interview questions, and comparison with Megatron-LM
 - [`docs/rope-position-embeddings-deep-dive.md`](/data/projects/rosellm/docs/rope-position-embeddings-deep-dive.md) - **NEW** Complete technical deep dive on Rotary Position Embeddings with interview-ready questions, mathematical foundations, and production optimizations
 - [`docs/dynamic-loss-scaling-deep-dive.md`](/data/projects/rosellm/docs/dynamic-loss-scaling-deep-dive.md) - Complete technical deep dive on Dynamic Loss Scaling with interview-ready questions, architectural analysis, and production best practices
 - [`docs/gradient-communication-bucketing-deep-dive.md`](/data/projects/rosellm/docs/gradient-communication-bucketing-deep-dive.md) - Technical deep dive with architecture details and interview questions

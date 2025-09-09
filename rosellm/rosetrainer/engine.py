@@ -515,8 +515,12 @@ class RoseTrainer:
         # Track step time for performance metrics
         self._step_start_time = time.time()
 
-        # Start overall training step timer
-        self.timers.start("training-step")
+        # Start overall training step timer (with error handling)
+        try:
+            self.timers.start("training-step")
+        except Exception:
+            # Timer errors should not crash training
+            pass
         # Move batch to device
         batch = {k: v.to(self.device) for k, v in batch.items()}
 

@@ -18,6 +18,11 @@ from rosellm.rosetrainer.utils import (
     reset_timers,
     set_timers,
 )
+from rosellm.rosetrainer.utils.timers import (
+    TimerAlreadyStartedError,
+    TimerConfigurationError,
+    TimerNotStartedError,
+)
 
 
 class TestTimer(unittest.TestCase):
@@ -37,6 +42,26 @@ class TestTimer(unittest.TestCase):
         self.assertLess(elapsed, 0.15)
         self.assertEqual(timer.count, 1)
         self.assertAlmostEqual(timer.elapsed_time, elapsed, places=5)
+
+    def test_timer_already_started_error(self):
+        """Test that starting a running timer raises error."""
+        timer = Timer("test", synchronize_cuda=False, use_barrier=False)
+
+        timer.start()
+        with self.assertRaises(TimerAlreadyStartedError):
+            timer.start()
+
+    def test_timer_not_started_error(self):
+        """Test that stopping a non-running timer raises error."""
+        timer = Timer("test", synchronize_cuda=False, use_barrier=False)
+
+        with self.assertRaises(TimerNotStartedError):
+            timer.stop()
+
+    def test_timer_invalid_config(self):
+        """Test that invalid configuration raises error."""
+        with self.assertRaises(TimerConfigurationError):
+            Timer("test", max_history=-1)
 
     def test_timer_multiple_runs(self):
         """Test accumulation over multiple runs."""
@@ -196,6 +221,11 @@ class TestTimers(unittest.TestCase):
 
         # Should return no-op timer
         self.assertEqual(elapsed, 0.0)
+
+        # No-op timer should not raise errors
+        timer.reset()
+        stats = timer.get_stats()
+        self.assertEqual(stats["count"], 0.0)
 
     def test_timers_specific_enabled(self):
         """Test specific timer enabling."""
