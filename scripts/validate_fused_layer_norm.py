@@ -44,12 +44,10 @@ def compare_with_megatron(
     """
     try:
         # Try to import Megatron-LM's implementation
-        from megatron.core.fusions.fused_layer_norm import (  # noqa: E501; type: ignore[import-untyped, import-not-found]  # noqa: E501
-            FusedLayerNorm as MegatronLayerNorm,
+        from megatron.core.fusions.fused_layer_norm import (
+            FusedLayerNorm as MegatronLayerNorm,  # type: ignore
         )
-        from megatron.core.transformer import (  # noqa: E501; type: ignore[import-untyped, import-not-found]  # noqa: E501
-            TransformerConfig,
-        )
+        from megatron.core.transformer import TransformerConfig  # type: ignore
 
         # Create Megatron config
         megatron_config = TransformerConfig(

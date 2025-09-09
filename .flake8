@@ -6,4 +6,6 @@ per-file-ignores =
     test_*.py:D
     tests/*:D
     scripts/*:D,E722
+    examples/energy_monitoring_*.py:E501,D301
+    examples/*_example.py:E501
 exclude = .git,__pycache__,build,dist,.vscode,notebooks,.conda
