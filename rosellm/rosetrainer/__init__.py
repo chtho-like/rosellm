@@ -17,13 +17,18 @@ from .fusions import (  # Fused operations
     LayerNormKernelType,
 )
 from .gradient import (  # Gradient finalization and decoupled storage
+    BucketingStrategy,
     DecoupledGradientBuffer,
     DecoupledGradientConfig,
     DecoupledGradientManager,
+    GradientBucket,
+    GradientBucketConfig,
+    GradientBucketManager,
     GradientFinalizationConfig,
     GradientFinalizer,
     GradientSyncStrategy,
     StorageMode,
+    create_gradient_buckets,
 )
 from .optimizer import (  # Distributed optimizer
     DistributedOptimizer,
@@ -90,6 +95,12 @@ __all__ = [
     "MicrobatchInfo",
     # ZeRO
     "ZeROOptimizer",
+    # Gradient Bucketing
+    "BucketingStrategy",
+    "GradientBucket",
+    "GradientBucketConfig",
+    "GradientBucketManager",
+    "create_gradient_buckets",
     # Gradient Finalization
     "GradientFinalizationConfig",
     "GradientFinalizer",
