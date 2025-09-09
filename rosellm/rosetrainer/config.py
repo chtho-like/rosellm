@@ -484,6 +484,34 @@ def _default_scheduler() -> SchedulerConfig:
     return SchedulerConfig()  # type: ignore[call-arg]
 
 
+def _default_mixed_precision() -> MixedPrecisionConfig:
+    """Create default mixed precision configuration.
+
+    Returns:
+        MixedPrecisionConfig: Default mixed precision settings with FP16 and
+            dynamic scaling
+    """
+    return MixedPrecisionConfig()  # type: ignore[call-arg]
+
+
+def _default_bucketing() -> BucketingConfig:
+    """Create default bucketing configuration.
+
+    Returns:
+        BucketingConfig: Default bucketing settings with bucketing disabled
+    """
+    return BucketingConfig()  # type: ignore[call-arg]
+
+
+def _default_position_embedding() -> PositionEmbeddingConfig:
+    """Create default position embedding configuration.
+
+    Returns:
+        PositionEmbeddingConfig: Default position embedding settings with none type
+    """
+    return PositionEmbeddingConfig()  # type: ignore[call-arg]
+
+
 class TrainingConfig(BaseModel):
     """Main training configuration with validation."""
 
@@ -509,6 +537,13 @@ class TrainingConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=_default_memory)
     parallelism: ParallelismConfig = Field(default_factory=_default_parallelism)
     scheduler: SchedulerConfig = Field(default_factory=_default_scheduler)
+    mixed_precision: MixedPrecisionConfig = Field(
+        default_factory=_default_mixed_precision
+    )
+    bucketing: BucketingConfig = Field(default_factory=_default_bucketing)
+    position_embedding: PositionEmbeddingConfig = Field(
+        default_factory=_default_position_embedding
+    )
 
     # Checkpointing
     checkpoint_interval: int = Field(DEFAULT_CHECKPOINT_INTERVAL, ge=1)
@@ -647,6 +682,22 @@ def validate_config(config: Union[dict, TrainingConfig]) -> TrainingConfig:
         # Validate scheduler config
         if hasattr(validated, "scheduler"):
             validated.scheduler = SchedulerConfig(**validated.scheduler.model_dump())
+
+        # Validate mixed precision config
+        if hasattr(validated, "mixed_precision"):
+            validated.mixed_precision = MixedPrecisionConfig(
+                **validated.mixed_precision.model_dump()
+            )
+
+        # Validate bucketing config
+        if hasattr(validated, "bucketing"):
+            validated.bucketing = BucketingConfig(**validated.bucketing.model_dump())
+
+        # Validate position embedding config
+        if hasattr(validated, "position_embedding"):
+            validated.position_embedding = PositionEmbeddingConfig(
+                **validated.position_embedding.model_dump()
+            )
 
     except Exception as e:
         raise ValueError(f"Sub-configuration validation failed: {e}")

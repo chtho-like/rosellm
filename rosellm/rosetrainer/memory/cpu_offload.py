@@ -25,7 +25,7 @@ class CPUOffloadOptimizer:
         optimizer: torch.optim.Optimizer,
         pin_memory: bool = False,
         offload_params: bool = False,
-    ):
+    ) -> None:
         """
         Initialize the CPU offload optimizer.
 
@@ -238,7 +238,7 @@ class ParameterOffloader:
         model: nn.Module,
         device: torch.device,
         pin_memory: bool = False,
-    ):
+    ) -> None:
         """
         Initialize the parameter offloader.
 

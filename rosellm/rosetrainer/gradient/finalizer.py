@@ -777,6 +777,7 @@ class GradientFinalizer:
         return get_gradient_stats(
             params,
             include_histograms=False,  # Too expensive for regular use
+            compute_percentiles=self.finalization_count % 100 == 0,  # Every 100 steps
         )
 
     @contextmanager

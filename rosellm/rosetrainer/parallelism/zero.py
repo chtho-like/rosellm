@@ -29,7 +29,7 @@ class ZeROOptimizer:
         world_size: int = 1,
         overlap_communication: bool = True,
         dp_group: Optional[dist.ProcessGroup] = None,
-    ):
+    ) -> None:
         """
         Initialize the ZeRO optimizer wrapper.
 

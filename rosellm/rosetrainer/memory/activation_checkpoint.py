@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 
+from .selective_recompute import SelectiveCheckpointConfig, SelectiveRecomputeManager
+
 logger = logging.getLogger(__name__)
 
 # References:
@@ -23,8 +25,8 @@ logger = logging.getLogger(__name__)
 class MemoryProfiler:
     """Memory profiling utilities for activation checkpointing."""
 
-    def __init__(self):
-        self.memory_stats = {
+    def __init__(self) -> None:
+        self.memory_stats: Dict[str, Dict[str, Any]] = {
             "before_checkpoint": {},
             "after_checkpoint": {},
             "memory_saved": {},
@@ -98,12 +100,25 @@ class ActivationCheckpointing:
     Utility class for managing activation checkpointing in large models.
     This implementation helps reduce memory usage during training by
     recomputing forward activations during the backward pass.
+
+    Now supports selective recomputation through integration with
+    SelectiveRecomputeManager for intelligent checkpoint selection.
     """
 
-    def __init__(self):
+    def __init__(
+        self, selective_config: Optional[SelectiveCheckpointConfig] = None
+    ) -> None:
         self.profiler = MemoryProfiler()
         self.profiling_enabled = False
-        self.selective_manager = None
+
+        # Initialize selective recomputation if config provided
+        self.selective_manager: Optional[SelectiveRecomputeManager] = None
+        if selective_config is not None:
+            self.selective_manager = SelectiveRecomputeManager(selective_config)
+            logger.info(
+                "Enabled selective recomputation with strategy: %s",
+                selective_config.strategy.value,
+            )
 
     def enable_profiling(self, enabled: bool = True):
         """Enable or disable memory profiling."""
@@ -401,6 +416,34 @@ class ActivationCheckpointing:
             self.profiler.profile_memory("sequential", "after")
 
         return result
+
+    def apply_selective_checkpointing(
+        self,
+        model: nn.Module,
+        config: Optional[SelectiveCheckpointConfig] = None,
+    ) -> nn.Module:
+        """
+        Apply selective activation checkpointing to a model.
+
+        Args:
+            model: PyTorch model to apply selective checkpointing to
+            config: Optional configuration for selective checkpointing
+                   (uses existing manager config if not provided)
+
+        Returns:
+            Model with selective checkpointing applied
+        """
+        if config is not None:
+            # Create new manager with provided config
+            self.selective_manager = SelectiveRecomputeManager(config)
+        elif self.selective_manager is None:
+            # Create default manager if none exists
+            self.selective_manager = SelectiveRecomputeManager(
+                SelectiveCheckpointConfig()
+            )
+
+        # Wrap the model with selective checkpointing
+        return self.selective_manager.wrap_model(model)
 
     def get_profiling_report(self) -> Dict[str, Any]:
         """Get memory profiling report."""

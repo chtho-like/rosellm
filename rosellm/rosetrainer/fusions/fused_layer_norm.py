@@ -326,13 +326,7 @@ class FusedLayerNormFunction(torch.autograd.Function):
     """Custom autograd function for CPU fallback layer norm.
 
     This implementation provides a CPU-optimized forward and backward pass
-    for layer normalization when GPU kernels are not available. It fuses
-    the normalization, scaling, and bias operations to minimize memory
-    bandwidth usage.
-
-    Note:
-        This function uses Welford's algorithm for numerical stability
-        when computing variance.
+    for layer normalization when GPU kernels are not available.
     """
 
     @staticmethod
@@ -367,27 +361,21 @@ class FusedLayerNormFunction(torch.autograd.Function):
                 f"normalized_shape length {len(normalized_shape)}"
             )
 
-        # Compute mean and variance with optimized memory access
+        # Compute mean and variance
         dims = tuple(range(input.ndim - len(normalized_shape), input.ndim))
-
-        # Use contiguous memory for better cache utilization
-        if not input.is_contiguous():
-            input = input.contiguous()
-
         mean = input.mean(dims, keepdim=True)
-        # Use Bessel's correction=False for consistency with most implementations
         var = input.var(dims, keepdim=True, unbiased=False)
 
-        # Fused normalization with reciprocal square root for efficiency
-        rstd = (var + eps).rsqrt()  # reciprocal std is more efficient
-        normalized = (input - mean) * rstd
+        # Normalize
+        std = (var + eps).sqrt()
+        normalized = (input - mean) / std
 
-        # Fused scale and shift
-        output = torch.addcmul(bias, normalized, weight)
+        # Scale and shift
+        output = normalized * weight + bias
 
         # Save for backward (optimize memory if configured)
         if ctx is not None:
-            ctx.save_for_backward(input, weight, mean, rstd)
+            ctx.save_for_backward(input, weight, mean, std)
 
         return output
 
@@ -403,11 +391,11 @@ class FusedLayerNormFunction(torch.autograd.Function):
             Tuple of gradients for (input, weight, bias, normalized_shape, eps)
         """
         grad_output = grad_outputs[0]
-        input, weight, mean, rstd = ctx.saved_tensors  # Note: using rstd instead of std
+        input, weight, mean, std = ctx.saved_tensors
         normalized_shape = ctx.normalized_shape
 
-        # Compute normalized input using saved reciprocal std
-        normalized = (input - mean) * rstd
+        # Compute normalized input
+        normalized = (input - mean) / std
 
         # Gradient w.r.t. weight and bias
         # Need to sum over all dimensions except the normalized ones
@@ -433,21 +421,19 @@ class FusedLayerNormFunction(torch.autograd.Function):
 
         grad_normalized = grad_output * weight
 
-        # Compute gradients using reciprocal std for efficiency
-        # grad_var = d_loss/d_var = sum(grad_normalized * normalized) * (-0.5) * rstd^3
+        # Compute gradients for variance and mean
         grad_var = (
             (grad_normalized * normalized).sum(dims, keepdim=True)
             * (-0.5)
-            * rstd.pow(3)
+            * std.pow(-3)
         )
-        # grad_mean using rstd
-        grad_mean = grad_normalized.sum(dims, keepdim=True) * (-rstd)
+        grad_mean = grad_normalized.sum(dims, keepdim=True) * (-1.0 / std)
         grad_mean = (
             grad_mean + grad_var * (-2.0) * (input - mean).sum(dims, keepdim=True) / N
         )
 
-        # Final gradient w.r.t. input using rstd
-        grad_input = grad_normalized * rstd
+        # Final gradient w.r.t. input
+        grad_input = grad_normalized / std
         grad_input = grad_input + grad_var * 2.0 * (input - mean) / N
         grad_input = grad_input + grad_mean / N
 
@@ -544,10 +530,6 @@ class FusedLayerNorm(nn.Module):
 
         Returns:
             Selected kernel implementation
-
-        Note:
-            Kernel instances are cached to avoid recreation overhead.
-            The selection is logged for debugging purposes.
         """
         # Cache kernel instances to avoid recreation
         if not hasattr(self, "_kernel_cache"):
@@ -590,33 +572,15 @@ class FusedLayerNorm(nn.Module):
         return self._kernel_cache["cpu"]
 
     def _set_sequence_parallel_flags(self) -> None:
-        """Set sequence parallel flags on parameters.
-
-        Note:
-            These flags are used by the distributed training framework
-            to identify parameters that should be synchronized across
-            the sequence parallel dimension.
-
-        Warning:
-            Failures to set flags are logged but not raised, as they
-            may not be critical for all use cases.
-        """
+        """Set sequence parallel flags on parameters."""
         try:
             setattr(self.weight, "sequence_parallel", True)
             setattr(self.bias, "sequence_parallel", True)
-            logger.debug("Successfully set sequence parallel flags")
         except Exception as e:
-            logger.warning(
-                f"Failed to set sequence parallel flags: {e}. "
-                f"This may affect sequence parallel training."
-            )
+            logger.warning(f"Failed to set sequence parallel flags: {e}")
 
-    def reset_parameters(self) -> None:
-        """Initialize parameters based on configuration.
-
-        Uses zero initialization for zero-centered gamma mode,
-        otherwise uses standard initialization (ones for weight, zeros for bias).
-        """
+    def reset_parameters(self):
+        """Initialize parameters based on configuration."""
         if self.config.zero_centered_gamma:
             init.zeros_(self.weight)
             init.zeros_(self.bias)
@@ -675,11 +639,7 @@ class FusedLayerNorm(nn.Module):
             raise RuntimeError(f"LayerNorm forward pass failed: {e}") from e
 
     def extra_repr(self) -> str:
-        """String representation with configuration details.
-
-        Returns:
-            Formatted string with key configuration parameters.
-        """
+        """String representation with configuration details."""
         return (
             f"normalized_shape={self.normalized_shape}, eps={self.eps}, "
             f"kernel={self.kernel.get_type().value}, "

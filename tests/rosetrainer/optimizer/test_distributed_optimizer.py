@@ -1,729 +1,632 @@
-"""
-Comprehensive tests for DistributedOptimizer with gradient bucketing.
+"""Tests for distributed optimizer with parameter partitioning."""
 
-Tests cover:
-- Gradient bucketing logic
-- Asynchronous gradient reduction
-- Parameter partitioning
-- Communication-computation overlap
-- End-to-end training scenarios
-"""
-
-import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
 import torch.nn as nn
-import torch.optim as optim
+from torch.optim import SGD, Adam
 
 from rosellm.rosetrainer.optimizer import (
-    ConfigurationError,
     DistributedOptimizer,
-    GradientBuffer,
-    PartitioningStrategyFactory,
-    PerformanceMonitor,
-    create_parameter_buckets,
-    estimate_memory_savings,
-    flatten_dense_tensors,
-    get_optimizer_memory_usage,
-    partition_parameters_by_size,
-    partition_parameters_round_robin,
-    unflatten_dense_tensors,
-    validate_bucket_configuration,
+    DistributedOptimizerConfig,
+    ParameterPartitioner,
+    ParameterRange,
 )
 
 
 class SimpleModel(nn.Module):
-    """Simple model for testing"""
+    """Simple model for testing."""
 
-    def __init__(self, input_size=10, hidden_size=20, output_size=5):
+    def __init__(
+        self, input_size: int = 10, hidden_size: int = 20, output_size: int = 5
+    ):
         super().__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
-        self.relu = nn.ReLU()
         self.fc2 = nn.Linear(hidden_size, output_size)
 
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        return x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.relu(self.fc1(x))
+        return self.fc2(x)
 
 
-class TestGradientBuffer:
-    """Test gradient buffer functionality"""
+class TestDistributedOptimizerConfig:
+    """Test configuration for distributed optimizer."""
 
-    def test_bucket_creation(self):
-        """Test creation of gradient buckets"""
-        model = SimpleModel()
-        params = list(model.parameters())
+    def test_default_config(self):
+        """Test default configuration values."""
+        config = DistributedOptimizerConfig()
 
-        # Create gradient buffer with small bucket size
-        buffer = GradientBuffer(params, bucket_size_mb=0.001)  # 1KB buckets
+        assert config.partition_parameters is True
+        assert config.partition_gradients is True
+        assert config.partition_optimizer_states is True
+        assert config.contiguous_gradients is True
+        assert config.mixed_precision is False
+        assert config.bucket_size_mb == 25
 
-        # Check buckets were created
-        assert len(buffer.buckets) > 0
-        assert len(buffer.param_to_bucket) == len(params)
+    def test_config_validation(self):
+        """Test configuration validation."""
+        # Test that partition_parameters forces partition_gradients
+        config = DistributedOptimizerConfig(
+            partition_parameters=True, partition_gradients=False
+        )
+        assert config.partition_gradients is True
 
-        # Verify bucket info
-        info = buffer.get_bucket_info()
-        num_buckets = info["num_buckets"]
-        assert isinstance(num_buckets, int) and num_buckets > 0
-        assert info["bucket_size_mb"] == 0.001
+        # Test invalid overlap_grad_reduce
+        with pytest.raises(ValueError, match="overlap_grad_reduce requires"):
+            config = DistributedOptimizerConfig(
+                overlap_grad_reduce=True, contiguous_gradients=False
+            )
 
-    def test_gradient_accumulation(self):
-        """Test gradient accumulation in buckets"""
-        model = SimpleModel()
-        params = list(model.parameters())
-        buffer = GradientBuffer(params, bucket_size_mb=0.01)
+        # Test invalid cpu_offload
+        with pytest.raises(ValueError, match="cpu_offload requires"):
+            config = DistributedOptimizerConfig(
+                cpu_offload=True, partition_optimizer_states=False
+            )
 
-        # Create dummy gradients
-        for param in params:
-            param.grad = torch.randn_like(param)
+    def test_memory_estimation(self):
+        """Test memory usage estimation."""
+        config = DistributedOptimizerConfig()
 
-        # Copy gradients to buckets
-        for param in params:
-            if param.grad is not None:
-                buffer._copy_grad_to_bucket(param, param.grad)
+        # 1M parameters, Adam optimizer (2 states)
+        memory_gb = config.get_memory_usage_gb(1_000_000, optimizer_state_size=2)
 
-        # Check gradients were copied
-        for bucket in buffer.buckets:
-            if bucket.grad_buffer is not None:
-                assert not torch.all(bucket.grad_buffer == 0)
+        # Should be reasonable
+        assert 0.001 < memory_gb < 0.1  # Between 1MB and 100MB
 
-    def test_bucket_reset(self):
-        """Test resetting gradient buffers"""
-        model = SimpleModel()
-        params = list(model.parameters())
-        buffer = GradientBuffer(params)
+    def test_mixed_precision_dtype(self):
+        """Test that mixed precision sets dtype correctly."""
+        config = DistributedOptimizerConfig(mixed_precision=True)
+        assert config.dtype == torch.float16
 
-        # Set some values
-        for bucket in buffer.buckets:
-            if bucket.grad_buffer is not None:
-                bucket.grad_buffer.fill_(1.0)
-                bucket.is_ready = True
-                bucket.is_reduced = True
 
-        # Reset
-        buffer.reset()
+class TestParameterRange:
+    """Test parameter range functionality."""
 
-        # Check reset worked
-        for bucket in buffer.buckets:
-            assert not bucket.is_ready
-            assert not bucket.is_reduced
-            assert bucket.all_reduce_handle is None
-            if bucket.grad_buffer is not None:
-                assert torch.all(bucket.grad_buffer == 0)
+    def test_parameter_range_creation(self):
+        """Test creating a parameter range."""
+        param_range = ParameterRange(
+            rank=0,
+            start_idx=0,
+            end_idx=2,
+            param_start_offset=0,
+            param_end_offset=100,
+            total_elements=200,
+            param_indices=[0, 1],
+        )
 
-    @patch("torch.distributed.is_initialized")
-    @patch("torch.distributed.all_reduce")
-    def test_async_reduction(self, mock_all_reduce, mock_is_init):
-        """Test asynchronous gradient reduction"""
-        mock_is_init.return_value = True
-        mock_handle = MagicMock()
-        mock_all_reduce.return_value = mock_handle
+        assert param_range.rank == 0
+        assert param_range.total_elements == 200
+        assert param_range.contains_param(0)
+        assert param_range.contains_param(1)
+        assert not param_range.contains_param(2)
 
-        model = SimpleModel()
-        params = list(model.parameters())
+    def test_get_param_slice(self):
+        """Test getting parameter slices."""
+        param_range = ParameterRange(
+            rank=0,
+            start_idx=0,
+            end_idx=3,
+            param_start_offset=50,
+            param_end_offset=75,
+            total_elements=200,
+            param_indices=[0, 1, 2],
+        )
 
-        # Create process group mock
-        mock_pg = MagicMock()
+        # First parameter (partial)
+        slice_info = param_range.get_param_slice(0, 100)
+        assert slice_info == (50, 100)
 
-        buffer = GradientBuffer(params, process_group=mock_pg)
+        # Middle parameter (full)
+        slice_info = param_range.get_param_slice(1, 100)
+        assert slice_info == (0, 100)
 
-        # Mark bucket as ready
-        if buffer.buckets:
-            bucket = buffer.buckets[0]
-            bucket.is_ready = True
-            buffer._start_bucket_reduction(bucket)
+        # Last parameter (partial)
+        slice_info = param_range.get_param_slice(2, 100)
+        assert slice_info == (0, 75)
 
-            # Check all_reduce was called
-            mock_all_reduce.assert_called_once()
-            assert bucket.all_reduce_handle == mock_handle
+        # Parameter not in range
+        slice_info = param_range.get_param_slice(3, 100)
+        assert slice_info is None
+
+
+class TestParameterPartitioner:
+    """Test parameter partitioner functionality."""
+
+    def test_partition_single_rank(self):
+        """Test partitioning with single rank."""
+        partitioner = ParameterPartitioner(world_size=1, rank=0)
+
+        # Create test parameters
+        params = [
+            nn.Parameter(torch.randn(10, 10)),  # 100 elements
+            nn.Parameter(torch.randn(20, 5)),  # 100 elements
+        ]
+
+        ranges = partitioner.compute_partition_ranges(params)
+
+        assert len(ranges) == 1
+        assert ranges[0].rank == 0
+        assert ranges[0].total_elements == 200
+        assert ranges[0].param_indices == [0, 1]
+
+    def test_partition_multiple_ranks(self):
+        """Test partitioning across multiple ranks."""
+        world_size = 4
+
+        # Create test parameters
+        params = [
+            nn.Parameter(torch.randn(100)),  # 100 elements
+            nn.Parameter(torch.randn(100)),  # 100 elements
+            nn.Parameter(torch.randn(100)),  # 100 elements
+            nn.Parameter(torch.randn(100)),  # 100 elements
+        ]
+
+        for rank in range(world_size):
+            partitioner = ParameterPartitioner(world_size=world_size, rank=rank)
+            ranges = partitioner.compute_partition_ranges(params)
+
+            assert len(ranges) == world_size
+
+            # Each rank should get approximately equal elements (with alignment)
+            for r in ranges:
+                # With alignment, sizes may vary more
+                assert 80 <= r.total_elements <= 120  # Allow for alignment variance
+
+            # Check local range
+            local_range = partitioner.get_local_param_range()
+            assert local_range is not None
+            assert local_range.rank == rank
+
+    def test_uneven_partition(self):
+        """Test partitioning with uneven parameter sizes."""
+        partitioner = ParameterPartitioner(world_size=2, rank=0)
+
+        # Create uneven parameters
+        params = [
+            nn.Parameter(torch.randn(150)),  # 150 elements
+            nn.Parameter(torch.randn(50)),  # 50 elements
+            nn.Parameter(torch.randn(25)),  # 25 elements
+        ]
+
+        ranges = partitioner.compute_partition_ranges(params)
+
+        assert len(ranges) == 2
+
+        # With alignment, exact distribution may vary
+        # Total is 225 elements across 2 ranks
+        total_assigned = sum(r.total_elements for r in ranges)
+        assert total_assigned == 225
+
+        # Each rank should get roughly half
+        assert 100 <= ranges[0].total_elements <= 130
+        assert 95 <= ranges[1].total_elements <= 125
+
+    def test_create_partition_buffer(self):
+        """Test creating contiguous buffer for partition."""
+        partitioner = ParameterPartitioner(world_size=2, rank=0)
+
+        # Create test parameters
+        params = [
+            nn.Parameter(torch.ones(100)),
+            nn.Parameter(torch.ones(100) * 2),
+        ]
+
+        partitioner.compute_partition_ranges(params)
+        buffer, offsets = partitioner.create_partition_buffer(params)
+
+        # Check buffer size
+        local_range = partitioner.get_local_param_range()
+        assert local_range is not None
+        assert buffer.numel() == local_range.total_elements
+
+        # Check that data was copied correctly
+        assert torch.allclose(buffer[:100], torch.ones(100))
+
+    def test_scatter_parameters(self):
+        """Test scattering buffer back to parameters."""
+        partitioner = ParameterPartitioner(world_size=1, rank=0)
+
+        # Create test parameters
+        params = [
+            nn.Parameter(torch.zeros(100)),
+            nn.Parameter(torch.zeros(100)),
+        ]
+
+        partitioner.compute_partition_ranges(params)
+        buffer, offsets = partitioner.create_partition_buffer(params)
+
+        # Modify buffer
+        buffer.fill_(3.14)
+
+        # Scatter back
+        partitioner.scatter_parameters(buffer, params, offsets)
+
+        # Check parameters were updated
+        assert torch.allclose(params[0], torch.ones(100) * 3.14)
+        assert torch.allclose(params[1], torch.ones(100) * 3.14)
 
 
 class TestDistributedOptimizer:
-    """Test distributed optimizer functionality"""
+    """Test distributed optimizer functionality."""
 
-    def test_initialization(self):
-        """Test optimizer initialization"""
+    @pytest.fixture
+    def mock_dist(self):
+        """Mock distributed training environment."""
+        with patch("torch.distributed.is_initialized", return_value=True), patch(
+            "torch.distributed.get_world_size", return_value=2
+        ), patch("torch.distributed.get_rank", return_value=0), patch(
+            "torch.distributed.all_reduce"
+        ), patch(
+            "torch.distributed.all_gather_into_tensor"
+        ):
+            yield
+
+    def test_optimizer_creation(self, mock_dist):
+        """Test creating distributed optimizer."""
         model = SimpleModel()
-        base_opt = optim.Adam(model.parameters(), lr=0.001)
+        config = DistributedOptimizerConfig()
 
-        # Create distributed optimizer
-        dist_opt = DistributedOptimizer(
-            base_opt,
-            models=model,
-            bucket_size_mb=25.0,
-            overlap_grad_reduce=True,
-            enable_metrics=True,
+        optimizer = DistributedOptimizer(
+            params=model.parameters(),
+            optimizer_class=Adam,
+            optimizer_kwargs={"lr": 0.001},
+            config=config,
         )
 
-        assert dist_opt.base_optimizer == base_opt
-        assert dist_opt.bucket_size_mb == 25.0
-        assert dist_opt.overlap_grad_reduce
-        assert dist_opt.performance_monitor is not None
+        assert optimizer.world_size == 2
+        assert optimizer.rank == 0
+        assert optimizer.config == config
+        assert len(optimizer.local_params) > 0
 
-    def test_invalid_configuration(self):
-        """Test that invalid configurations raise errors"""
+    def test_zero_grad(self, mock_dist):
+        """Test zeroing gradients."""
         model = SimpleModel()
-        base_opt = optim.Adam(model.parameters(), lr=0.001)
+        # Don't partition for this test
+        config = DistributedOptimizerConfig(partition_parameters=False)
 
-        # Test invalid bucket size
-        with pytest.raises(ConfigurationError):
-            DistributedOptimizer(
-                base_opt,
-                models=model,
-                bucket_size_mb=-1.0,
-            )
-
-        # Test invalid gradient accumulation steps
-        with pytest.raises(ConfigurationError):
-            DistributedOptimizer(
-                base_opt,
-                models=model,
-                gradient_accumulation_steps=0,
-            )
-
-        # Test invalid clip norm
-        with pytest.raises(ConfigurationError):
-            DistributedOptimizer(
-                base_opt,
-                models=model,
-                clip_grad_norm=-1.0,
-            )
-
-    def test_zero_grad(self):
-        """Test zeroing gradients"""
-        model = SimpleModel()
-        base_opt = optim.Adam(model.parameters(), lr=0.001)
-        dist_opt = DistributedOptimizer(base_opt, models=model)
+        optimizer = DistributedOptimizer(
+            params=model.parameters(),
+            optimizer_class=SGD,
+            optimizer_kwargs={"lr": 0.01},
+            config=config,
+        )
 
         # Set some gradients
         for param in model.parameters():
             param.grad = torch.randn_like(param)
 
         # Zero gradients
-        dist_opt.zero_grad()
+        optimizer.zero_grad()
 
-        # Check gradients are zeroed
+        # Check gradients are None
         for param in model.parameters():
-            assert param.grad is None or torch.all(param.grad == 0)
+            assert param.grad is None
 
-    def test_gradient_clipping(self):
-        """Test gradient clipping functionality"""
+    def test_gradient_reduction(self, mock_dist):
+        """Test gradient reduction across ranks."""
         model = SimpleModel()
-        base_opt = optim.SGD(model.parameters(), lr=0.01)
-        dist_opt = DistributedOptimizer(
-            base_opt,
-            models=model,
-            clip_grad_norm=1.0,
+        config = DistributedOptimizerConfig(
+            contiguous_gradients=True,
+            partition_parameters=False,  # Don't partition for this test
         )
 
-        # Create large gradients
-        for param in model.parameters():
-            param.grad = torch.randn_like(param) * 10
-
-        # Clip gradients
-        _ = dist_opt._clip_gradients()
-
-        # Check clipping worked
-        total_norm = 0
-        for param in model.parameters():
-            if param.grad is not None:
-                param_norm = param.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-        total_norm = total_norm**0.5
-
-        assert total_norm <= 1.0 + 1e-6  # Allow small numerical error
-
-    def test_gradient_accumulation(self):
-        """Test gradient accumulation steps"""
-        model = SimpleModel()
-        base_opt = optim.Adam(model.parameters(), lr=0.001)
-        dist_opt = DistributedOptimizer(
-            base_opt,
-            models=model,
-            gradient_accumulation_steps=4,
+        optimizer = DistributedOptimizer(
+            params=model.parameters(),
+            optimizer_class=Adam,
+            optimizer_kwargs={"lr": 0.001},
+            config=config,
         )
 
-        # Simulate multiple forward/backward passes
-        for i in range(3):
-            # Set dummy gradients
-            for param in model.parameters():
-                param.grad = torch.ones_like(param)
-
-            # Step should not update parameters yet
-            dist_opt.step()
-
-        # Check accumulation counter
-        assert dist_opt.accumulation_step == 3
-
-        # Final step should trigger update
+        # Set gradients
         for param in model.parameters():
             param.grad = torch.ones_like(param)
-        dist_opt.step()
 
-        # Counter should reset
-        assert dist_opt.accumulation_step == 0
+        # Mock all_reduce to verify it's called
+        with patch("torch.distributed.all_reduce") as mock_all_reduce:
+            optimizer._reduce_gradients()
 
-    @patch("rosellm.rosetrainer.optimizer.distributed_optimizer.get_data_parallel_size")
-    @patch("rosellm.rosetrainer.optimizer.distributed_optimizer.get_data_parallel_rank")
-    def test_parameter_partitioning(self, mock_rank, mock_size):
-        """Test parameter partitioning across ranks"""
-        mock_size.return_value = 4
-        mock_rank.return_value = 1
+            # Should have called all_reduce
+            assert mock_all_reduce.called
 
+        # Gradients should be scaled by world size (only check local params)
+        for param in optimizer.local_params:
+            if param.grad is not None:
+                expected_value = 1.0 / optimizer.world_size
+                expected_grad = torch.ones_like(param) * expected_value
+                assert torch.allclose(param.grad, expected_grad)
+
+    def test_gradient_clipping(self, mock_dist):
+        """Test gradient clipping."""
         model = SimpleModel()
-        base_opt = optim.Adam(model.parameters(), lr=0.001)
-        dist_opt = DistributedOptimizer(
-            base_opt,
-            models=model,
-            partition_optimizer_states=True,
+        config = DistributedOptimizerConfig(
+            grad_clip_value=1.0,
+            partition_parameters=False,  # Don't partition for this test
         )
 
-        # Check partitioning was done (only when dp_size > 1)
-        if dist_opt.dp_size > 1:
-            assert len(dist_opt.param_to_rank) == len(list(model.parameters()))
-            assert len(dist_opt.rank_to_params) == 4
-
-            # Check round-robin assignment
-            for idx, param in enumerate(model.parameters()):
-                expected_rank = idx % 4
-                assert dist_opt.param_to_rank[param] == expected_rank
-        else:
-            # When dp_size == 1, no partitioning should happen
-            assert len(dist_opt.param_to_rank) == 0
-
-    def test_state_dict_save_load(self):
-        """Test saving and loading optimizer state"""
-        model = SimpleModel()
-        base_opt = optim.Adam(model.parameters(), lr=0.001)
-        dist_opt = DistributedOptimizer(
-            base_opt,
-            models=model,
-            bucket_size_mb=10.0,
-            clip_grad_norm=1.0,
+        optimizer = DistributedOptimizer(
+            params=model.parameters(),
+            optimizer_class=Adam,
+            optimizer_kwargs={"lr": 0.001},
+            config=config,
         )
 
-        # Set some state
-        dist_opt.accumulation_step = 2
-        dist_opt.stats["num_bucket_reductions"] = 100
+        # Set large gradients (only on local params)
+        for param in optimizer.local_params:
+            param.grad = torch.ones_like(param) * 100
 
-        # Save state dict
-        state_dict = dist_opt.state_dict()
+        # Clip gradients
+        grad_norm = optimizer._clip_gradients()
 
-        # Create new optimizer and load state
-        new_base_opt = optim.Adam(model.parameters(), lr=0.001)
-        new_dist_opt = DistributedOptimizer(
-            new_base_opt,
-            models=model,
-            bucket_size_mb=10.0,
-            clip_grad_norm=1.0,
-        )
-        new_dist_opt.load_state_dict(state_dict)
+        # Check norm was computed
+        assert grad_norm > 0
 
-        # Check state was loaded
-        assert new_dist_opt.accumulation_step == 2
-        assert new_dist_opt.stats["num_bucket_reductions"] == 100
+        # Check gradients were clipped (only check local params)
+        total_norm = 0
+        for param in optimizer.local_params:
+            if param.grad is not None:
+                total_norm += param.grad.norm().item() ** 2
+        total_norm = total_norm**0.5
 
-    def test_add_param_group(self):
-        """Test adding parameter groups"""
-        model1 = SimpleModel()
-        model2 = SimpleModel()
+        # Should be close to clip value
+        # (config.grad_clip_value is not None due to line 339)
+        assert config.grad_clip_value is not None
+        assert total_norm <= config.grad_clip_value * 1.1  # Allow small tolerance
 
-        base_opt = optim.Adam(model1.parameters(), lr=0.001)
-        dist_opt = DistributedOptimizer(base_opt, models=model1)
-
-        initial_param_count = len(dist_opt.all_params)
-
-        # Add new param group
-        dist_opt.add_param_group(
-            {
-                "params": list(model2.parameters()),
-                "lr": 0.01,
-            }
+    def test_mixed_precision(self, mock_dist):
+        """Test mixed precision training."""
+        model = SimpleModel().half()  # FP16 model
+        config = DistributedOptimizerConfig(
+            mixed_precision=True,
+            partition_parameters=False,  # Don't partition for clearer testing
         )
 
-        # Check params were added
-        assert len(dist_opt.all_params) == initial_param_count + len(
-            list(model2.parameters())
-        )
-        assert len(dist_opt.param_groups) == 2
-
-
-class TestPartitioningStrategies:
-    """Test parameter partitioning strategies"""
-
-    def test_strategy_factory(self):
-        """Test partitioning strategy factory"""
-        # Test valid strategies
-        round_robin = PartitioningStrategyFactory.create("round_robin")
-        assert round_robin.get_name() == "round_robin"
-
-        size_balanced = PartitioningStrategyFactory.create("size_balanced")
-        assert size_balanced.get_name() == "size_balanced"
-
-        layer_wise = PartitioningStrategyFactory.create("layer_wise")
-        assert layer_wise.get_name() == "layer_wise"
-
-        # Test invalid strategy
-        with pytest.raises(ValueError):
-            PartitioningStrategyFactory.create("invalid_strategy")
-
-    def test_round_robin_partitioning(self):
-        """Test round-robin partitioning strategy"""
-        model = SimpleModel()
-        params = list(model.parameters())
-
-        strategy = PartitioningStrategyFactory.create("round_robin")
-        partitions = strategy.partition(params, world_size=4)
-
-        # Check all parameters are assigned
-        total_params = sum(len(p) for p in partitions.values())
-        assert total_params == len(params)
-
-        # Check round-robin distribution
-        for i, param in enumerate(params):
-            expected_rank = i % 4
-            assert param in partitions[expected_rank]
-
-    def test_size_balanced_partitioning(self):
-        """Test size-balanced partitioning strategy"""
-        # Create parameters with different sizes that allow better balance
-        params = [
-            nn.Parameter(torch.randn(1000, 1000)),  # 1M elements
-            nn.Parameter(torch.randn(800, 800)),  # 640K elements
-            nn.Parameter(torch.randn(600, 600)),  # 360K elements
-            nn.Parameter(torch.randn(500, 500)),  # 250K elements
-            nn.Parameter(torch.randn(400, 400)),  # 160K elements
-            nn.Parameter(torch.randn(100, 100)),  # 10K elements
-        ]
-
-        strategy = PartitioningStrategyFactory.create("size_balanced")
-        partitions = strategy.partition(params, world_size=2)
-
-        # Check all parameters are assigned
-        all_assigned = []
-        for rank_params in partitions.values():
-            all_assigned.extend(rank_params)
-        assert len(all_assigned) == len(params)
-
-        # Check size balance
-        sizes = []
-        for rank_params in partitions.values():
-            total_size = sum(p.numel() for p in rank_params)
-            sizes.append(total_size)
-
-        # Sizes should be relatively balanced
-        # With more parameters, the greedy algorithm can achieve better balance
-        if len(sizes) == 2:
-            balance_ratio = min(sizes) / max(sizes) if max(sizes) > 0 else 1
-            assert (
-                balance_ratio > 0.7
-            )  # Should achieve at least 70% balance with these parameters
-
-
-class TestOptimizerUtils:
-    """Test optimizer utility functions"""
-
-    def test_create_parameter_buckets(self):
-        """Test bucket creation utility"""
-        model = SimpleModel(input_size=100, hidden_size=200, output_size=50)
-        params = list(model.parameters())
-
-        # Create buckets
-        buckets = create_parameter_buckets(params, bucket_size_mb=0.001)
-
-        # Check buckets were created
-        assert len(buckets) > 0
-
-        # Verify all params are in buckets
-        bucketed_params = []
-        for bucket in buckets:
-            bucketed_params.extend(bucket)
-        assert len(bucketed_params) == len([p for p in params if p.requires_grad])
-
-    def test_partition_round_robin(self):
-        """Test round-robin parameter partitioning"""
-        model = SimpleModel()
-        params = list(model.parameters())
-
-        # Partition across 4 ranks
-        rank_to_params = partition_parameters_round_robin(params, world_size=4)
-
-        # Check all ranks have params
-        assert len(rank_to_params) == 4
-
-        # Check round-robin assignment
-        for idx, param in enumerate(params):
-            expected_rank = idx % 4
-            assert param in rank_to_params[expected_rank]
-
-    def test_partition_by_size(self):
-        """Test size-based parameter partitioning"""
-        # Create params with different sizes
-        params = [
-            nn.Parameter(torch.randn(1000, 1000)),  # Large
-            nn.Parameter(torch.randn(100, 100)),  # Medium
-            nn.Parameter(torch.randn(10, 10)),  # Small
-            nn.Parameter(torch.randn(500, 500)),  # Medium-large
-        ]
-
-        # Partition by size
-        rank_to_params = partition_parameters_by_size(params, world_size=2)
-
-        # Check partitioning is balanced
-        rank0_size = sum(p.numel() for p in rank_to_params[0])
-        rank1_size = sum(p.numel() for p in rank_to_params[1])
-
-        # Sizes should be relatively balanced
-        balance_ratio = min(rank0_size, rank1_size) / max(rank0_size, rank1_size)
-        # With very different parameter sizes, perfect balance might not be achievable
-        assert balance_ratio > 0.2  # At least 20% balance ratio
-        # Ensure all parameters are assigned
-        assert len(rank_to_params[0]) + len(rank_to_params[1]) == len(params)
-
-    def test_flatten_unflatten_tensors(self):
-        """Test tensor flattening and unflattening"""
-        # Create tensors with different shapes
-        tensors = [
-            torch.randn(2, 3),
-            torch.randn(4, 5),
-            torch.randn(6),
-        ]
-
-        # Flatten
-        flat = flatten_dense_tensors(tensors)
-        expected_size = sum(t.numel() for t in tensors)
-        assert flat.numel() == expected_size
-
-        # Unflatten
-        unflat = unflatten_dense_tensors(flat, tensors)
-        assert len(unflat) == len(tensors)
-
-        # Check shapes and values match
-        for orig, new in zip(tensors, unflat):
-            assert orig.shape == new.shape
-            assert torch.allclose(orig, new)
-
-    def test_memory_savings_estimation(self):
-        """Test memory savings estimation"""
-        estimates = estimate_memory_savings(
-            num_params=1000000,
-            param_dtype=torch.float32,
-            optimizer_state_size=2,  # Adam has 2 state tensors
-            world_size=4,
+        optimizer = DistributedOptimizer(
+            params=model.parameters(),
+            optimizer_class=Adam,
+            optimizer_kwargs={"lr": 0.001},
+            config=config,
         )
 
-        # Check estimates are reasonable
-        assert estimates["total_memory_mb"] > 0
-        assert estimates["partitioned_memory_mb"] < estimates["total_memory_mb"]
-        assert estimates["savings_mb"] > 0
-        assert 0 < estimates["savings_percent"] < 100
+        # Check FP32 main parameters were created
+        assert hasattr(optimizer, "fp32_params")
+        # Should have FP32 params for all local params
+        assert len(optimizer.fp32_params) == len(optimizer.local_params)
 
-    def test_validate_bucket_configuration(self):
-        """Test bucket configuration validation"""
+        # Check all FP32 params are float32
+        for param, fp32_param in optimizer.fp32_params.items():
+            assert fp32_param.dtype == torch.float32
+
+    def test_step_with_valid_gradients(self, mock_dist):
+        """Test optimizer step with valid gradients."""
         model = SimpleModel()
-        params = list(model.parameters())
+        config = DistributedOptimizerConfig(check_gradients=True)
 
-        # Validate configuration
-        validation = validate_bucket_configuration(params, bucket_size_mb=0.01)
+        optimizer = DistributedOptimizer(
+            params=model.parameters(),
+            optimizer_class=SGD,
+            optimizer_kwargs={"lr": 0.01},
+            config=config,
+        )
 
-        # Check validation results
-        assert validation["valid"]
-        num_buckets = validation["num_buckets"]
-        assert isinstance(num_buckets, int) and num_buckets > 0
-        assert validation["num_params"] == len(params)
-        efficiency = validation["efficiency"]
-        assert isinstance(efficiency, (int, float)) and efficiency > 0
+        # Set valid gradients
+        for param in model.parameters():
+            param.grad = torch.randn_like(param) * 0.01
 
-    def test_optimizer_memory_usage(self):
-        """Test optimizer memory usage calculation"""
-        model = SimpleModel()
-        optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-        # Do a step to initialize optimizer state
-        loss = torch.sum(torch.stack([p.sum() for p in model.parameters()]))
-        loss.backward()
+        # Take step
         optimizer.step()
 
-        # Calculate memory usage
-        usage = get_optimizer_memory_usage(optimizer)
+        assert optimizer.step_count == 1
+        assert optimizer.overflow_count == 0
 
-        # Check usage stats
-        assert usage["param_memory_mb"] > 0
-        assert usage["state_memory_mb"] > 0
-        assert (
-            usage["total_memory_mb"]
-            == usage["param_memory_mb"] + usage["state_memory_mb"]
-        )
-        assert usage["num_params_with_state"] == len(list(model.parameters()))
-
-
-class TestPerformanceMonitoring:
-    """Test performance monitoring functionality"""
-
-    def test_performance_monitor_basic(self):
-        """Test basic performance monitor functionality"""
-        monitor = PerformanceMonitor(window_size=10)
-
-        # Test timer functionality
-        monitor.start_timer("test")
-        time.sleep(0.01)  # Sleep for 10ms
-        duration = monitor.end_timer("test")
-        assert duration > 0.009  # Should be at least 9ms
-
-        # Test gradient norm recording
-        monitor.record_gradient_norm(1.5, clipped=False)
-        monitor.record_gradient_norm(2.5, clipped=True)
-
-        metrics = monitor.get_current_metrics()
-        assert metrics.gradient_norm == 2.5
-        assert metrics.gradient_clips == 1
-        assert metrics.max_gradient_norm == 2.5
-
-    def test_performance_monitor_integration(self):
-        """Test performance monitor integration with optimizer"""
+    def test_step_with_invalid_gradients(self, mock_dist):
+        """Test optimizer step with NaN gradients."""
         model = SimpleModel()
-        base_opt = optim.Adam(model.parameters(), lr=0.001)
+        config = DistributedOptimizerConfig(check_gradients=True)
 
-        dist_opt = DistributedOptimizer(
-            base_opt,
-            models=model,
-            enable_metrics=True,
+        optimizer = DistributedOptimizer(
+            params=model.parameters(),
+            optimizer_class=Adam,
+            optimizer_kwargs={"lr": 0.001},
+            config=config,
         )
 
-        # Run a few steps
-        for _ in range(3):
-            # Simulate gradients
-            for param in model.parameters():
-                param.grad = torch.randn_like(param) * 0.1
-
-            dist_opt.step()
-
-        # Check that metrics were collected
-        stats = dist_opt.get_statistics()
-        if "performance" in stats:
-            assert "timing" in stats["performance"]
-            assert "gradients" in stats["performance"]
-
-
-class TestEndToEndTraining:
-    """End-to-end training tests"""
-
-    def test_single_gpu_training(self):
-        """Test training on single GPU/CPU"""
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = SimpleModel().to(device)
-        base_opt = optim.Adam(model.parameters(), lr=0.001)
-
-        # Create distributed optimizer
-        dist_opt = DistributedOptimizer(
-            base_opt,
-            models=model,
-            bucket_size_mb=1.0,
-            overlap_grad_reduce=False,  # No overlap for single GPU
-        )
-
-        # Training loop
-        for _ in range(5):
-            # Forward pass
-            input_data = torch.randn(4, 10).to(device)
-            output = model(input_data)
-            loss = output.mean()
-
-            # Backward pass
-            dist_opt.zero_grad()
-            loss.backward()
-
-            # Optimizer step
-            dist_opt.step()
-
-        # Check model was updated
+        # Set NaN gradients
         for param in model.parameters():
-            assert param.grad is not None
+            param.grad = torch.full_like(param, float("nan"))
 
-    def test_gradient_accumulation_training(self):
-        """Test training with gradient accumulation"""
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = SimpleModel().to(device)
-        base_opt = optim.SGD(model.parameters(), lr=0.01)
+        # Take step - should skip due to NaN
+        optimizer.step()
 
-        # Create optimizer with gradient accumulation
-        dist_opt = DistributedOptimizer(
-            base_opt,
-            models=model,
-            gradient_accumulation_steps=4,
+        assert optimizer.step_count == 0
+        assert optimizer.overflow_count == 1
+
+    def test_state_dict(self, mock_dist):
+        """Test saving and loading state dict."""
+        model = SimpleModel()
+        config = DistributedOptimizerConfig()
+
+        optimizer = DistributedOptimizer(
+            params=model.parameters(),
+            optimizer_class=Adam,
+            optimizer_kwargs={"lr": 0.001},
+            config=config,
         )
 
-        # Save initial parameters
-        initial_params = {
-            name: param.clone() for name, param in model.named_parameters()
-        }
+        # Take a step to create state
+        for param in model.parameters():
+            param.grad = torch.randn_like(param) * 0.01
+        optimizer.step()
 
-        # Training with accumulation
-        for i in range(8):  # 2 actual updates
-            input_data = torch.randn(2, 10).to(device)
-            output = model(input_data)
-            loss = output.mean()
+        # Get state dict
+        state_dict = optimizer.state_dict()
 
-            dist_opt.zero_grad()
-            loss.backward()
-            dist_opt.step()
+        assert "state" in state_dict
+        assert "param_groups" in state_dict
+        assert "step_count" in state_dict
+        assert state_dict["step_count"] == 1
 
-        # Check parameters were updated
-        for name, param in model.named_parameters():
-            assert not torch.allclose(param, initial_params[name])
-
-    def test_gradient_clipping_training(self):
-        """Test training with gradient clipping"""
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = SimpleModel().to(device)
-        base_opt = optim.SGD(model.parameters(), lr=0.01)
-
-        # Create optimizer with gradient clipping
-        dist_opt = DistributedOptimizer(
-            base_opt,
-            models=model,
-            clip_grad_norm=0.5,
+        # Create new optimizer and load state
+        optimizer2 = DistributedOptimizer(
+            params=model.parameters(),
+            optimizer_class=Adam,
+            optimizer_kwargs={"lr": 0.001},
+            config=config,
         )
 
-        # Training loop with large gradients
-        for _ in range(3):
-            input_data = torch.randn(4, 10).to(device) * 100  # Large inputs
-            output = model(input_data)
-            loss = (output**2).mean() * 1000  # Large loss
+        optimizer2.load_state_dict(state_dict)
+        assert optimizer2.step_count == 1
 
-            dist_opt.zero_grad()
-            loss.backward()
+    def test_memory_usage_reporting(self, mock_dist):
+        """Test memory usage statistics."""
+        model = SimpleModel()
+        config = DistributedOptimizerConfig()
 
-            # Check gradients before step
-            total_norm = 0
-            for param in model.parameters():
-                if param.grad is not None:
-                    total_norm += param.grad.norm(2).item() ** 2
-            total_norm = total_norm**0.5
+        optimizer = DistributedOptimizer(
+            params=model.parameters(),
+            optimizer_class=Adam,
+            optimizer_kwargs={"lr": 0.001},
+            config=config,
+        )
 
-            dist_opt.step()
+        # Set gradients to get gradient memory
+        for param in model.parameters():
+            param.grad = torch.randn_like(param)
 
-            # Gradients should have been clipped
-            assert dist_opt.stats["num_gradient_clips"] > 0
+        memory_stats = optimizer.get_memory_usage()
+
+        assert "parameters_mb" in memory_stats
+        assert "gradients_mb" in memory_stats
+        assert "optimizer_states_mb" in memory_stats
+        assert "total_mb" in memory_stats
+
+        # Should have some memory usage
+        assert memory_stats["total_mb"] > 0
+
+    def test_parameter_groups(self, mock_dist):
+        """Test optimizer with multiple parameter groups."""
+        model = SimpleModel()
+
+        # Create parameter groups with different learning rates
+        param_groups = [
+            {"params": model.fc1.parameters(), "lr": 0.001},
+            {"params": model.fc2.parameters(), "lr": 0.01},
+        ]
+
+        config = DistributedOptimizerConfig()
+
+        optimizer = DistributedOptimizer(
+            params=param_groups,
+            optimizer_class=SGD,
+            optimizer_kwargs={},  # LR specified in groups
+            config=config,
+        )
+
+        assert len(optimizer.param_groups) == 2
+        assert optimizer.param_groups[0]["lr"] == 0.001
+        assert optimizer.param_groups[1]["lr"] == 0.01
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.device_count() < 2,
-    reason="Requires at least 2 GPUs",
-)
-class TestMultiGPU:
-    """Tests requiring multiple GPUs"""
+class TestIntegration:
+    """Integration tests for distributed optimizer."""
 
-    def test_multi_gpu_gradient_reduction(self):
-        """Test gradient reduction across multiple GPUs"""
-        # This test would require proper distributed setup
-        # Marking as a template for multi-GPU testing
-        pass
+    @pytest.fixture
+    def mock_dist_env(self):
+        """Mock full distributed environment."""
+        with patch("torch.distributed.is_initialized", return_value=True), patch(
+            "torch.distributed.get_world_size", return_value=4
+        ), patch("torch.distributed.get_rank", return_value=0), patch(
+            "torch.distributed.all_reduce"
+        ) as mock_all_reduce, patch(
+            "torch.distributed.all_gather_into_tensor"
+        ) as mock_all_gather:
+            # Make all_reduce modify tensor in place
+            def all_reduce_side_effect(tensor, **kwargs):
+                tensor.div_(4)  # Simulate averaging across 4 ranks
+                return tensor
 
+            mock_all_reduce.side_effect = all_reduce_side_effect
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+            yield {"all_reduce": mock_all_reduce, "all_gather": mock_all_gather}
+
+    def test_end_to_end_training_step(self, mock_dist_env):
+        """Test complete training step with distributed optimizer."""
+        # Create model and data
+        model = SimpleModel()
+        input_data = torch.randn(32, 10)
+        target = torch.randn(32, 5)
+
+        # Create optimizer
+        config = DistributedOptimizerConfig(
+            partition_parameters=True,
+            contiguous_gradients=True,
+            grad_clip_value=1.0,
+            check_gradients=True,
+        )
+
+        optimizer = DistributedOptimizer(
+            params=model.parameters(),
+            optimizer_class=Adam,
+            optimizer_kwargs={"lr": 0.001},
+            config=config,
+        )
+
+        # Forward pass
+        output = model(input_data)
+        loss = nn.MSELoss()(output, target)
+
+        # Backward pass
+        loss.backward()
+
+        # Optimizer step
+        optimizer.step()
+
+        # Verify step was taken
+        assert optimizer.step_count == 1
+        assert optimizer.overflow_count == 0
+
+        # Verify all_reduce was called for gradient reduction
+        assert mock_dist_env["all_reduce"].called
+
+        # Zero gradients for next iteration
+        optimizer.zero_grad()
+
+        # Verify gradients are cleared (only check local params when partitioning)
+        for param in optimizer.local_params:
+            assert param.grad is None
+
+    def test_memory_efficiency(self, mock_dist_env):
+        """Test that partitioning reduces memory usage."""
+
+        # Create large model
+        class LargeModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([nn.Linear(1000, 1000) for _ in range(10)])
+
+            def forward(self, x):
+                for layer in self.layers:
+                    x = layer(x)
+                return x
+
+        model = LargeModel()
+
+        # Create partitioned optimizer
+        config = DistributedOptimizerConfig(
+            partition_parameters=True, partition_optimizer_states=True
+        )
+
+        optimizer = DistributedOptimizer(
+            params=model.parameters(),
+            optimizer_class=Adam,
+            optimizer_kwargs={"lr": 0.001},
+            config=config,
+        )
+
+        # With 4 ranks, each should have ~1/4 of parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        local_params = sum(p.numel() for p in optimizer.local_params)
+
+        # Local params should be significantly less than total
+        # (allowing for some imbalance due to partitioning)
+        assert local_params < total_params * 0.4

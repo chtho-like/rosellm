@@ -110,18 +110,6 @@ __all__ = [
     "DecoupledGradientConfig",
     "DecoupledGradientManager",
     "StorageMode",
-    # Distributed Optimizer
-    "DistributedOptimizer",
-    "DistributedOptimizerConfig",
-    "ParameterPartitioner",
-    "ParameterRange",
-    # Fused Operations
-    "FusedLayerNorm",
-    "LayerNormConfig",
-    "LayerNormKernelType",
-    "InvalidConfigurationError",
-    "KernelNotAvailableError",
-    "LayerNormException",
     # Gradient Utilities
     "GradientClipConfig",
     "apply_gradient_clipping",
@@ -130,6 +118,11 @@ __all__ = [
     "gradient_accumulation_context",
     "get_gradient_stats",
     "sync_gradients",
+    # Distributed Optimizer
+    "DistributedOptimizer",
+    "DistributedOptimizerConfig",
+    "ParameterPartitioner",
+    "ParameterRange",
     # Parallel State Management
     "initialize_model_parallel",
     "is_initialized",
@@ -156,4 +149,11 @@ __all__ = [
     "ParallelismDimension",
     "set_nccl_config",
     "get_nccl_config",
+    # Fused Operations
+    "FusedLayerNorm",
+    "LayerNormConfig",
+    "LayerNormKernelType",
+    "LayerNormException",
+    "KernelNotAvailableError",
+    "InvalidConfigurationError",
 ]

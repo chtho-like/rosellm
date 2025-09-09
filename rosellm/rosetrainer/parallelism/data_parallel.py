@@ -30,7 +30,7 @@ class DataParallelTrainer:
         gradient_accumulation_steps: int = 1,
         fp16: bool = False,
         grad_clip: Optional[float] = None,
-    ):
+    ) -> None:
         """
         Initialize the DataParallelTrainer.
 

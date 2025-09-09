@@ -1,294 +1,322 @@
-#!/usr/bin/env python3
+"""Example demonstrating distributed optimizer with parameter partitioning.
+
+This example shows how to use the DistributedOptimizer to reduce memory usage
+by partitioning parameters, gradients, and optimizer states across data parallel ranks.
+
+To run this example:
+    # Single GPU (no distribution)
+    python examples/distributed_optimizer_example.py
+
+    # Multiple GPUs (distributed)
+    torchrun --nproc_per_node=2 examples/distributed_optimizer_example.py
+
+    # CPU simulation of distributed training
+    CUDA_VISIBLE_DEVICES="" torchrun --nproc_per_node=4 \
+        examples/distributed_optimizer_example.py
 """
-Example demonstrating the DistributedOptimizer with gradient bucketing.
 
-This example shows how to use the DistributedOptimizer for efficient
-distributed training with memory optimization and communication overlap.
-
-Usage:
-    # Single GPU/CPU
-    python distributed_optimizer_example.py
-
-    # Multi-GPU (2 GPUs)
-    torchrun --nproc_per_node=2 distributed_optimizer_example.py
-
-    # Multi-process CPU simulation
-    torchrun --nproc_per_node=4 distributed_optimizer_example.py --cpu
-"""
-
-import argparse
+import logging
 import os
-import time
+from typing import Optional, Tuple
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from rosellm.rosetrainer.optimizer import (
     DistributedOptimizer,
-    PartitioningStrategyFactory,
-    estimate_memory_savings,
-    get_optimizer_memory_usage,
-    validate_bucket_configuration,
+    MemoryProfiler,
+    OptimizerFactory,
 )
+from rosellm.rosetrainer.parallelism import (
+    get_data_parallel_group,
+    initialize_model_parallel,
+)
+
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
 
 class TransformerBlock(nn.Module):
-    """Simple transformer block for demonstration"""
+    """Simple transformer block for demonstration."""
 
-    def __init__(self, dim, num_heads=8):
+    def __init__(self, hidden_size: int, num_heads: int = 8, dropout: float = 0.1):
         super().__init__()
-        self.attention = nn.MultiheadAttention(dim, num_heads)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, dim * 4),
+        self.attention = nn.MultiheadAttention(hidden_size, num_heads, dropout=dropout)
+        self.norm1 = nn.LayerNorm(hidden_size)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_size, 4 * hidden_size),
             nn.GELU(),
-            nn.Linear(dim * 4, dim),
+            nn.Linear(4 * hidden_size, hidden_size),
+            nn.Dropout(dropout),
         )
+        self.norm2 = nn.LayerNorm(hidden_size)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Self-attention
         attn_out, _ = self.attention(x, x, x)
         x = self.norm1(x + attn_out)
-        # MLP
-        x = self.norm2(x + self.mlp(x))
+
+        # Feed-forward
+        ffn_out = self.ffn(x)
+        x = self.norm2(x + ffn_out)
+
         return x
 
 
-class DemoModel(nn.Module):
-    """Demo model with multiple transformer blocks"""
+class SimpleTransformer(nn.Module):
+    """Simple transformer model for demonstration."""
 
-    def __init__(self, vocab_size=10000, dim=512, num_layers=6):
+    def __init__(
+        self,
+        vocab_size: int = 10000,
+        hidden_size: int = 512,
+        num_layers: int = 6,
+        num_heads: int = 8,
+        dropout: float = 0.1,
+    ):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, dim)
-        self.layers = nn.ModuleList([TransformerBlock(dim) for _ in range(num_layers)])
-        self.output = nn.Linear(dim, vocab_size)
+        self.embedding = nn.Embedding(vocab_size, hidden_size)
+        self.pos_encoding = nn.Parameter(torch.randn(1, 512, hidden_size))
+        self.layers = nn.ModuleList(
+            [
+                TransformerBlock(hidden_size, num_heads, dropout)
+                for _ in range(num_layers)
+            ]
+        )
+        self.output_proj = nn.Linear(hidden_size, vocab_size)
+        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
-        x = self.embedding(x)
-        x = x.transpose(0, 1)  # (batch, seq) -> (seq, batch)
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        # Embedding and positional encoding
+        x = self.embedding(input_ids)
+        seq_len = x.size(1)
+        x = x + self.pos_encoding[:, :seq_len, :]
+        x = self.dropout(x)
 
+        # Transformer layers
         for layer in self.layers:
             x = layer(x)
 
-        x = x.transpose(0, 1)  # (seq, batch) -> (batch, seq)
-        return self.output(x)
+        # Output projection
+        return self.output_proj(x)
 
 
-def setup_distributed():
-    """Setup distributed training environment"""
+def setup_distributed() -> Tuple[int, int, Optional[dist.ProcessGroup]]:
+    """Setup distributed training environment."""
     if "LOCAL_RANK" in os.environ:
+        # Distributed training
         local_rank = int(os.environ["LOCAL_RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
 
         # Initialize process group
-        dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="nccl" if torch.cuda.is_available() else "gloo"
+            )
+
+        # Initialize model parallel (data parallel only in this example)
+        initialize_model_parallel(
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+            data_parallel_size=world_size,
+        )
 
         # Set device
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
-            device = torch.device(f"cuda:{local_rank}")
-        else:
-            device = torch.device("cpu")
 
-        return local_rank, world_size, device
+        process_group = get_data_parallel_group()
+
+        return local_rank, world_size, process_group
     else:
-        return 0, 1, torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Single process training
+        return 0, 1, None
+
+
+def demonstrate_factory_pattern(model, process_group):
+    """Demonstrate using the factory pattern for optimizer creation."""
+    # Method 1: Using presets
+    optimizer_preset = OptimizerFactory.create_from_model(
+        model,
+        optimizer_name="AdamW",
+        lr=1e-4,
+        preset="memory_efficient",
+        process_group=process_group,
+    )
+
+    # Method 2: Custom configuration (example, not used in this demo)
+    # custom_config = DistributedOptimizerConfig(
+    #     partition_parameters=True,
+    #     mixed_precision=True,
+    #     grad_clip_value=1.0,
+    # )
+    # optimizer_custom = OptimizerFactory.create(
+    #     model.parameters(),
+    #     torch.optim.AdamW,
+    #     {"lr": 1e-4, "weight_decay": 0.01},
+    #     config=custom_config,
+    #     process_group=process_group,
+    # )
+
+    return optimizer_preset
+
+
+def train_step(
+    model: nn.Module,
+    optimizer: DistributedOptimizer,
+    input_ids: torch.Tensor,
+    target_ids: torch.Tensor,
+    step: int,
+) -> float:
+    """Perform a single training step."""
+    # Forward pass
+    logits = model(input_ids)
+
+    # Compute loss
+    loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), target_ids.view(-1))
+
+    # Backward pass
+    loss.backward()
+
+    # Optimizer step
+    optimizer.step()
+    optimizer.zero_grad()
+
+    # Log memory usage periodically
+    if step % 10 == 0:
+        memory_stats = optimizer.get_memory_usage()
+        logger.info(
+            f"Step {step} - Loss: {loss.item():.4f}, "
+            f"Memory: {memory_stats['total_mb']:.2f} MB "
+            f"(params: {memory_stats['parameters_mb']:.2f}, "
+            f"grads: {memory_stats['gradients_mb']:.2f}, "
+            f"states: {memory_stats['optimizer_states_mb']:.2f})"
+        )
+
+    return float(loss.item())
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Distributed Optimizer Example")
-    parser.add_argument("--cpu", action="store_true", help="Force CPU training")
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size per GPU")
-    parser.add_argument("--seq-length", type=int, default=128, help="Sequence length")
-    parser.add_argument("--vocab-size", type=int, default=10000, help="Vocabulary size")
-    parser.add_argument("--dim", type=int, default=512, help="Model dimension")
-    parser.add_argument("--num-layers", type=int, default=6, help="Number of layers")
-    parser.add_argument(
-        "--bucket-size-mb", type=float, default=25.0, help="Bucket size in MB"
-    )
-    parser.add_argument(
-        "--grad-accumulation", type=int, default=1, help="Gradient accumulation steps"
-    )
-    parser.add_argument(
-        "--partitioning",
-        type=str,
-        default="round_robin",
-        choices=PartitioningStrategyFactory.list_strategies(),
-        help="Parameter partitioning strategy",
-    )
-    parser.add_argument(
-        "--enable-metrics", action="store_true", help="Enable performance metrics"
-    )
-    parser.add_argument(
-        "--steps", type=int, default=10, help="Number of training steps"
-    )
-    args = parser.parse_args()
+    """Main training loop."""
+    # Setup distributed training
+    local_rank, world_size, process_group = setup_distributed()
+    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
 
-    # Force CPU if requested
-    if args.cpu:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
-    # Setup distributed
-    local_rank, world_size, device = setup_distributed()
-
-    # Print info on rank 0
-    if local_rank == 0:
-        print(f"Running on {world_size} process(es), device: {device}")
-        print(
-            f"Model config: vocab_size={args.vocab_size}, dim={args.dim}, "
-            f"layers={args.num_layers}"
-        )
-        print(
-            f"Training config: batch_size={args.batch_size}, "
-            f"seq_length={args.seq_length}"
-        )
-        print(
-            f"Optimizer config: bucket_size={args.bucket_size_mb}MB, "
-            f"grad_accumulation={args.grad_accumulation}"
-        )
-        print(f"Partitioning strategy: {args.partitioning}")
-        print(
-            f"Performance metrics: {'enabled' if args.enable_metrics else 'disabled'}"
-        )
-        print("-" * 50)
+    logger.info(f"Rank {local_rank}/{world_size} using device: {device}")
 
     # Create model
-    model = DemoModel(args.vocab_size, args.dim, args.num_layers).to(device)
+    model = SimpleTransformer(
+        vocab_size=10000, hidden_size=512, num_layers=6, num_heads=8
+    ).to(device)
 
-    # Wrap in DDP if distributed
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"Model has {total_params:,} parameters")
+
+    # Wrap model in DDP if distributed
     if world_size > 1:
-        model = DDP(model)
+        model = DDP(
+            model, device_ids=[local_rank] if torch.cuda.is_available() else None
+        )
 
-    # Create base optimizer
-    base_optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+    # Initialize memory profiler
+    memory_profiler = MemoryProfiler()
+    memory_profiler.set_baseline()
 
-    # Create distributed optimizer with gradient bucketing
-    optimizer = DistributedOptimizer(
-        base_optimizer,
-        models=model,
-        bucket_size_mb=args.bucket_size_mb,
-        overlap_grad_reduce=True,
-        partition_optimizer_states=(world_size > 1),
-        partitioning_strategy=args.partitioning,
-        gradient_accumulation_steps=args.grad_accumulation,
-        clip_grad_norm=1.0,
-        enable_metrics=args.enable_metrics,
+    # Create optimizer using factory pattern
+    preset_name = (
+        "memory_efficient"  # Can use: baseline, speed_optimized, mixed_precision, etc.
+    )
+    logger.info(f"Using optimizer preset: {preset_name}")
+
+    optimizer = OptimizerFactory.create_from_model(
+        model,
+        optimizer_name="AdamW",
+        lr=1e-4,
+        weight_decay=0.01,
+        preset=preset_name,
+        process_group=process_group,
     )
 
-    # Validate bucket configuration
-    if local_rank == 0:
-        params = list(model.parameters())
-        validation = validate_bucket_configuration(params, args.bucket_size_mb)
-        print(f"Bucket configuration:")
-        print(f"  - Number of buckets: {validation['num_buckets']}")
-        print(f"  - Average bucket size: {validation['avg_bucket_size_mb']:.2f} MB")
-        print(f"  - Efficiency: {validation['efficiency']:.2%}")
+    # Get configuration details
+    config = optimizer.config
 
-        # Estimate memory savings
-        if world_size > 1:
-            total_params = sum(p.numel() for p in params)
-            savings = estimate_memory_savings(
-                num_params=total_params,
-                param_dtype=torch.float32,
-                optimizer_state_size=2,  # AdamW has 2 state tensors
-                world_size=world_size,
-            )
-            print(f"\nMemory savings from state partitioning:")
-            print(f"  - Total memory: {savings['total_memory_mb']:.2f} MB")
-            print(f"  - Partitioned memory: {savings['partitioned_memory_mb']:.2f} MB")
-            print(
-                f"  - Savings: {savings['savings_mb']:.2f} MB "
-                f"({savings['savings_percent']:.1f}%)"
-            )
-        print("-" * 50)
+    # Log configuration and memory analysis
+    if local_rank == 0:
+        logger.info(f"Optimizer configuration:")
+        config_dict = OptimizerFactory.describe_preset(preset_name)
+        for key, value in list(config_dict.items())[:10]:  # Show first 10 settings
+            logger.info(f"  - {key}: {value}")
+
+        # Memory analysis
+        model_memory = memory_profiler.analyze_model_memory(model)
+        optimizer_memory = memory_profiler.estimate_optimizer_memory(
+            total_params, "AdamW", config.dtype
+        )
+
+        logger.info(f"Memory breakdown:")
+        logger.info(f"  - Model parameters: {model_memory['parameters_mb']:.2f} MB")
+        logger.info(f"  - Model gradients: {model_memory['gradients_mb']:.2f} MB")
+        logger.info(f"  - Optimizer states: {optimizer_memory:.2f} MB")
+        logger.info(
+            f"  - Total estimated: {model_memory['total_mb'] + optimizer_memory:.2f} MB"
+        )
 
     # Training loop
-    criterion = nn.CrossEntropyLoss()
+    num_steps = 50
+    batch_size = 8
+    seq_len = 128
 
-    for step in range(args.steps):
-        start_time = time.time()
+    logger.info(f"Starting training for {num_steps} steps...")
 
-        # Generate random data
-        input_ids = torch.randint(
-            0, args.vocab_size, (args.batch_size, args.seq_length)
-        ).to(device)
-        labels = torch.randint(
-            0, args.vocab_size, (args.batch_size, args.seq_length)
-        ).to(device)
+    for step in range(num_steps):
+        # Generate random data (in real training, use DataLoader)
+        input_ids = torch.randint(0, 10000, (batch_size, seq_len), device=device)
+        target_ids = torch.randint(0, 10000, (batch_size, seq_len), device=device)
 
-        # Forward pass
-        outputs = model(input_ids)
-        loss = criterion(outputs.view(-1, args.vocab_size), labels.view(-1))
+        # Train step
+        train_step(model, optimizer, input_ids, target_ids, step)
 
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
+        # Memory profiling every 20 steps
+        if step % 20 == 0 and local_rank == 0:
+            memory_profiler.record_snapshot()
+            if step == 20:  # First real measurement
+                logger.info(memory_profiler.get_memory_summary())
 
-        # Optimizer step
-        optimizer.step()
+    logger.info("Training completed!")
 
-        # Timing
-        step_time = time.time() - start_time
-
-        # Print progress on rank 0
-        if local_rank == 0:
-            stats = optimizer.get_statistics()
-            output = (
-                f"Step {step + 1}/{args.steps}: loss={loss.item():.4f}, "
-                f"time={step_time:.3f}s, "
-                f"grad_norm={stats.get('total_norm', 0):.3f}"
-            )
-
-            if args.enable_metrics and "performance" in stats:
-                perf = stats["performance"]
-                output += (
-                    f", reduction_time={perf['timing']['gradient_reduction_ms']:.1f}ms"
-                    f", efficiency={perf['efficiency']['communication']:.1%}"
-                )
-            else:
-                output += f", bucket_reductions={stats.get('num_bucket_reductions', 0)}"
-
-            print(output)
-
-    # Final statistics
+    # Final reports
     if local_rank == 0:
-        print("-" * 50)
-        print("Training completed!")
+        # Optimizer memory report
+        final_memory = optimizer.get_memory_usage()
+        logger.info(f"Final optimizer memory usage:")
+        for key, value in final_memory.items():
+            logger.info(f"  - {key}: {value:.2f}")
 
-        # Get optimizer memory usage
-        memory_usage = get_optimizer_memory_usage(optimizer.base_optimizer)
-        print(f"\nOptimizer memory usage:")
-        print(f"  - Parameter memory: {memory_usage['param_memory_mb']:.2f} MB")
-        print(f"  - State memory: {memory_usage['state_memory_mb']:.2f} MB")
-        print(f"  - Total: {memory_usage['total_memory_mb']:.2f} MB")
+        # System memory report
+        logger.info("\nSystem memory analysis:")
+        logger.info(memory_profiler.get_memory_summary())
 
-        # Get final statistics
-        final_stats = optimizer.get_statistics()
-        if "gradient_buffer" in final_stats:
-            buffer_info = final_stats["gradient_buffer"]
-            print(f"\nGradient buffer statistics:")
-            print(f"  - Number of buckets: {buffer_info['num_buckets']}")
-            print(
-                f"  - Total buffer size: {buffer_info['total_buffer_size_mb']:.2f} MB"
-            )
-            print(f"  - Parameters per bucket: {buffer_info['num_params_per_bucket']}")
+        # Optimization recommendations
+        recommendations = memory_profiler.optimize_memory()
+        if recommendations:
+            logger.info("\nMemory optimization recommendations:")
+            for rec_type, rec_text in recommendations.items():
+                logger.info(f"  [{rec_type}]: {rec_text}")
 
-        if args.enable_metrics and "performance_avg" in final_stats:
-            avg_metrics = final_stats["performance_avg"]
-            print(f"\nAverage performance metrics:")
-            for key, value in avg_metrics.items():
-                if isinstance(value, float):
-                    if "time" in key or "ms" in key:
-                        print(f"  - {key}: {value:.2f}")
-                    else:
-                        print(f"  - {key}: {value:.4f}")
+        # Optimizer statistics
+        logger.info(f"\nOptimizer statistics:")
+        logger.info(f"  - Total steps: {optimizer.step_count}")
+        logger.info(f"  - Overflow count: {optimizer.overflow_count}")
+        logger.info(f"  - State: {optimizer.optimizer_state.value}")
+
+        # Cleanup
+        memory_profiler.cleanup()
 
     # Cleanup
-    if world_size > 1:
+    if dist.is_initialized():
         dist.destroy_process_group()
 
 

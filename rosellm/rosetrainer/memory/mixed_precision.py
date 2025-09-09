@@ -1,7 +1,7 @@
 import logging
 import warnings
 from contextlib import contextmanager
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -9,6 +9,11 @@ from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 
 from ..config import PrecisionType
+from ..mixed_precision import (
+    AbstractGradScaler,
+    ConstantGradScaler,
+    EnhancedDynamicGradScaler,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +42,7 @@ class DynamicLossScaler:
         scale_window: int = 2000,
         min_scale: float = 1.0,
         max_scale: float = 2**24,
-    ):
+    ) -> None:
         """
         Initialize the dynamic loss scaler.
 
@@ -133,7 +138,9 @@ class MixedPrecisionManager:
         backoff_factor: float = 0.5,
         growth_interval: int = 2000,
         enabled: bool = True,
-    ):
+        use_custom_scaler: bool = False,
+        hysteresis: int = 2,
+    ) -> None:
         """
         Initialize the mixed precision manager.
 
@@ -145,42 +152,84 @@ class MixedPrecisionManager:
             backoff_factor: Factor to reduce loss scale on overflow
             growth_interval: Steps between scale increases
             enabled: Whether mixed precision is enabled
+            use_custom_scaler: Whether to use custom gradient scaler
+            hysteresis: Hysteresis for custom dynamic scaler
         """
         self.precision = (
             PrecisionType(precision) if isinstance(precision, str) else precision
         )
         self.enabled = enabled and self.precision != PrecisionType.FP32
+        self.use_custom_scaler = use_custom_scaler
 
         # Initialize appropriate scaler based on precision type
-        self.scaler = None
+        self.scaler: Optional[Union[GradScaler, AbstractGradScaler]] = None
         self.autocast_dtype = None
 
         if self.enabled:
             if self.precision == PrecisionType.FP16:
                 self.autocast_dtype = torch.float16
-                # Handle different loss scaling strategies
-                if isinstance(loss_scale, str):
-                    if loss_scale == "dynamic":
-                        scaler_enabled = True
-                    elif loss_scale == "static":
-                        scaler_enabled = True
-                        init_scale = 2**16  # Use fixed scale for static
+
+                if use_custom_scaler:
+                    # Use custom gradient scaler
+                    if isinstance(loss_scale, str):
+                        if loss_scale == "dynamic":
+                            self.scaler = EnhancedDynamicGradScaler(
+                                initial_scale=init_scale,
+                                min_scale=1.0,
+                                growth_factor=growth_factor,
+                                backoff_factor=backoff_factor,
+                                growth_interval=growth_interval,
+                                hysteresis=hysteresis,
+                                device="cuda" if torch.cuda.is_available() else "cpu",
+                            )
+                        elif loss_scale == "static":
+                            self.scaler = ConstantGradScaler(
+                                initial_scale=init_scale,
+                                device="cuda" if torch.cuda.is_available() else "cpu",
+                            )
+                        else:
+                            self.scaler = None
+                    elif isinstance(loss_scale, (int, float)):
+                        self.scaler = ConstantGradScaler(
+                            initial_scale=float(loss_scale),
+                            device="cuda" if torch.cuda.is_available() else "cpu",
+                        )
                     else:
-                        scaler_enabled = False
-                elif isinstance(loss_scale, (int, float)):
-                    scaler_enabled = True
-                    init_scale = float(loss_scale)
+                        # Default to dynamic
+                        self.scaler = EnhancedDynamicGradScaler(
+                            initial_scale=init_scale,
+                            growth_factor=growth_factor,
+                            backoff_factor=backoff_factor,
+                            growth_interval=growth_interval,
+                            hysteresis=hysteresis,
+                            device="cuda" if torch.cuda.is_available() else "cpu",
+                        )
+                    logger.info("Initialized FP16 with custom gradient scaler")
                 else:
-                    scaler_enabled = True  # Default to dynamic
-                self.scaler = GradScaler(
-                    "cuda",
-                    init_scale=init_scale,
-                    growth_factor=growth_factor,
-                    backoff_factor=backoff_factor,
-                    growth_interval=growth_interval,
-                    enabled=scaler_enabled,
-                )
-                logger.info("Initialized FP16 mixed precision training")
+                    # Use PyTorch native scaler
+                    # Handle different loss scaling strategies
+                    if isinstance(loss_scale, str):
+                        if loss_scale == "dynamic":
+                            scaler_enabled = True
+                        elif loss_scale == "static":
+                            scaler_enabled = True
+                            init_scale = 2**16  # Use fixed scale for static
+                        else:
+                            scaler_enabled = False
+                    elif isinstance(loss_scale, (int, float)):
+                        scaler_enabled = True
+                        init_scale = float(loss_scale)
+                    else:
+                        scaler_enabled = True  # Default to dynamic
+                    self.scaler = GradScaler(
+                        "cuda",
+                        init_scale=init_scale,
+                        growth_factor=growth_factor,
+                        backoff_factor=backoff_factor,
+                        growth_interval=growth_interval,
+                        enabled=scaler_enabled,
+                    )
+                    logger.info("Initialized FP16 mixed precision training")
 
             elif self.precision == PrecisionType.BF16:
                 self.autocast_dtype = torch.bfloat16
@@ -238,8 +287,11 @@ class MixedPrecisionManager:
         Returns:
             Scaled loss tensor
         """
-        if self.scaler and self.scaler.is_enabled():
-            return self.scaler.scale(loss)
+        if self.scaler:
+            if isinstance(self.scaler, AbstractGradScaler):
+                return self.scaler.scale_loss(loss)
+            elif hasattr(self.scaler, "is_enabled") and self.scaler.is_enabled():
+                return self.scaler.scale(loss)
         return loss
 
     def step(self, optimizer: torch.optim.Optimizer) -> None:
@@ -250,8 +302,13 @@ class MixedPrecisionManager:
             optimizer: Optimizer to step
         """
         if self.scaler:
-            self.scaler.step(optimizer)
-            self.scaler.update()
+            if isinstance(self.scaler, AbstractGradScaler):
+                # Custom scaler doesn't have a step method, user manages optimizer step
+                optimizer.step()
+            else:
+                # PyTorch native scaler
+                self.scaler.step(optimizer)
+                self.scaler.update()
         else:
             optimizer.step()
 
@@ -262,8 +319,15 @@ class MixedPrecisionManager:
         Args:
             optimizer: Optimizer with gradients to unscale
         """
-        if self.scaler and self.scaler.is_enabled():
-            self.scaler.unscale_(optimizer)
+        if self.scaler:
+            if isinstance(self.scaler, AbstractGradScaler):
+                # Get parameters from optimizer
+                params = []
+                for group in optimizer.param_groups:
+                    params.extend(group["params"])
+                self.scaler.unscale_gradients(params)
+            elif hasattr(self.scaler, "is_enabled") and self.scaler.is_enabled():
+                self.scaler.unscale_(optimizer)
 
     def get_state_dict(self) -> Dict[str, Any]:
         """

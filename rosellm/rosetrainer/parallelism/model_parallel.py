@@ -29,7 +29,7 @@ class TensorParallelism:
         world_size: int,
         tp_size: int,
         tp_group: Optional[dist.ProcessGroup] = None,
-    ):
+    ) -> None:
         """
         Initialize the TensorParallelism manager.
 
@@ -198,7 +198,7 @@ class ColumnParallelLinear(torch.nn.Module):
         tp_size: int = 1,
         tp_rank: int = 0,
         layer: Optional[torch.nn.Linear] = None,
-    ):
+    ) -> None:
         """
         Initialize the column parallel linear layer.
 
@@ -294,7 +294,7 @@ class RowParallelLinear(torch.nn.Module):
         tp_rank: int = 0,
         layer: Optional[torch.nn.Linear] = None,
         skip_all_reduce: bool = False,
-    ):
+    ) -> None:
         """
         Initialize the row parallel linear layer.
 

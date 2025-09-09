@@ -331,7 +331,9 @@ class BucketGroupManager:
 
         # Communication coordination
         self.active_groups: Set[int] = set()
-        self.communication_queue: List[Tuple[PriorityLevel, int]] = []  # priority,group
+        self.communication_queue: List[
+            Tuple[PriorityLevel, int]
+        ] = []  # (priority, group_id)
 
         # Performance tracking
         self.total_group_communications = 0

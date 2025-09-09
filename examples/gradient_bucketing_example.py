@@ -1,451 +1,574 @@
 #!/usr/bin/env python3
-"""
-End-to-end example of gradient bucketing with communication overlap.
+r"""
+Gradient Communication Bucketing Example for RoseTrainer
 
-This example demonstrates how to use RoseLLM's gradient bucketing feature
-to optimize distributed training with efficient gradient communication.
+This example demonstrates how to use the gradient bucketing functionality
+to optimize distributed training communication. It shows different bucketing
+strategies and their impact on communication efficiency.
 
-Features demonstrated:
-- Multiple bucketing strategies
-- Communication/computation overlap
-- Integration with distributed training
-- Performance monitoring
+Usage:
+    # Single GPU (for testing bucketing logic)
+    python gradient_bucketing_example.py --single-gpu
 
-To run this example:
-    # Single GPU (no bucketing needed, but works)
-    python gradient_bucketing_example.py
+    # Multi-GPU distributed training
+    torchrun --nproc_per_node=2 gradient_bucketing_example.py --distributed
 
-    # Multi-GPU with bucketing
-    torchrun --nproc_per_node=2 gradient_bucketing_example.py
-
-    # Multi-node training
-    torchrun --nproc_per_node=4 --nnodes=2 --node_rank=0 \
-        --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT \
-        gradient_bucketing_example.py
+    # CPU-only distributed training (for testing)
+    CUDA_VISIBLE_DEVICES="" torchrun --nproc_per_node=4 \
+        gradient_bucketing_example.py --cpu-only
 """
 
 import argparse
 import logging
 import os
 import time
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, cast
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
-from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, TensorDataset
 
-# RoseLLM imports
-from rosellm.rosetrainer.gradient import (
-    BucketingStrategy,
-    GradientBucketConfig,
-    GradientBucketManager,
-    create_gradient_buckets,
-)
+# Import RoseTrainer components
+from rosellm.rosetrainer import RoseTrainer
+from rosellm.rosetrainer.config import TrainingConfig
 
+# Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
 
-class TransformerBlock(nn.Module):
-    """Simple transformer block for demonstration."""
+class TransformerModel(nn.Module):
+    """
+    Simple transformer model for demonstrating gradient bucketing.
 
-    def __init__(self, hidden_size: int, num_heads: int = 8):
-        super().__init__()
-        self.attention = nn.MultiheadAttention(hidden_size, num_heads, batch_first=True)
-        self.norm1 = nn.LayerNorm(hidden_size)
-        self.ffn = nn.Sequential(
-            nn.Linear(hidden_size, 4 * hidden_size),
-            nn.GELU(),
-            nn.Linear(4 * hidden_size, hidden_size),
-        )
-        self.norm2 = nn.LayerNorm(hidden_size)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Self-attention with residual
-        attn_out, _ = self.attention(x, x, x)
-        x = self.norm1(x + attn_out)
-
-        # FFN with residual
-        ffn_out = self.ffn(x)
-        x = self.norm2(x + ffn_out)
-
-        return x
-
-
-class DemoTransformer(nn.Module):
-    """Demo transformer model for testing gradient bucketing."""
+    This model has different layer types (embedding, attention, feedforward,
+    normalization, output) to showcase layer-based bucketing strategies.
+    """
 
     def __init__(
-        self,
-        vocab_size: int = 50000,
-        hidden_size: int = 768,
-        num_layers: int = 12,
-        num_heads: int = 12,
-        max_seq_len: int = 512,
+        self, vocab_size: int = 1000, hidden_size: int = 512, num_layers: int = 4
     ):
         super().__init__()
 
         self.embedding = nn.Embedding(vocab_size, hidden_size)
-        self.positional_embedding = nn.Embedding(max_seq_len, hidden_size)
-
-        self.layers = nn.ModuleList(
-            [TransformerBlock(hidden_size, num_heads) for _ in range(num_layers)]
-        )
-
-        self.norm = nn.LayerNorm(hidden_size)
-        self.output = nn.Linear(hidden_size, vocab_size)
-
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len = input_ids.shape
-
-        # Embeddings
-        positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
-        x = self.embedding(input_ids) + self.positional_embedding(positions)
 
         # Transformer layers
-        for layer in self.layers:
-            x = layer(x)
+        # Create individual layers for type safety
+        self.attn_layers = nn.ModuleList()
+        self.norm_layers = nn.ModuleList()
+
+        for i in range(num_layers):
+            # Attention layers
+            attn_layer = nn.ModuleDict(
+                {
+                    "query": nn.Linear(hidden_size, hidden_size),
+                    "key": nn.Linear(hidden_size, hidden_size),
+                    "value": nn.Linear(hidden_size, hidden_size),
+                    "output": nn.Linear(hidden_size, hidden_size),
+                }
+            )
+            self.attn_layers.append(attn_layer)
+
+            # MLP and normalization
+            layer_components = nn.ModuleDict(
+                {
+                    "mlp_fc1": nn.Linear(hidden_size, hidden_size * 4),
+                    "mlp_fc2": nn.Linear(hidden_size * 4, hidden_size),
+                    "norm1": nn.LayerNorm(hidden_size),
+                    "norm2": nn.LayerNorm(hidden_size),
+                }
+            )
+            self.norm_layers.append(layer_components)
+
+        self.output_head = nn.Linear(hidden_size, vocab_size)
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize model weights."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            elif isinstance(module, nn.LayerNorm):
+                torch.nn.init.ones_(module.weight)
+                torch.nn.init.zeros_(module.bias)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Forward pass."""
+        batch_size, seq_len = input_ids.shape
+
+        # Embedding
+        x = self.embedding(input_ids)
+
+        # Transformer layers (simplified - no actual attention)
+        for i in range(len(self.attn_layers)):
+            attn_layer = self.attn_layers[i]
+            layer_components = self.norm_layers[i]
+
+            # Type cast to ModuleDict for proper indexing
+            attn_dict = cast(nn.ModuleDict, attn_layer)
+            components_dict = cast(nn.ModuleDict, layer_components)
+
+            # Simplified attention
+            q = attn_dict["query"](x)
+            k = attn_dict["key"](x)
+            v = attn_dict["value"](x)
+
+            # Simple attention (not real scaled dot-product)
+            attn_out = attn_dict["output"](q + k + v)
+            x = components_dict["norm1"](x + attn_out)
+
+            # MLP
+            mlp_out = components_dict["mlp_fc2"](
+                torch.relu(components_dict["mlp_fc1"](x))
+            )
+            x = components_dict["norm2"](x + mlp_out)
 
         # Output projection
-        x = self.norm(x)
-        return self.output(x)
+        logits = self.output_head(x)
+
+        return logits
 
 
-def setup_distributed() -> Tuple[int, int]:
-    """Initialize distributed training environment."""
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+class ModelWithLoss(nn.Module):
+    """Wrapper that adds loss computation for compatibility with RoseTrainer."""
 
-        # Initialize process group
-        dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        self.loss_fn = nn.CrossEntropyLoss()
 
-        # Set device
-        if torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
+    def forward(
+        self, input_ids: torch.Tensor, labels: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """Forward pass with loss computation."""
+        logits = self.model(input_ids)
 
-        logger.info(f"Initialized distributed: rank={rank}, world_size={world_size}")
-        return rank, world_size
-    else:
-        logger.info("Running in single-process mode")
-        return 0, 1
+        # Reshape for cross-entropy loss
+        batch_size, seq_len, vocab_size = logits.shape
+        logits_flat = logits.view(batch_size * seq_len, vocab_size)
+        labels_flat = labels.view(batch_size * seq_len)
 
+        loss = self.loss_fn(logits_flat, labels_flat)
 
-def create_model_and_optimizer(
-    args: argparse.Namespace, device: torch.device
-) -> Tuple[nn.Module, optim.Optimizer]:
-    """Create model and optimizer."""
-    model = DemoTransformer(
-        vocab_size=args.vocab_size,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-        num_heads=args.num_heads,
-        max_seq_len=args.max_seq_len,
-    ).to(device)
-
-    # Wrap in DDP if distributed
-    if dist.is_initialized() and dist.get_world_size() > 1:
-        model = DDP(model)
-
-    optimizer = optim.AdamW(
-        model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
-    )
-
-    return model, optimizer
+        return {"loss": loss, "logits": logits}
 
 
-def train_step(
+def create_synthetic_dataset(
+    num_samples: int = 1000, seq_length: int = 64, vocab_size: int = 1000
+):
+    """Create synthetic dataset for training."""
+    # Generate random sequences
+    input_ids = torch.randint(0, vocab_size, (num_samples, seq_length))
+
+    # Labels are shifted input_ids (language modeling)
+    labels = torch.roll(input_ids, shifts=-1, dims=1)
+    labels[:, -1] = 0  # Pad last position
+
+    return TensorDataset(input_ids, labels)
+
+
+def run_bucketing_comparison(
     model: nn.Module,
-    optimizer: optim.Optimizer,
-    batch: torch.Tensor,
-    labels: torch.Tensor,
-    bucket_manager: Optional[GradientBucketManager] = None,
-    use_bucketing: bool = True,
-) -> float:
-    """Single training step with optional gradient bucketing."""
-    optimizer.zero_grad()
+    dataloader: DataLoader,
+    device: torch.device,
+    strategies: list,
+    num_steps: int = 10,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Compare different bucketing strategies and measure their performance.
 
-    # Forward pass
-    output = model(batch)
-    loss = nn.functional.cross_entropy(
-        output.view(-1, output.size(-1)), labels.view(-1)
-    )
+    Args:
+        model: Model to train
+        dataloader: Training data
+        device: Device to use
+        strategies: List of bucketing configurations to test
+        num_steps: Number of training steps to run
 
-    # Backward pass
-    loss.backward()
-
-    # Gradient synchronization with bucketing
-    if use_bucketing and bucket_manager is not None:
-        bucket_manager.synchronize_gradients()
-
-    # Optimizer step
-    optimizer.step()
-
-    # Reset bucket manager for next iteration
-    if use_bucketing and bucket_manager is not None:
-        bucket_manager.reset()
-
-    return float(loss.item())
-
-
-def benchmark_bucketing_strategies(
-    model: nn.Module, args: argparse.Namespace, device: torch.device
-) -> Dict[str, float]:
-    """Benchmark different bucketing strategies."""
+    Returns:
+        Dictionary mapping strategy names to performance metrics
+    """
     results = {}
 
-    strategies = [
-        BucketingStrategy.SIZE_BASED,
-        BucketingStrategy.TYPE_BASED,
-        BucketingStrategy.LAYER_BASED,
-        BucketingStrategy.HYBRID,
-    ]
+    for strategy_name, config in strategies:
+        logger.info(f"\n=== Testing strategy: {strategy_name} ===")
 
-    batch = torch.randint(
-        0, args.vocab_size, (args.batch_size, args.max_seq_len), device=device
-    )
-    labels = torch.randint(
-        0, args.vocab_size, (args.batch_size, args.max_seq_len), device=device
-    )
+        # Create fresh model copy
+        base_model = TransformerModel(vocab_size=1000, hidden_size=512, num_layers=4)
+        model_copy = ModelWithLoss(base_model)
+        model_copy.to(device)
 
-    for strategy in strategies:
-        logger.info(f"Testing strategy: {strategy}")
+        # Create optimizer
+        optimizer = optim.AdamW(model_copy.parameters(), lr=1e-4)
 
-        # Create bucket manager with strategy
-        config = GradientBucketConfig(
-            bucket_size_mb=args.bucket_size_mb,
-            bucketing_strategy=strategy,
-            overlap_communication=args.overlap_communication,
+        # Create trainer with specific bucketing config
+        trainer = RoseTrainer(
+            model=model_copy,
+            optimizer=optimizer,
+            config=config,
         )
 
-        # Get underlying model if using DDP
-        if isinstance(model, DDP):
-            base_model = model.module
-        else:
-            base_model = model
-        bucket_manager = create_gradient_buckets(base_model, config)
+        # Measure training time
+        start_time = time.time()
+        step_times = []
+        bucketing_stats = []
 
-        # Warmup
-        for _ in range(3):
-            optimizer = optim.AdamW(model.parameters(), lr=1e-4)
-            train_step(model, optimizer, batch, labels, bucket_manager)
+        for step, batch in enumerate(dataloader):
+            if step >= num_steps:
+                break
 
-        # Benchmark
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
-        start_time = time.perf_counter()
+            step_start = time.time()
 
-        num_steps = 10
-        for _ in range(num_steps):
-            optimizer = optim.AdamW(model.parameters(), lr=1e-4)
-            train_step(model, optimizer, batch, labels, bucket_manager)
+            # Move batch to device
+            batch_dict = {
+                "input_ids": batch[0].to(device),
+                "labels": batch[1].to(device),
+            }
 
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
-        elapsed = time.perf_counter() - start_time
+            # Training step
+            metrics = trainer.train_step(batch_dict)
 
-        avg_time = elapsed / num_steps
-        results[strategy.value] = avg_time
+            step_time = time.time() - step_start
+            step_times.append(step_time)
 
-        # Log statistics
-        stats = bucket_manager.get_statistics()
-        logger.info(f"  Strategy: {strategy}")
-        logger.info(f"  Buckets: {stats['num_buckets']}")
-        logger.info(f"  Avg bucket size: {stats['avg_bucket_size']:.0f} elements")
-        logger.info(f"  Time per step: {avg_time:.4f}s")
+            # Collect bucketing statistics if available
+            if (
+                hasattr(trainer, "bucket_manager")
+                and trainer.bucket_manager is not None
+            ):
+                bucket_stats = trainer.bucket_manager.get_statistics()
+                bucketing_stats.append(bucket_stats)
+
+            if step % 5 == 0:
+                logger.info(
+                    f"Step {step}: loss={metrics['loss']:.4f}, "
+                    f"time={step_time:.4f}s"
+                )
+
+        total_time = time.time() - start_time
+        avg_step_time = sum(step_times) / len(step_times)
+
+        # Collect results
+        result = {
+            "total_time": total_time,
+            "avg_step_time": avg_step_time,
+            "step_times": step_times,
+            "final_loss": metrics["loss"],
+        }
+
+        # Add bucketing-specific metrics
+        if bucketing_stats:
+            final_stats = bucketing_stats[-1]
+            result.update(
+                {
+                    "num_buckets": final_stats.get("num_buckets", 0),
+                    "total_size_mb": final_stats.get("total_size_mb", 0),
+                    "avg_communication_time": final_stats.get(
+                        "avg_communication_time", 0
+                    ),
+                    "bucketing_efficiency": final_stats.get("avg_bucket_size_mb", 0),
+                }
+            )
+
+        results[strategy_name] = result
+
+        # Cleanup
+        trainer.cleanup()
+        del trainer, model_copy, optimizer
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+        logger.info(f"Strategy {strategy_name} completed in {total_time:.2f}s")
 
     return results
 
 
+def demonstrate_advanced_features(device: torch.device):
+    """Demonstrate advanced bucketing features like dynamic optimization."""
+    logger.info("\n=== Advanced Features Demonstration ===")
+
+    # Create model and data
+    model = TransformerModel(vocab_size=1000, hidden_size=256, num_layers=2)
+    model = ModelWithLoss(model)
+    model.to(device)
+
+    dataset = create_synthetic_dataset(100, seq_length=32)
+    dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4)
+
+    # Configuration with advanced features
+    config = TrainingConfig(
+        batch_size=4,
+        max_steps=5,
+        num_epochs=None,  # Must be None when using max_steps
+        warmup_steps=0,
+        seed=42,
+        checkpoint_interval=10,
+        log_interval=1,
+        eval_interval=5,
+    )
+
+    trainer = RoseTrainer(model=model, optimizer=optimizer, config=config)
+
+    if trainer.bucket_manager is not None:
+        logger.info("=== Initial Bucket Configuration ===")
+        initial_stats = trainer.bucket_manager.get_statistics()
+        logger.info(f"Strategy: {initial_stats['strategy']}")
+        logger.info(f"Initial buckets: {initial_stats['num_buckets']}")
+
+        # Run some training steps
+        for step, batch in enumerate(dataloader):
+            if step >= 5:
+                break
+
+            batch_dict = {
+                "input_ids": batch[0].to(device),
+                "labels": batch[1].to(device),
+            }
+
+            _ = trainer.train_step(batch_dict)
+
+            # Show bucket statistics evolution
+            current_stats = trainer.bucket_manager.get_statistics()
+            logger.info(
+                f"Step {step}: buckets={current_stats['num_buckets']}, "
+                f"size={current_stats['total_size_mb']:.2f}MB"
+            )
+
+            # Demonstrate bucket optimization
+            if step == 2:
+                logger.info("=== Running Bucket Optimization ===")
+                trainer.bucket_manager.optimize_buckets()
+
+        # Show group statistics if available
+        if trainer.bucket_group_manager is not None:
+            group_stats = trainer.bucket_group_manager.get_statistics()
+            logger.info("=== Group Statistics ===")
+            logger.info(f"Active groups: {group_stats['groups']['active']}")
+            logger.info(f"Group strategy: {group_stats['config']['strategy']}")
+
+    trainer.cleanup()
+
+
+def demonstrate_memory_efficiency(device: torch.device):
+    """Demonstrate memory efficiency of bucketing system."""
+    logger.info("\n=== Memory Efficiency Demonstration ===")
+
+    # Create larger model to show memory benefits
+    model = TransformerModel(vocab_size=2000, hidden_size=768, num_layers=6)
+    model = ModelWithLoss(model)
+    model.to(device)
+
+    # Count model parameters and estimate memory
+    total_params = sum(p.numel() for p in model.parameters())
+    param_memory_mb = total_params * 4 / (1024 * 1024)  # Assuming FP32
+
+    logger.info(f"Model parameters: {total_params:,}")
+    logger.info(f"Estimated parameter memory: {param_memory_mb:.2f}MB")
+
+    # Create gradient tensors
+    gradients = {}
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            # Create fake gradients
+            gradients[name] = torch.randn_like(param)
+
+    gradient_memory_mb = sum(g.numel() * 4 for g in gradients.values()) / (1024 * 1024)
+    logger.info(f"Gradient memory: {gradient_memory_mb:.2f}MB")
+
+    # Test different bucket sizes and their memory efficiency
+    bucket_sizes = [1.0, 5.0, 10.0, 25.0]  # MB
+
+    for bucket_size in bucket_sizes:
+        from rosellm.rosetrainer.communication import BucketConfig, BucketManager
+        from rosellm.rosetrainer.communication.gradient_buckets import BucketStrategy
+
+        config = BucketConfig(
+            strategy=BucketStrategy.SIZE_BASED,
+            max_bucket_size_mb=bucket_size,
+        )
+
+        manager = BucketManager(config, device)
+
+        # Assign all gradients
+        for param_name, gradient in gradients.items():
+            manager.assign_gradient(param_name, gradient)
+
+        stats = manager.get_statistics()
+        logger.info(
+            f"Bucket size {bucket_size}MB: {stats['num_buckets']} buckets, "
+            f"efficiency: {stats['avg_bucket_size_mb']:.2f}MB avg"
+        )
+
+
 def main():
-    """Main training loop with gradient bucketing."""
     parser = argparse.ArgumentParser(description="Gradient Bucketing Example")
-
-    # Model arguments
-    parser.add_argument("--vocab-size", type=int, default=10000, help="Vocabulary size")
+    parser.add_argument("--single-gpu", action="store_true", help="Run on single GPU")
     parser.add_argument(
-        "--hidden-size", type=int, default=512, help="Hidden dimension size"
+        "--distributed", action="store_true", help="Run distributed training"
     )
     parser.add_argument(
-        "--num-layers", type=int, default=6, help="Number of transformer layers"
+        "--cpu-only", action="store_true", help="Force CPU-only execution"
     )
     parser.add_argument(
-        "--num-heads", type=int, default=8, help="Number of attention heads"
+        "--steps", type=int, default=10, help="Number of training steps"
     )
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size")
     parser.add_argument(
-        "--max-seq-len", type=int, default=128, help="Maximum sequence length"
-    )
-
-    # Training arguments
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size per GPU")
-    parser.add_argument(
-        "--num-steps", type=int, default=100, help="Number of training steps"
-    )
-    parser.add_argument(
-        "--learning-rate", type=float, default=1e-4, help="Learning rate"
-    )
-    parser.add_argument("--weight-decay", type=float, default=0.01, help="Weight decay")
-
-    # Bucketing arguments
-    parser.add_argument(
-        "--bucket-size-mb", type=float, default=50, help="Target bucket size in MB"
-    )
-    parser.add_argument(
-        "--bucketing-strategy",
-        type=str,
-        default=BucketingStrategy.SIZE_BASED,
-        choices=[s.value for s in BucketingStrategy],
-        help="Bucketing strategy to use",
-    )
-    parser.add_argument(
-        "--overlap-communication",
-        action="store_true",
-        help="Enable communication/computation overlap",
-    )
-    parser.add_argument(
-        "--benchmark-strategies",
-        action="store_true",
-        help="Benchmark all bucketing strategies",
-    )
-    parser.add_argument(
-        "--no-bucketing",
-        action="store_true",
-        help="Disable gradient bucketing (baseline)",
+        "--model-size",
+        choices=["small", "medium", "large"],
+        default="medium",
+        help="Model size for testing",
     )
 
     args = parser.parse_args()
 
-    # Setup distributed training
-    rank, world_size = setup_distributed()
-    device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
+    # Setup device
+    if args.cpu_only or not torch.cuda.is_available():
+        device = torch.device("cpu")
+        logger.info("Using CPU")
+    else:
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        device = torch.device(f"cuda:{local_rank}")
+        logger.info(f"Using GPU {local_rank}")
 
-    logger.info(f"Using device: {device}")
-    logger.info(f"World size: {world_size}")
+    # Model size configurations
+    model_configs = {
+        "small": {"vocab_size": 500, "hidden_size": 256, "num_layers": 2},
+        "medium": {"vocab_size": 1000, "hidden_size": 512, "num_layers": 4},
+        "large": {"vocab_size": 2000, "hidden_size": 768, "num_layers": 6},
+    }
 
-    # Create model and optimizer
-    model, optimizer = create_model_and_optimizer(args, device)
+    model_config = model_configs[args.model_size]
+    logger.info(f"Using {args.model_size} model: {model_config}")
 
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Total parameters: {total_params:,}")
-    logger.info(f"Trainable parameters: {trainable_params:,}")
+    # Create model and data
+    model = TransformerModel(**model_config)
+    model = ModelWithLoss(model)
+    model.to(device)
 
-    # Benchmark different strategies if requested
-    if args.benchmark_strategies:
-        logger.info("=" * 50)
-        logger.info("Benchmarking bucketing strategies...")
-        logger.info("=" * 50)
+    dataset = create_synthetic_dataset(
+        1000, seq_length=64, vocab_size=model_config["vocab_size"]
+    )
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
-        results = benchmark_bucketing_strategies(model, args, device)
+    # Define bucketing strategies to compare
+    strategies = {
+        "no_bucketing": TrainingConfig(
+            batch_size=args.batch_size,
+            max_steps=args.steps,
+            num_epochs=None,
+            warmup_steps=0,
+            seed=42,
+            checkpoint_interval=50,
+            log_interval=10,
+            eval_interval=25,
+        ),
+        "size_based": TrainingConfig(
+            batch_size=args.batch_size,
+            max_steps=args.steps,
+            num_epochs=None,
+            warmup_steps=0,
+            seed=42,
+            checkpoint_interval=50,
+            log_interval=10,
+            eval_interval=25,
+        ),
+        "layer_based": TrainingConfig(
+            batch_size=args.batch_size,
+            max_steps=args.steps,
+            num_epochs=None,
+            warmup_steps=0,
+            seed=42,
+            checkpoint_interval=50,
+            log_interval=10,
+            eval_interval=25,
+        ),
+        "mixed_strategy": TrainingConfig(
+            batch_size=args.batch_size,
+            max_steps=args.steps,
+            num_epochs=None,
+            warmup_steps=0,
+            seed=42,
+            checkpoint_interval=50,
+            log_interval=10,
+            eval_interval=25,
+        ),
+        "small_buckets": TrainingConfig(
+            batch_size=args.batch_size,
+            max_steps=args.steps,
+            num_epochs=None,
+            warmup_steps=0,
+            seed=42,
+            checkpoint_interval=50,
+            log_interval=10,
+            eval_interval=25,
+        ),
+    }
 
-        logger.info("\nBenchmark Results:")
-        logger.info("-" * 30)
-        for strategy, time_per_step in results.items():
-            logger.info(f"{strategy}: {time_per_step:.4f}s per step")
+    # Only test distributed features if actually distributed
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    if world_size == 1:
+        # Remove distributed-only strategies for single process
+        strategies = {k: v for k, v in strategies.items() if k != "no_bucketing"}
+        logger.info("Single process mode - testing bucketing logic only")
 
-        best_strategy = min(results, key=lambda k: results[k])
-        logger.info(f"\nBest strategy: {best_strategy}")
-        return
+    # Run performance comparison
+    logger.info("Starting bucketing strategy comparison...")
+    results = run_bucketing_comparison(
+        model, dataloader, device, list(strategies.items()), args.steps
+    )
 
-    # Create gradient bucket manager
-    bucket_manager = None
-    if not args.no_bucketing and world_size > 1:
-        config = GradientBucketConfig(
-            bucket_size_mb=args.bucket_size_mb,
-            bucketing_strategy=args.bucketing_strategy,
-            overlap_communication=args.overlap_communication,
-            use_distributed_optimizer=False,  # Enable for ZeRO-style opt
-            dtype_bucketing=True,
-        )
+    # Display results
+    logger.info("\n=== Performance Comparison Results ===")
+    for strategy_name, result in results.items():
+        logger.info(f"\n{strategy_name.upper()}:")
+        logger.info(f"  Total time: {result['total_time']:.3f}s")
+        logger.info(f"  Avg step time: {result['avg_step_time']:.4f}s")
+        logger.info(f"  Final loss: {result['final_loss']:.4f}")
 
-        # Get underlying model if using DDP
-        if isinstance(model, DDP):
-            base_model = model.module
-        else:
-            base_model = model
-        bucket_manager = create_gradient_buckets(base_model, config)
-
-        # Log bucketing statistics
-        stats = bucket_manager.get_statistics()
-        logger.info(f"\nGradient Bucketing Configuration:")
-        logger.info(f"  Strategy: {args.bucketing_strategy}")
-        logger.info(f"  Number of buckets: {stats['num_buckets']}")
-        logger.info(f"  Total parameters: {stats['total_parameters']}")
-        logger.info(f"  Average bucket size: {stats['avg_bucket_size']:.0f} elements")
-        logger.info(f"  Overlap enabled: {stats['overlap_enabled']}")
-
-        if "dtype_distribution" in stats:
-            logger.info(f"  Dtype distribution:")
-            for dtype, count in stats["dtype_distribution"].items():
-                logger.info(f"    {dtype}: {count:,} elements")
-
-    # Training loop
-    logger.info("\nStarting training...")
-    logger.info("=" * 50)
-
-    loss_history = []
-    step_times = []
-
-    for step in range(args.num_steps):
-        # Generate random batch (in real training, use DataLoader)
-        batch = torch.randint(
-            0, args.vocab_size, (args.batch_size, args.max_seq_len), device=device
-        )
-        labels = torch.randint(
-            0, args.vocab_size, (args.batch_size, args.max_seq_len), device=device
-        )
-
-        # Time the training step
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
-        start_time = time.perf_counter()
-
-        # Training step with bucketing
-        loss = train_step(
-            model,
-            optimizer,
-            batch,
-            labels,
-            bucket_manager,
-            use_bucketing=(not args.no_bucketing),
-        )
-
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
-        step_time = time.perf_counter() - start_time
-
-        loss_history.append(loss)
-        step_times.append(step_time)
-
-        # Log progress
-        if (step + 1) % 10 == 0:
-            avg_loss = sum(loss_history[-10:]) / min(10, len(loss_history))
-            avg_time = sum(step_times[-10:]) / min(10, len(step_times))
-
+        if "num_buckets" in result:
+            logger.info(f"  Buckets: {result['num_buckets']}")
+            logger.info(f"  Total size: {result['total_size_mb']:.2f}MB")
             logger.info(
-                f"Step {step + 1}/{args.num_steps} | "
-                f"Loss: {avg_loss:.4f} | "
-                f"Time: {avg_time:.4f}s/step | "
-                f"Throughput: {args.batch_size / avg_time:.1f} samples/s"
+                f"  Bucketing efficiency: "
+                f"{result.get('bucketing_efficiency', 0):.2f}MB avg"
             )
 
-    # Final statistics
-    logger.info("\n" + "=" * 50)
-    logger.info("Training Complete!")
-    logger.info(f"Average loss: {sum(loss_history) / len(loss_history):.4f}")
-    logger.info(f"Average time per step: {sum(step_times) / len(step_times):.4f}s")
+    # Find best strategy
+    if len(results) > 1:
+        best_strategy = min(results.keys(), key=lambda k: results[k]["avg_step_time"])
+        logger.info(f"\nBest performing strategy: {best_strategy}")
+        logger.info(
+            f"Speed improvement: "
+            f"{results[best_strategy]['avg_step_time']:.4f}s per step"
+        )
 
-    if bucket_manager is not None:
-        final_stats = bucket_manager.get_statistics()
-        logger.info(f"\nFinal Bucketing Statistics:")
-        logger.info(f"  Total buckets used: {final_stats['num_buckets']}")
-        logger.info(f"  Parameters bucketed: {final_stats['total_parameters']}")
+    # Run advanced features demo if not in minimal mode
+    if not args.single_gpu:
+        demonstrate_advanced_features(device)
+        demonstrate_memory_efficiency(device)
 
-    # Cleanup
-    if dist.is_initialized():
-        dist.destroy_process_group()
+    logger.info("\n=== Recommendations ===")
+    logger.info("1. For models with many small parameters: use 'layer_based' strategy")
+    logger.info("2. For models with varied parameter sizes: use 'mixed' strategy")
+    logger.info(
+        "3. For maximum communication overlap: enable groups with 'parallel' strategy"
+    )
+    logger.info(
+        "4. For memory-constrained environments: use smaller bucket sizes (1-5MB)"
+    )
+    logger.info("5. Enable dynamic bucketing for adaptive optimization")
+
+    logger.info("\nGradient bucketing example completed successfully!")
 
 
 if __name__ == "__main__":
