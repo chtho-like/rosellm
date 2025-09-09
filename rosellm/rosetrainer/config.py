@@ -6,7 +6,7 @@ and automatic validation of training parameters.
 """
 
 from enum import Enum
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -105,6 +105,34 @@ class GradientConfig(BaseModel):
     )
     include_gradient_histograms: bool = Field(
         False, description="Include gradient histograms in stats (expensive)"
+    )
+
+    # Advanced gradient finalization
+    enable_advanced_finalization: bool = Field(
+        False,
+        description="Enable advanced gradient finalization with multi-precision",
+    )
+    master_precision: Literal["fp32", "fp16", "bf16"] = Field(
+        "fp32", description="Master precision for gradient storage and accumulation"
+    )
+    communication_precision: Optional[Literal["fp32", "fp16", "bf16"]] = Field(
+        None,
+        description="Precision for gradient communication (None uses master_precision)",
+    )
+    enable_gradient_compression: bool = Field(
+        False, description="Enable gradient compression for communication"
+    )
+    compression_threshold_mb: float = Field(
+        10.0, gt=0, description="Size threshold in MB for applying compression"
+    )
+    normalize_gradients: bool = Field(
+        False, description="Normalize gradients across parallelism dimensions"
+    )
+    advanced_sync_order: Optional[List[str]] = Field(
+        None, description="Custom synchronization order for parallelism dimensions"
+    )
+    finalization_verbose: bool = Field(
+        False, description="Enable verbose logging for gradient finalization"
     )
 
     @field_validator("clip_value")

@@ -130,7 +130,10 @@ def validate_microbatch_config(
     pipeline_parallel_size: int = 1,
     gradient_accumulation_steps: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Validate and suggest microbatch configuration.
+    """Validate and suggest microbatch configuration with performance optimizations.
+
+    This function performs comprehensive validation with early returns and
+    cached calculations for better performance.
 
     Args:
         global_batch_size: Total batch size across all ranks
@@ -141,7 +144,27 @@ def validate_microbatch_config(
 
     Returns:
         Dictionary with validation results and suggestions
+
+    Note:
+        Uses optimized divisor calculation and early validation exits.
     """
+    # Fast input validation with early returns
+    if any(
+        x <= 0
+        for x in [
+            global_batch_size,
+            micro_batch_size,
+            data_parallel_size,
+            pipeline_parallel_size,
+        ]
+    ):
+        return {
+            "valid": False,
+            "warnings": ["All size parameters must be positive"],
+            "suggestions": ["Check input parameters"],
+            "calculated_values": {},
+        }
+
     results: Dict[str, Any] = {
         "valid": True,
         "warnings": [],
@@ -149,73 +172,135 @@ def validate_microbatch_config(
         "calculated_values": {},
     }
 
-    # Check divisibility
+    # Check global batch size divisibility first (most common failure)
     if global_batch_size % data_parallel_size != 0:
         results["valid"] = False
         results["warnings"].append(
             f"Global batch size {global_batch_size} not divisible by "
             f"data parallel size {data_parallel_size}"
         )
-        # Suggest nearest valid batch size
+        # Optimize suggestion calculation
         suggested_bs = (
-            (global_batch_size // data_parallel_size) + 1
+            (global_batch_size + data_parallel_size - 1) // data_parallel_size
         ) * data_parallel_size
         results["suggestions"].append(f"Consider using batch size {suggested_bs}")
 
+    # Calculate once and reuse
     batch_per_gpu = global_batch_size // data_parallel_size
+    results["calculated_values"]["batch_per_gpu"] = batch_per_gpu
 
+    # Check micro batch size divisibility
     if batch_per_gpu % micro_batch_size != 0:
         results["valid"] = False
         results["warnings"].append(
             f"Batch per GPU {batch_per_gpu} not divisible by "
             f"micro batch size {micro_batch_size}"
         )
-        # Suggest valid micro batch sizes
-        valid_sizes = [i for i in range(1, batch_per_gpu + 1) if batch_per_gpu % i == 0]
-        closest = min(valid_sizes, key=lambda x: abs(x - micro_batch_size))
-        results["suggestions"].append(f"Consider micro batch size {closest}")
 
-    # Calculate values
-    num_microbatches = batch_per_gpu // micro_batch_size if results["valid"] else 0
+        # Optimized divisor finding using mathematical approach
+        closest_divisor = _find_closest_divisor(batch_per_gpu, micro_batch_size)
+        results["suggestions"].append(f"Consider micro batch size {closest_divisor}")
+
+    # Early exit if basic validation failed
+    if not results["valid"]:
+        results["calculated_values"]["num_microbatches"] = 0
+        return results
+
+    # Calculate derived values
+    num_microbatches = batch_per_gpu // micro_batch_size
     results["calculated_values"]["num_microbatches"] = num_microbatches
-    results["calculated_values"]["batch_per_gpu"] = batch_per_gpu
 
-    # Pipeline parallelism checks
+    # Pipeline parallelism analysis (only if pipeline_parallel_size > 1)
     if pipeline_parallel_size > 1:
-        if num_microbatches < pipeline_parallel_size:
-            results["warnings"].append(
-                f"Number of microbatches ({num_microbatches}) less than "
-                f"pipeline stages ({pipeline_parallel_size}). "
-                f"This will cause pipeline bubbles."
-            )
-            min_microbatches = pipeline_parallel_size * 2  # Recommended minimum
-            suggested_global = min_microbatches * micro_batch_size * data_parallel_size
-            results["suggestions"].append(
-                f"Consider increasing batch size to at least {suggested_global}"
-            )
-
-        # Calculate pipeline efficiency
-        bubble_size = (pipeline_parallel_size - 1) * (
-            num_microbatches / pipeline_parallel_size
+        _validate_pipeline_config(
+            results,
+            num_microbatches,
+            pipeline_parallel_size,
+            micro_batch_size,
+            data_parallel_size,
         )
-        efficiency = 1 - (bubble_size / max(1, num_microbatches))
-        results["calculated_values"]["pipeline_efficiency"] = efficiency
 
-        if efficiency < 0.8:
-            results["warnings"].append(
-                f"Pipeline efficiency is low ({efficiency:.1%}). "
-                "Consider increasing number of microbatches."
-            )
-
-    # Gradient accumulation check
-    if gradient_accumulation_steps is not None:
-        if gradient_accumulation_steps != num_microbatches:
-            results["warnings"].append(
-                f"Gradient accumulation steps ({gradient_accumulation_steps}) "
-                f"doesn't match calculated microbatches ({num_microbatches})"
-            )
+    # Gradient accumulation consistency check
+    if (
+        gradient_accumulation_steps is not None
+        and gradient_accumulation_steps != num_microbatches
+    ):
+        results["warnings"].append(
+            f"Gradient accumulation steps ({gradient_accumulation_steps}) "
+            f"doesn't match calculated microbatches ({num_microbatches})"
+        )
 
     return results
+
+
+def _find_closest_divisor(n: int, target: int) -> int:
+    """Find the divisor of n closest to target value.
+
+    Uses optimized algorithm that checks divisors in order of proximity to target.
+    """
+    if n <= 0:
+        return 1
+
+    # Check target first
+    if n % target == 0:
+        return target
+
+    # Check nearby values in expanding radius
+    for delta in range(1, min(target, n - target) + 1):
+        # Check target - delta
+        candidate_low = target - delta
+        if candidate_low > 0 and n % candidate_low == 0:
+            return candidate_low
+
+        # Check target + delta
+        candidate_high = target + delta
+        if candidate_high <= n and n % candidate_high == 0:
+            return candidate_high
+
+    # Fallback: find all divisors and pick closest (should be rare)
+    divisors = [i for i in range(1, int(n**0.5) + 1) if n % i == 0]
+    all_divisors = divisors + [n // d for d in divisors if d != n // d]
+    return min(all_divisors, key=lambda x: abs(x - target))
+
+
+def _validate_pipeline_config(
+    results: Dict[str, Any],
+    num_microbatches: int,
+    pipeline_parallel_size: int,
+    micro_batch_size: int,
+    data_parallel_size: int,
+) -> None:
+    """Validate pipeline parallelism configuration in-place."""
+    # Minimum microbatches check
+    if num_microbatches < pipeline_parallel_size:
+        results["warnings"].append(
+            f"Number of microbatches ({num_microbatches}) less than "
+            f"pipeline stages ({pipeline_parallel_size}). "
+            f"This will cause pipeline bubbles."
+        )
+        min_microbatches = pipeline_parallel_size * 2  # Recommended minimum
+        suggested_global = min_microbatches * micro_batch_size * data_parallel_size
+        results["suggestions"].append(
+            f"Consider increasing batch size to at least {suggested_global}"
+        )
+
+    # Pipeline efficiency calculation
+    # Bubble time = (P-1) * (F + B) where P = pipeline stages
+    # Total time = M * (F + B) where M = microbatches
+    # Efficiency = (Total - Bubble) / Total = 1 - (P-1)/M
+    efficiency = 1.0 - (pipeline_parallel_size - 1) / max(1, num_microbatches)
+    results["calculated_values"]["pipeline_efficiency"] = max(0.0, efficiency)
+
+    # Pipeline efficiency warning
+    from rosellm.rosetrainer.parallelism.microbatch_calculator import (
+        MIN_PIPELINE_EFFICIENCY,
+    )
+
+    if efficiency < MIN_PIPELINE_EFFICIENCY:
+        results["warnings"].append(
+            f"Pipeline efficiency is low ({efficiency:.1%}). "
+            "Consider increasing number of microbatches."
+        )
 
 
 def suggest_optimal_config(

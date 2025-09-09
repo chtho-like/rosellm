@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Deque, List, Optional, Union
+from typing import Any, Deque, List, Optional, Protocol, Union
 
 import torch
 import torch.distributed as dist
@@ -34,7 +34,32 @@ MEMORY_SAFETY_MARGIN = 0.8
 ADJUSTMENT_INTERVAL_MULTIPLIER = 10
 MAX_HISTORY_SIZE = 1000
 BYTES_PER_FP16_ELEMENT = 2
+BYTES_PER_FP32_ELEMENT = 4
+BYTES_PER_BF16_ELEMENT = 2
+BYTES_PER_FP64_ELEMENT = 8
 GB_TO_BYTES = 1024**3
+MB_TO_BYTES = 1024**2
+
+# Memory calculation constants
+ACTIVATION_MEMORY_MULTIPLIER = 2.0  # Forward + backward activations
+GRADIENT_MEMORY_MULTIPLIER = 1.0  # Gradient storage
+OPTIMIZER_STATE_MULTIPLIERS = {
+    "adam": 2.0,  # momentum + variance
+    "adamw": 2.0,  # momentum + variance
+    "sgd": 1.0,  # only momentum
+    "lamb": 2.0,  # similar to Adam
+    "adagrad": 1.0,  # accumulated gradients
+    "rmsprop": 1.0,  # squared gradients
+}
+
+# Pipeline efficiency thresholds
+MIN_PIPELINE_EFFICIENCY = 0.8
+RECOMMENDED_MICROBATCHES_PER_STAGE = 2
+
+# Batch size limits for safety
+MAX_SAFE_BATCH_SIZE = 2**20  # Prevent integer overflow
+MIN_BATCH_SIZE = 1
+MAX_BATCH_SIZE_GROWTH_FACTOR = 2.0
 
 # Thread-safe lock for global state
 _GLOBAL_LOCK = threading.RLock()
@@ -64,9 +89,52 @@ class InvalidConfigurationError(MicrobatchCalculatorError):
     pass
 
 
-@dataclass
+def create_adjustment_record(
+    consumed_samples: int, micro_batch_size: int, memory_usage: float, timestamp: float
+) -> "AdjustmentRecord":
+    """Create a validated adjustment record.
+
+    Args:
+        consumed_samples: Total samples processed when adjustment occurred
+        micro_batch_size: Microbatch size at time of adjustment
+        memory_usage: GPU memory usage fraction [0.0, 1.0]
+        timestamp: Unix timestamp when adjustment was recorded
+
+    Returns:
+        Validated AdjustmentRecord instance
+
+    Raises:
+        ValueError: If any parameter is invalid
+    """
+    if consumed_samples < 0:
+        raise ValueError(
+            f"consumed_samples must be non-negative, got {consumed_samples}"
+        )
+    if micro_batch_size <= 0:
+        raise ValueError(f"micro_batch_size must be positive, got {micro_batch_size}")
+    if not (0.0 <= memory_usage <= 1.0):
+        raise ValueError(f"memory_usage must be in [0, 1], got {memory_usage}")
+    if timestamp <= 0:
+        raise ValueError(f"timestamp must be positive, got {timestamp}")
+
+    return AdjustmentRecord(consumed_samples, micro_batch_size, memory_usage, timestamp)
+
+
+@dataclass(frozen=True)
 class AdjustmentRecord:
-    """Record of a microbatch size adjustment."""
+    """Record of a microbatch size adjustment.
+
+    This is an immutable record for tracking microbatch adjustments
+    over time, used primarily by the adaptive calculator.
+
+    Use `create_adjustment_record()` factory function for validated instances.
+
+    Attributes:
+        consumed_samples: Total samples processed when adjustment occurred
+        micro_batch_size: Microbatch size at time of adjustment
+        memory_usage: GPU memory usage fraction [0.0, 1.0] at time of adjustment
+        timestamp: Unix timestamp when adjustment was recorded
+    """
 
     consumed_samples: int
     micro_batch_size: int
@@ -74,11 +142,52 @@ class AdjustmentRecord:
     timestamp: float
 
 
+class MicrobatchCalculatorProtocol(Protocol):
+    """Protocol defining the interface for microbatch calculators.
+
+    This protocol ensures type safety and clear contracts for
+    all microbatch calculator implementations.
+    """
+
+    def get_num_microbatches(self) -> int:
+        """Get the number of microbatches for the current iteration."""
+        ...
+
+    def get_micro_batch_size(self) -> int:
+        """Get the size of each microbatch."""
+        ...
+
+    def update(self, consumed_samples: int, consistency_check: bool = True) -> None:
+        """Update the calculator state based on training progress."""
+        ...
+
+    def get_current_global_batch_size(self) -> int:
+        """Get the current effective global batch size."""
+        ...
+
+
 class MicrobatchCalculatorBase(ABC):
     """Abstract base class for microbatch calculators.
 
-    This follows the Megatron-LM pattern for calculating microbatch sizes
-    and counts during training with pipeline parallelism.
+    This class provides the foundation for all microbatch calculation strategies,
+    following the Megatron-LM pattern for distributed training with pipeline
+    parallelism. It handles the core batch size arithmetic and provides common
+    utilities for validation and state management.
+
+    Key Responsibilities:
+    - Validate input parameters and detect configuration errors early
+    - Provide thread-safe access to microbatch calculations
+    - Ensure consistency across different parallelism dimensions
+    - Support dynamic adjustment strategies for adaptive calculators
+
+    Performance Characteristics:
+    - O(1) time complexity for all calculation methods
+    - Minimal memory overhead with efficient state storage
+    - Thread-safe operations suitable for multi-threaded training loops
+
+    Thread Safety:
+    - All methods are thread-safe unless otherwise noted
+    - Subclasses should use appropriate locking for mutable state
     """
 
     def __init__(
@@ -142,9 +251,10 @@ class MicrobatchCalculatorBase(ABC):
             )
         if value <= 0:
             raise InvalidConfigurationError(f"{name} must be positive, got {value}")
-        if value > 2**31 - 1:  # Prevent overflow
+        if value > MAX_SAFE_BATCH_SIZE:  # Prevent overflow
             raise InvalidConfigurationError(
-                f"{name} too large (overflow risk), got {value}"
+                f"{name} too large (overflow risk), got {value}. "
+                f"Maximum allowed: {MAX_SAFE_BATCH_SIZE}"
             )
 
     @abstractmethod
@@ -439,6 +549,8 @@ class AdaptiveMicrobatchCalculator(MicrobatchCalculatorBase):
             maxlen=MAX_HISTORY_SIZE
         )
         self._last_adjustment_samples = 0
+        # Thread-safe access to mutable state
+        self._adjustment_lock = threading.RLock()
 
     def get_num_microbatches(self) -> int:
         """Get current number of microbatches."""
@@ -453,20 +565,28 @@ class AdaptiveMicrobatchCalculator(MicrobatchCalculatorBase):
 
         Returns:
             Memory usage as fraction (0-1)
+
+        Note:
+            Uses reserved memory rather than allocated for more accurate
+            measurement of actual memory pressure.
         """
         if not torch.cuda.is_available():
             return 0.0
 
         try:
-            allocated = torch.cuda.memory_allocated() / GB_TO_BYTES  # noqa: F841
-            reserved = torch.cuda.memory_reserved() / GB_TO_BYTES
-            total = torch.cuda.get_device_properties(0).total_memory / GB_TO_BYTES
+            # Get current device to avoid hardcoded device 0
+            current_device = torch.cuda.current_device()
+            reserved_bytes = torch.cuda.memory_reserved(current_device)
+            total_bytes = torch.cuda.get_device_properties(current_device).total_memory
 
-            if total <= 0:
+            if total_bytes <= 0:
+                logger.warning(f"Invalid total memory: {total_bytes}")
                 return 0.0
 
-            return float(min(1.0, reserved / total))  # Cap at 1.0
-        except Exception as e:
+            usage_fraction = float(reserved_bytes) / float(total_bytes)
+            return min(1.0, max(0.0, usage_fraction))  # Clamp to [0, 1]
+
+        except (RuntimeError, AttributeError) as e:
             logger.warning(f"Failed to get memory usage: {e}")
             return 0.0
 
@@ -510,35 +630,72 @@ class AdaptiveMicrobatchCalculator(MicrobatchCalculatorBase):
         Args:
             consumed_samples: Total samples consumed
             consistency_check: Whether to check consistency across ranks
+
+        Note:
+            This method is thread-safe and uses locking to protect mutable state.
         """
         import time
 
-        memory_usage = self._get_memory_usage()
-        # Store adjustment record in circular buffer
-        self.adjustment_history.append(
-            AdjustmentRecord(
+        with self._adjustment_lock:
+            memory_usage = self._get_memory_usage()
+
+            # Store adjustment record in circular buffer (using factory for validation)
+            record = create_adjustment_record(
                 consumed_samples=consumed_samples,
                 micro_batch_size=self.current_micro_batch_size,
                 memory_usage=memory_usage,
                 timestamp=time.time(),
             )
-        )
+            self.adjustment_history.append(record)
 
-        # Adjust every N samples to avoid thrashing
-        adjustment_interval = self.global_batch_size * ADJUSTMENT_INTERVAL_MULTIPLIER
-        if consumed_samples - self._last_adjustment_samples >= adjustment_interval:
-            self._adjust_microbatch_size(memory_usage)
-            self._last_adjustment_samples = consumed_samples
-
-        # Ensure consistency across ranks
-        if consistency_check and dist.is_initialized():
-            tensor = torch.tensor(
-                [self.current_micro_batch_size],
-                dtype=torch.long,
-                device="cuda" if torch.cuda.is_available() else "cpu",
+            # Adjust every N samples to avoid thrashing
+            adjustment_interval = (
+                self.global_batch_size * ADJUSTMENT_INTERVAL_MULTIPLIER
             )
-            dist.all_reduce(tensor, op=dist.ReduceOp.MIN)  # Use minimum across ranks
-            self.current_micro_batch_size = int(tensor.item())
+            should_adjust = (
+                consumed_samples - self._last_adjustment_samples >= adjustment_interval
+            )
+
+            if should_adjust:
+                old_size = self.current_micro_batch_size
+                self._adjust_microbatch_size(memory_usage)
+                self._last_adjustment_samples = consumed_samples
+
+                # Log adjustment if size changed
+                if old_size != self.current_micro_batch_size and logger.isEnabledFor(
+                    logging.DEBUG
+                ):
+                    logger.debug(
+                        f"Microbatch size adjusted: {old_size} -> "
+                        f"{self.current_micro_batch_size} (memory: {memory_usage:.2%})"
+                    )
+
+        # Ensure consistency across ranks (outside lock to avoid deadlock)
+        if consistency_check and dist.is_initialized():
+            try:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                tensor = torch.tensor(
+                    [self.current_micro_batch_size],
+                    dtype=torch.long,
+                    device=device,
+                )
+                dist.all_reduce(
+                    tensor, op=dist.ReduceOp.MIN
+                )  # Use minimum across ranks
+
+                with self._adjustment_lock:
+                    consistent_size = int(tensor.item())
+                    if consistent_size != self.current_micro_batch_size:
+                        logger.info(
+                            f"Adjusting microbatch size for consistency: "
+                            f"{self.current_micro_batch_size} -> {consistent_size}"
+                        )
+                        self.current_micro_batch_size = consistent_size
+
+            except Exception as e:
+                logger.warning(
+                    f"Failed to synchronize microbatch size across ranks: {e}"
+                )
 
 
 # Global state management functions
@@ -722,6 +879,12 @@ def calculate_optimal_microbatch_size(
 ) -> int:
     """Calculate optimal microbatch size based on model and memory constraints.
 
+    This function provides a more accurate estimation by considering:
+    - Precision-aware memory calculations
+    - Activation checkpointing memory savings
+    - Pipeline parallelism effects
+    - Overflow protection with safe integer arithmetic
+
     Args:
         model_size_gb: Model size in GB
         available_memory_gb: Available GPU memory in GB
@@ -730,66 +893,125 @@ def calculate_optimal_microbatch_size(
         num_layers: Number of transformer layers
         pipeline_parallel_size: Pipeline parallel size
         activation_checkpoint: Whether using activation checkpointing
-        optimizer_type: Type of optimizer ('adam', 'sgd', 'adamw')
-        precision: Training precision ('fp16', 'fp32', 'bf16')
+        optimizer_type: Type of optimizer ('adam', 'sgd', 'adamw', etc.)
+        precision: Training precision ('fp16', 'fp32', 'bf16', 'fp64')
 
     Returns:
-        Suggested microbatch size
+        Suggested microbatch size (guaranteed to be >= 1)
 
     Raises:
-        ValueError: If parameters are invalid
+        ValueError: If parameters are invalid or would cause overflow
     """
-    # Validate inputs
-    if model_size_gb <= 0 or available_memory_gb <= 0:
-        raise ValueError("Model size and available memory must be positive")
-    if sequence_length <= 0 or hidden_size <= 0 or num_layers <= 0:
-        raise ValueError("Model dimensions must be positive")
-    if pipeline_parallel_size <= 0:
-        raise ValueError("Pipeline parallel size must be positive")
-
-    # Estimate memory per sample based on precision
-    precision_bytes = {"fp16": 2, "bf16": 2, "fp32": 4, "fp64": 8}
-    bytes_per_element = precision_bytes.get(precision.lower(), 2)
-
-    # Activation memory per layer per sample
-    if activation_checkpoint:
-        # Only need to store one layer at a time
-        activation_memory = hidden_size * sequence_length * bytes_per_element * 2
-    else:
-        # Store all layer activations
-        activation_memory = (
-            hidden_size * sequence_length * bytes_per_element * num_layers * 2
+    # Comprehensive input validation
+    if not (0 < model_size_gb < 1000):  # Reasonable bounds
+        raise ValueError(f"Model size must be in (0, 1000) GB, got {model_size_gb}")
+    if not (0 < available_memory_gb < 1000):
+        raise ValueError(
+            f"Available memory must be in (0, 1000) GB, got {available_memory_gb}"
+        )
+    if not (1 <= sequence_length <= 1_000_000):  # Prevent overflow
+        raise ValueError(f"Sequence length must be in [1, 1M], got {sequence_length}")
+    if not (1 <= hidden_size <= 100_000):
+        raise ValueError(f"Hidden size must be in [1, 100K], got {hidden_size}")
+    if not (1 <= num_layers <= 1000):
+        raise ValueError(f"Number of layers must be in [1, 1000], got {num_layers}")
+    if not (1 <= pipeline_parallel_size <= 1000):
+        raise ValueError(
+            f"Pipeline parallel size must be in [1, 1000], got {pipeline_parallel_size}"
         )
 
-    activation_memory_gb = activation_memory / GB_TO_BYTES
-
-    # Model memory (divided by pipeline parallel)
-    model_memory_per_gpu = model_size_gb / pipeline_parallel_size
-
-    # Optimizer states based on optimizer type
-    optimizer_multipliers = {
-        "adam": 2.0,  # momentum and variance
-        "adamw": 2.0,  # momentum and variance
-        "sgd": 1.0,  # only momentum
-        "lamb": 2.0,  # similar to Adam
+    # Precision mapping with validation
+    precision_bytes = {
+        "fp16": BYTES_PER_FP16_ELEMENT,
+        "bf16": BYTES_PER_BF16_ELEMENT,
+        "fp32": BYTES_PER_FP32_ELEMENT,
+        "fp64": BYTES_PER_FP64_ELEMENT,
     }
-    optimizer_multiplier = optimizer_multipliers.get(optimizer_type.lower(), 2.0)
+    precision_lower = precision.lower()
+    if precision_lower not in precision_bytes:
+        raise ValueError(
+            f"Unknown precision: {precision}. "
+            f"Valid options: {list(precision_bytes.keys())}"
+        )
+
+    bytes_per_element = precision_bytes[precision_lower]
+
+    # Safe integer arithmetic to prevent overflow
+    try:
+        # Calculate activation memory per sample (in bytes)
+        base_activation_elements = hidden_size * sequence_length
+
+        if activation_checkpoint:
+            # Store only sqrt(num_layers) checkpoints + 1 layer of activations
+            checkpoint_layers = max(1, int(math.sqrt(num_layers)))
+            activation_elements = base_activation_elements * checkpoint_layers
+        else:
+            # Store all layer activations
+            activation_elements = base_activation_elements * num_layers
+
+        # Include forward + backward activations
+        total_activation_elements = int(
+            activation_elements * ACTIVATION_MEMORY_MULTIPLIER
+        )
+
+        # Convert to GB with overflow protection
+        if total_activation_elements > (
+            2**50 // bytes_per_element
+        ):  # Prevent overflow
+            logger.warning(
+                f"Activation memory calculation would overflow, using fallback"
+            )
+            return MIN_BATCH_SIZE
+
+        activation_memory_bytes = total_activation_elements * bytes_per_element
+        activation_memory_gb = activation_memory_bytes / GB_TO_BYTES
+
+    except (OverflowError, ValueError) as e:
+        logger.warning(f"Overflow in memory calculation: {e}")
+        return MIN_BATCH_SIZE
+
+    # Model memory per GPU (safely divided)
+    model_memory_per_gpu = model_size_gb / max(1, pipeline_parallel_size)
+
+    # Optimizer memory using safe lookup
+    optimizer_multiplier = OPTIMIZER_STATE_MULTIPLIERS.get(
+        optimizer_type.lower(), OPTIMIZER_STATE_MULTIPLIERS["adam"]  # Default to Adam
+    )
     optimizer_memory = model_memory_per_gpu * optimizer_multiplier
 
-    # Available for activations
-    available_for_activations = (
-        available_memory_gb - model_memory_per_gpu - optimizer_memory
-    )
-    available_for_activations *= MEMORY_SAFETY_MARGIN  # Safety margin
+    # Calculate available memory with safety margin
+    total_fixed_memory = model_memory_per_gpu + optimizer_memory
+    if total_fixed_memory >= available_memory_gb:
+        logger.warning(
+            f"Fixed memory ({total_fixed_memory:.2f} GB) exceeds "
+            f"available memory ({available_memory_gb:.2f} GB)"
+        )
+        return MIN_BATCH_SIZE
 
-    # Calculate microbatch size
-    if available_for_activations > 0:
-        microbatch_size = int(available_for_activations / activation_memory_gb)
-        # Round to power of 2 for efficiency
-        microbatch_size = 2 ** int(math.log2(max(1, microbatch_size)))
-        return max(1, microbatch_size)
-    else:
-        return 1
+    available_for_activations = available_memory_gb - total_fixed_memory
+    available_for_activations *= MEMORY_SAFETY_MARGIN
+
+    # Calculate microbatch size with proper bounds checking
+    if available_for_activations <= 0 or activation_memory_gb <= 0:
+        return MIN_BATCH_SIZE
+
+    # Safe division and rounding
+    raw_microbatch_size = available_for_activations / activation_memory_gb
+    if raw_microbatch_size < 1:
+        return MIN_BATCH_SIZE
+
+    # Round down to nearest power of 2 for memory alignment efficiency
+    microbatch_size = int(raw_microbatch_size)
+    if microbatch_size > 1:
+        # Find largest power of 2 <= microbatch_size
+        power_of_2 = 1 << (microbatch_size.bit_length() - 1)
+        microbatch_size = power_of_2
+
+    # Final bounds check
+    return max(
+        MIN_BATCH_SIZE,
+        min(microbatch_size, MAX_SAFE_BATCH_SIZE // (sequence_length or 1)),
+    )
 
 
 def get_microbatch_schedule(
