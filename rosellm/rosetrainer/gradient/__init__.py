@@ -17,6 +17,13 @@ from .decoupled_grad import (
     DecoupledGradientManager,
     StorageMode,
 )
+from .finalization import (
+    AdvancedGradientFinalizer,
+    GradientDataType,
+    GradientDataTypeManager,
+    create_gradient_data_type_manager,
+    finalize_gradients_advanced,
+)
 from .finalizer import GradientFinalizer
 from .strategies import (
     BucketedGradientSync,
@@ -39,6 +46,12 @@ __all__ = [
     "SimpleGradientSync",
     "BucketedGradientSync",
     "HierarchicalGradientSync",
+    # Advanced Gradient Finalization
+    "AdvancedGradientFinalizer",
+    "GradientDataType",
+    "GradientDataTypeManager",
+    "create_gradient_data_type_manager",
+    "finalize_gradients_advanced",
     # Decoupled Gradients
     "DecoupledGradientBuffer",
     "DecoupledGradientConfig",

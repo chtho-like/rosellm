@@ -761,6 +761,14 @@ class TestIntegrationWithRoseTrainer(unittest.TestCase):
             sync_on_accumulation=False,
             gradient_stats_interval=100,
             include_gradient_histograms=False,
+            enable_advanced_finalization=False,
+            master_precision="fp32",
+            communication_precision=None,
+            enable_gradient_compression=False,
+            compression_threshold_mb=10.0,
+            normalize_gradients=False,
+            advanced_sync_order=None,
+            finalization_verbose=False,
         )
 
         # Convert to GradientClipConfig

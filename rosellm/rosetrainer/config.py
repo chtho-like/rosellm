@@ -6,7 +6,7 @@ and automatic validation of training parameters.
 """
 
 from enum import Enum
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -105,6 +105,34 @@ class GradientConfig(BaseModel):
     )
     include_gradient_histograms: bool = Field(
         False, description="Include gradient histograms in stats (expensive)"
+    )
+
+    # Advanced gradient finalization
+    enable_advanced_finalization: bool = Field(
+        False,
+        description="Enable advanced gradient finalization with multi-precision",
+    )
+    master_precision: Literal["fp32", "fp16", "bf16"] = Field(
+        "fp32", description="Master precision for gradient storage and accumulation"
+    )
+    communication_precision: Optional[Literal["fp32", "fp16", "bf16"]] = Field(
+        None,
+        description="Precision for gradient communication (None uses master_precision)",
+    )
+    enable_gradient_compression: bool = Field(
+        False, description="Enable gradient compression for communication"
+    )
+    compression_threshold_mb: float = Field(
+        10.0, gt=0, description="Size threshold in MB for applying compression"
+    )
+    normalize_gradients: bool = Field(
+        False, description="Normalize gradients across parallelism dimensions"
+    )
+    advanced_sync_order: Optional[List[str]] = Field(
+        None, description="Custom synchronization order for parallelism dimensions"
+    )
+    finalization_verbose: bool = Field(
+        False, description="Enable verbose logging for gradient finalization"
     )
 
     @field_validator("clip_value")
@@ -267,6 +295,95 @@ class PositionEmbeddingConfig(BaseModel):
             raise ValueError("ALiBi embeddings require alibi_num_heads")
 
         return self
+
+
+class RandomConfig(BaseModel):
+    """Random number generation configuration with parallel support."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    # Enable advanced RNG management
+    enabled: bool = Field(
+        True, description="Enable advanced parallel RNG state management"
+    )
+
+    # Base seed configuration
+    seed: int = Field(1234, ge=0, description="Base seed for RNG initialization")
+
+    # Multi-parallel seed offsets
+    tensor_parallel_seed_offset: int = Field(
+        0, ge=0, description="Offset for tensor parallel RNG seeds"
+    )
+    pipeline_parallel_seed_offset: int = Field(
+        100000, ge=0, description="Offset for pipeline parallel RNG seeds"
+    )
+    data_parallel_seed_offset: int = Field(
+        200000, ge=0, description="Offset for data parallel RNG seeds"
+    )
+    context_parallel_seed_offset: int = Field(
+        300000, ge=0, description="Offset for context parallel RNG seeds"
+    )
+    expert_parallel_seed_offset: int = Field(
+        400000, ge=0, description="Offset for expert parallel RNG seeds"
+    )
+
+    # Deterministic behavior
+    enable_deterministic: bool = Field(
+        True, description="Enable deterministic algorithms for reproducibility"
+    )
+
+    # CUDA Graph compatibility
+    enable_cuda_graphs: bool = Field(
+        False, description="Enable CUDA Graph compatibility for RNG states"
+    )
+
+    # Performance and caching
+    cache_capacity: int = Field(
+        1000, ge=100, le=10000, description="Maximum number of cached RNG states"
+    )
+    auto_cleanup: bool = Field(
+        True, description="Automatically clean up unused RNG states"
+    )
+
+    # State management
+    checkpoint_rng_state: bool = Field(
+        True, description="Include RNG state in model checkpoints"
+    )
+    synchronize_on_init: bool = Field(
+        False, description="Synchronize RNG states across ranks on initialization"
+    )
+
+    # Monitoring and debugging
+    verbose: bool = Field(False, description="Enable verbose RNG logging")
+    track_state_usage: bool = Field(
+        False, description="Track RNG state usage statistics"
+    )
+
+    # Advanced features
+    enable_state_forking: bool = Field(
+        True, description="Enable advanced RNG state forking capabilities"
+    )
+    fork_offset_range: Tuple[int, int] = Field(
+        (0, 1000), description="Range for automatic fork offsets"
+    )
+
+    @field_validator("fork_offset_range")
+    def validate_fork_offset_range(cls, v):
+        start, end = v
+        if start >= end:
+            raise ValueError("fork_offset_range start must be less than end")
+        if start < 0:
+            raise ValueError("fork_offset_range start must be non-negative")
+        return v
+
+    @field_validator("seed")
+    def validate_seed(cls, v):
+        if v < 0:
+            raise ValueError("seed must be non-negative")
+        # Ensure seed is within valid range for most RNG implementations
+        if v >= 2**32:
+            raise ValueError("seed must be less than 2^32 for compatibility")
+        return v
 
 
 class MemoryConfig(BaseModel):
@@ -512,6 +629,15 @@ def _default_position_embedding() -> PositionEmbeddingConfig:
     return PositionEmbeddingConfig()  # type: ignore[call-arg]
 
 
+def _default_random() -> RandomConfig:
+    """Create default random configuration.
+
+    Returns:
+        RandomConfig: Default random settings with parallel RNG enabled
+    """
+    return RandomConfig()  # type: ignore[call-arg]
+
+
 class TrainingConfig(BaseModel):
     """Main training configuration with validation."""
 
@@ -544,6 +670,7 @@ class TrainingConfig(BaseModel):
     position_embedding: PositionEmbeddingConfig = Field(
         default_factory=_default_position_embedding
     )
+    random: RandomConfig = Field(default_factory=_default_random)
 
     # Checkpointing
     checkpoint_interval: int = Field(DEFAULT_CHECKPOINT_INTERVAL, ge=1)
@@ -698,6 +825,10 @@ def validate_config(config: Union[dict, TrainingConfig]) -> TrainingConfig:
             validated.position_embedding = PositionEmbeddingConfig(
                 **validated.position_embedding.model_dump()
             )
+
+        # Validate random config
+        if hasattr(validated, "random"):
+            validated.random = RandomConfig(**validated.random.model_dump())
 
     except Exception as e:
         raise ValueError(f"Sub-configuration validation failed: {e}")

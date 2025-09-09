@@ -276,11 +276,13 @@ class TestAdaptiveMicrobatchCalculator:
     @patch("torch.cuda.memory_allocated")
     @patch("torch.cuda.memory_reserved")
     @patch("torch.cuda.get_device_properties")
+    @patch("torch.cuda.current_device")
     def test_memory_based_adjustment(
-        self, mock_props, mock_reserved, mock_allocated, mock_cuda
+        self, mock_current_device, mock_props, mock_reserved, mock_allocated, mock_cuda
     ):
         """Test memory-based microbatch size adjustment."""
         mock_cuda.return_value = True
+        mock_current_device.return_value = 0  # Mock current device as 0
         mock_allocated.return_value = 4 * 1024**3  # 4 GB
         mock_reserved.return_value = 8 * 1024**3  # 8 GB
 

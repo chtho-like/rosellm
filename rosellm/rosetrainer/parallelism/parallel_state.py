@@ -21,7 +21,7 @@ import warnings
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch.distributed as dist
 
@@ -101,6 +101,10 @@ _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK: Optional[int] = None
 # Sequence parallel settings
 _SEQUENCE_PARALLEL_ENABLED: bool = False
 _SEQUENCE_PARALLEL_GROUP: Optional[dist.ProcessGroup] = None  # Same as TP group
+
+# RNG state management
+_RNG_STATE_INITIALIZED: bool = False
+_RNG_TRACKER_CONFIG: Optional[Dict[str, Any]] = None
 
 
 def initialize_model_parallel(
@@ -199,6 +203,11 @@ def initialize_model_parallel(
     _create_parallel_groups(order, hierarchical_context_parallel_sizes)
 
     _INITIALIZED = True
+
+    # Initialize RNG state management if configuration provided
+    global _RNG_STATE_INITIALIZED, _RNG_TRACKER_CONFIG
+    # Initialize with default RNG configuration
+    _initialize_rng_state_management()
 
 
 def _create_parallel_groups(
@@ -792,3 +801,213 @@ def disable_sequence_parallel() -> None:
     global _SEQUENCE_PARALLEL_ENABLED
     with _STATE_LOCK:
         _SEQUENCE_PARALLEL_ENABLED = False
+
+
+# RNG State Management Integration Functions
+
+
+def _initialize_rng_state_management(config: Optional[Dict[str, Any]] = None) -> None:
+    """
+    Initialize RNG state management with parallel configuration.
+
+    Args:
+        config: RNG configuration dictionary
+    """
+    global _RNG_STATE_INITIALIZED, _RNG_TRACKER_CONFIG
+
+    try:
+        from ..random import (
+            initialize_cuda_rng_tracker,
+            model_parallel_cuda_manual_seed,
+        )
+
+        # Default configuration
+        default_config = {
+            "enable_cuda_graphs": False,
+            "cache_capacity": 1000,
+            "auto_cleanup": True,
+            "verbose": False,
+            "base_seed": 1234,
+            "enable_deterministic": True,
+        }
+
+        # Merge with provided config
+        rng_config = {**default_config, **(config or {})}
+        _RNG_TRACKER_CONFIG = rng_config
+
+        # Initialize RNG tracker
+        initialize_cuda_rng_tracker(
+            enable_cuda_graphs=rng_config["enable_cuda_graphs"],
+            cache_capacity=rng_config["cache_capacity"],
+            auto_cleanup=rng_config["auto_cleanup"],
+            verbose=rng_config["verbose"],
+        )
+
+        # Initialize parallel RNG seeds
+        model_parallel_cuda_manual_seed(
+            seed=rng_config["base_seed"],
+            enable_deterministic=rng_config["enable_deterministic"],
+            verbose=rng_config["verbose"],
+        )
+
+        _RNG_STATE_INITIALIZED = True
+
+        if rng_config["verbose"]:
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.info("Initialized parallel RNG state management")
+
+    except ImportError as e:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Failed to initialize RNG state management: {e}")
+        _RNG_STATE_INITIALIZED = False
+
+
+def initialize_parallel_rng(
+    seed: int = 1234,
+    enable_cuda_graphs: bool = False,
+    cache_capacity: int = 1000,
+    auto_cleanup: bool = True,
+    enable_deterministic: bool = True,
+    verbose: bool = False,
+) -> None:
+    """
+    Initialize parallel-aware RNG state management.
+
+    Args:
+        seed: Base seed for RNG initialization
+        enable_cuda_graphs: Enable CUDA Graph compatibility
+        cache_capacity: Maximum cached RNG states
+        auto_cleanup: Enable automatic cleanup
+        enable_deterministic: Enable deterministic operations
+        verbose: Enable verbose logging
+    """
+    config = {
+        "base_seed": seed,
+        "enable_cuda_graphs": enable_cuda_graphs,
+        "cache_capacity": cache_capacity,
+        "auto_cleanup": auto_cleanup,
+        "enable_deterministic": enable_deterministic,
+        "verbose": verbose,
+    }
+
+    _initialize_rng_state_management(config)
+
+
+def is_rng_state_initialized() -> bool:
+    """Check if RNG state management is initialized."""
+    return _RNG_STATE_INITIALIZED
+
+
+def get_rng_tracker_config() -> Optional[Dict[str, Any]]:
+    """Get the current RNG tracker configuration."""
+    return _RNG_TRACKER_CONFIG.copy() if _RNG_TRACKER_CONFIG else None
+
+
+def set_parallel_rng_state(
+    parallel_dimension: str, state_name: Optional[str] = None
+) -> None:
+    """
+    Set RNG state for a specific parallel dimension.
+
+    Args:
+        parallel_dimension: Parallel dimension ("tp", "pp", "dp", "cp", "ep", "global")
+        state_name: Specific state name (None for dimension default)
+    """
+    if not _RNG_STATE_INITIALIZED:
+        warnings.warn("RNG state management not initialized")
+        return
+
+    try:
+        from ..random import set_parallel_rng_state
+
+        # Map short names to full names
+        dimension_map = {
+            "tp": "tensor_parallel",
+            "pp": "pipeline_parallel",
+            "dp": "data_parallel",
+            "cp": "context_parallel",
+            "ep": "expert_parallel",
+            "global": "global",
+        }
+
+        full_dimension = dimension_map.get(parallel_dimension, parallel_dimension)
+        set_parallel_rng_state(full_dimension, state_name)
+
+    except ImportError:
+        warnings.warn("RNG state management not available")
+
+
+def get_parallel_rng_state(
+    parallel_dimension: str = "global",
+) -> Optional[Dict[str, Any]]:
+    """
+    Get RNG state for a specific parallel dimension.
+
+    Args:
+        parallel_dimension: Parallel dimension to query
+
+    Returns:
+        RNG state information or None if not available
+    """
+    if not _RNG_STATE_INITIALIZED:
+        return None
+
+    try:
+        from ..random import get_parallel_rng_state
+
+        # Map short names to full names
+        dimension_map = {
+            "tp": "tensor_parallel",
+            "pp": "pipeline_parallel",
+            "dp": "data_parallel",
+            "cp": "context_parallel",
+            "ep": "expert_parallel",
+            "global": "global",
+        }
+
+        full_dimension = dimension_map.get(parallel_dimension, parallel_dimension)
+        return get_parallel_rng_state(full_dimension)
+
+    except ImportError:
+        return None
+
+
+def checkpoint_parallel_rng() -> Optional[Dict[str, Any]]:
+    """
+    Create a checkpoint of all parallel RNG states.
+
+    Returns:
+        RNG checkpoint data or None if not available
+    """
+    if not _RNG_STATE_INITIALIZED:
+        return None
+
+    try:
+        from ..random import checkpoint_parallel_rng_state
+
+        return checkpoint_parallel_rng_state()
+    except ImportError:
+        return None
+
+
+def restore_parallel_rng(checkpoint: Dict[str, Any]) -> None:
+    """
+    Restore parallel RNG states from checkpoint.
+
+    Args:
+        checkpoint: RNG checkpoint data
+    """
+    if not _RNG_STATE_INITIALIZED:
+        warnings.warn("RNG state management not initialized")
+        return
+
+    try:
+        from ..random import restore_parallel_rng_state
+
+        restore_parallel_rng_state(checkpoint)
+    except ImportError:
+        warnings.warn("RNG state management not available")
