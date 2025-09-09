@@ -19,16 +19,16 @@ References:
 [1] ZeRO: Memory Optimizations Toward Training Trillion Parameter Models
 [2] DeepSpeed: Extreme-scale Model Training for Everyone
 [3] FairScale: A general purpose modular PyTorch library for high performance
-[4] Megatron-LM: Training Multi-Billion Parameter Language Models Using GPU Model Parallelism
+[4] Megatron-LM: Training Multi-Billion Parameter Language Models Using GPU
+    Model Parallelism
 """
 
 import logging
 import threading
 import time
-import warnings
-from collections import defaultdict, deque
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set
 
 import torch
 import torch.distributed as dist
@@ -37,16 +37,14 @@ from torch.optim import Optimizer
 
 from ..parallelism import parallel_state
 from .activation_checkpoint import ActivationCheckpointing, MemoryProfiler
-from .cpu_offload import CPUOffloadOptimizer, ParameterOffloader
+from .cpu_offload import CPUOffloadOptimizer
 from .distributed_checkpoint import (
     DistributedActivationCheckpointing,
     DistributedCheckpointConfig,
-    DistributedMemoryProfiler,
 )
 from .mixed_precision import MixedPrecisionManager, PrecisionType
-from .param_grad_buffer import BufferManager, ParamAndGradBuffer
+from .param_grad_buffer import BufferManager
 from .parameter_overlap import AsyncParameterGatherer, OverlapConfig
-from .selective_recompute import SelectiveCheckpointConfig, SelectiveRecomputeManager
 
 logger = logging.getLogger(__name__)
 
@@ -243,9 +241,9 @@ class DistributedMemoryCoordinator:
         self.last_sync_time = time.time()
 
         # Coordination decisions
-        self.offload_decisions: Dict[str, Set[int]] = (
-            {}
-        )  # parameter_name -> ranks_to_offload
+        self.offload_decisions: Dict[
+            str, Set[int]
+        ] = {}  # parameter_name -> ranks_to_offload
         self.checkpoint_decisions: Dict[str, bool] = {}
         self.precision_decisions: Dict[str, PrecisionType] = {}
 
@@ -393,7 +391,7 @@ class DistributedMemoryCoordinator:
 
     def _perform_memory_balancing(self) -> List[Dict[str, Any]]:
         """Perform memory balancing actions."""
-        actions = []
+        actions: List[Dict[str, Any]] = []
 
         if not self.memory_balances:
             return actions
@@ -747,9 +745,10 @@ class DistributedMemoryOptimizer:
         if step % self.config.sync_loss_scale_frequency == 0:
             if parallel_state.is_initialized() and self.mixed_precision is not None:
                 try:
-                    # Simplified synchronization - actual implementation may use different API
+                    # Simplified synchronization - actual implementation may
+                    # use different API
                     stats["scale_synchronized"] = True
-                    stats["synchronized_scale"] = 1.0  # Placeholder
+                    stats["synchronized_scale"] = int(1)  # Placeholder
                 except Exception as e:
                     logger.warning(f"Failed to synchronize loss scale: {e}")
                     stats["scale_synchronized"] = False
@@ -824,9 +823,13 @@ class DistributedMemoryOptimizer:
                 "config": {
                     "enable_memory_balancing": self.config.enable_memory_balancing,
                     "coordinate_cpu_offloading": self.config.coordinate_cpu_offloading,
-                    "coordinate_precision_scaling": self.config.coordinate_precision_scaling,
-                    "enable_distributed_buffering": self.config.enable_distributed_buffering,
-                    "enable_parameter_overlap": self.config.enable_parameter_overlap,
+                    "coordinate_precision_scaling": (
+                        self.config.coordinate_precision_scaling
+                    ),
+                    "enable_distributed_buffering": (
+                        self.config.enable_distributed_buffering
+                    ),
+                    "enable_parameter_overlap": (self.config.enable_parameter_overlap),
                 },
             },
             "coordination": coordinator_stats,

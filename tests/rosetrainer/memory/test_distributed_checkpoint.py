@@ -16,13 +16,10 @@ Test Categories:
 8. Performance and benchmark tests
 """
 
-from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
 
 # Import the modules we're testing
@@ -35,10 +32,6 @@ from rosellm.rosetrainer.memory.distributed_checkpoint import (
     DistributedMemoryStats,
     create_distributed_checkpointing,
 )
-from rosellm.rosetrainer.memory.selective_recompute import (
-    SelectionStrategy,
-    SelectiveCheckpointConfig,
-)
 
 
 class TestDistributedCheckpointConfig:
@@ -49,9 +42,9 @@ class TestDistributedCheckpointConfig:
         config = DistributedCheckpointConfig()
 
         assert config.strategy == DistributedCheckpointStrategy.COORDINATED
-        assert config.coordinate_across_tp == True
-        assert config.coordinate_across_pp == False
-        assert config.enable_load_balancing == True
+        assert config.coordinate_across_tp is True
+        assert config.coordinate_across_pp is False
+        assert config.enable_load_balancing is True
 
     def test_config_validation_success(self):
         """Test successful configuration validation."""
@@ -233,7 +226,7 @@ class TestDistributedCheckpointCoordinator:
 
             # Should always return True for single rank
             decision = coordinator.coordinate_checkpoint_decision("test_layer")
-            assert decision == True
+            assert decision is True
 
     def test_coordination_stats(self):
         """Test coordination statistics generation."""
@@ -303,7 +296,13 @@ class TestDistributedActivationCheckpointing:
 
         # Test with None layer
         with pytest.raises(ValueError, match="Layer cannot be None"):
-            checkpointing.checkpoint_layer_distributed(None, torch.randn(4, 8))
+            layer = None
+            # Use cast to bypass type checking for testing None case
+            from typing import cast
+
+            checkpointing.checkpoint_layer_distributed(
+                cast(nn.Module, layer), torch.randn(4, 8)
+            )
 
     def test_profiling_report_generation(self):
         """Test generation of distributed profiling report."""
@@ -360,7 +359,11 @@ class TestDistributedCheckpointingIntegration:
                 )
 
             def forward(self, x):
-                for layer in self.transformer.h:
+                # Properly iterate over ModuleList
+                from typing import cast
+
+                h_layers = cast(nn.ModuleList, self.transformer["h"])
+                for layer in h_layers:
                     x = layer(x)
                 return x
 
@@ -388,8 +391,8 @@ class TestDistributedCheckpointingIntegration:
         assert (
             checkpointing.config.strategy == DistributedCheckpointStrategy.HIERARCHICAL
         )
-        assert checkpointing.config.coordinate_across_tp == True
-        assert checkpointing.config.enable_load_balancing == True
+        assert checkpointing.config.coordinate_across_tp is True
+        assert checkpointing.config.enable_load_balancing is True
 
 
 class TestDistributedCheckpointingPerformance:
@@ -528,7 +531,7 @@ class TestMultiRankSimulation:
         config = DistributedCheckpointConfig()
         coordinator = DistributedCheckpointCoordinator(config)
 
-        assert coordinator.is_distributed == True
+        assert coordinator.is_distributed is True
         assert coordinator.world_size == 4
         assert coordinator.rank == 0
 
@@ -546,7 +549,8 @@ class TestMultiRankSimulation:
         "rosellm.rosetrainer.parallelism.parallel_state.get_tensor_model_parallel_group"
     )
     @patch(
-        "rosellm.rosetrainer.parallelism.parallel_state.get_pipeline_model_parallel_group"
+        "rosellm.rosetrainer.parallelism.parallel_state."
+        "get_pipeline_model_parallel_group"
     )
     @patch("rosellm.rosetrainer.parallelism.parallel_state.get_data_parallel_group")
     @patch("rosellm.rosetrainer.parallelism.parallel_state.get_context_parallel_group")
@@ -554,7 +558,8 @@ class TestMultiRankSimulation:
         "rosellm.rosetrainer.parallelism.parallel_state.get_expert_model_parallel_group"
     )
     @patch(
-        "rosellm.rosetrainer.parallelism.parallel_state.get_pipeline_model_parallel_size"
+        "rosellm.rosetrainer.parallelism.parallel_state."
+        "get_pipeline_model_parallel_size"
     )
     @patch("rosellm.rosetrainer.parallelism.parallel_state.get_data_parallel_size")
     @patch("rosellm.rosetrainer.parallelism.parallel_state.get_context_parallel_size")
@@ -565,7 +570,8 @@ class TestMultiRankSimulation:
         "rosellm.rosetrainer.parallelism.parallel_state.get_tensor_model_parallel_rank"
     )
     @patch(
-        "rosellm.rosetrainer.parallelism.parallel_state.get_pipeline_model_parallel_rank"
+        "rosellm.rosetrainer.parallelism.parallel_state."
+        "get_pipeline_model_parallel_rank"
     )
     @patch("rosellm.rosetrainer.parallelism.parallel_state.get_data_parallel_rank")
     @patch("rosellm.rosetrainer.parallelism.parallel_state.get_context_parallel_rank")

@@ -1,9 +1,12 @@
 """
 Distributed Transformer Layers with Advanced Activation Checkpointing
 
-This module provides transformer layer implementations optimized for distributed training
-with comprehensive activation checkpointing support across all parallelism dimensions.
-It integrates with the distributed checkpointing infrastructure to provide memory-efficient
+This module provides transformer layer implementations optimized for
+distributed training
+with comprehensive activation checkpointing support across all parallelism
+dimensions.
+It integrates with the distributed checkpointing infrastructure to provide
+memory-efficient
 training of large transformer models.
 
 Key Features:
@@ -24,7 +27,6 @@ References:
 
 import logging
 import math
-import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -38,13 +40,11 @@ from .distributed_checkpoint import (
     DistributedCheckpointConfig,
 )
 from .model_parallel_checkpoint import (
-    ColumnParallelLinearCheckpoint,
     MLPCheckpoint,
     ModelParallelCheckpointConfig,
     MultiHeadAttentionCheckpoint,
     RowParallelLinearCheckpoint,
 )
-from .selective_recompute import SelectiveCheckpointConfig
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,8 @@ class DistributedLayerNorm(nn.Module):
         super().__init__()
 
         self.config = config or ModelParallelCheckpointConfig()
-        self.normalized_shape = normalized_shape
+        # Will be updated below to proper tuple type
+        self.normalized_shape: Union[int, List[int], torch.Size, Tuple[int, ...]]
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         self.sequence_parallel = sequence_parallel
@@ -103,9 +104,10 @@ class DistributedLayerNorm(nn.Module):
                     else self.normalized_shape
                 )
 
-            return F.layer_norm(
+            result: torch.Tensor = F.layer_norm(
                 input, normalized_shape, self.weight, self.bias, self.eps
             )
+            return result
 
     def _sequence_parallel_forward(self, input: Tensor) -> Tensor:
         """Forward with sequence parallel optimization."""
@@ -126,7 +128,10 @@ class DistributedLayerNorm(nn.Module):
                 else self.normalized_shape
             )
 
-        return F.layer_norm(input, normalized_shape, self.weight, self.bias, self.eps)
+        result: torch.Tensor = F.layer_norm(
+            input, normalized_shape, self.weight, self.bias, self.eps
+        )
+        return result
 
 
 class DistributedEmbedding(nn.Module):
@@ -166,9 +171,10 @@ class DistributedEmbedding(nn.Module):
 
         # Calculate parallel dimensions
         if self.tensor_parallel and self.tp_size > 1:
-            assert (
-                embedding_dim % self.tp_size == 0
-            ), f"embedding_dim ({embedding_dim}) must be divisible by tp_size ({self.tp_size})"
+            assert embedding_dim % self.tp_size == 0, (
+                f"embedding_dim ({embedding_dim}) must be divisible by "
+                f"tp_size ({self.tp_size})"
+            )
             self.embedding_dim_per_partition = embedding_dim // self.tp_size
             self.vocab_start_index = self.tp_rank * (num_embeddings // self.tp_size)
             self.vocab_end_index = (self.tp_rank + 1) * (num_embeddings // self.tp_size)
@@ -318,7 +324,8 @@ class DistributedPositionalEncoding(nn.Module):
                 pos_emb = self.pe[:seq_len]  # type: ignore[index]
 
         x = x + pos_emb.unsqueeze(0)
-        return self.dropout(x)
+        result: torch.Tensor = self.dropout(x)
+        return result
 
 
 class DistributedTransformerEncoderLayer(nn.Module):
@@ -729,7 +736,8 @@ class DistributedTransformerModel(nn.Module):
         # Final normalization
         output = self.encoder_norm(output)
 
-        return output
+        result: Tensor = output
+        return result
 
     def decode(
         self,
@@ -769,16 +777,22 @@ class DistributedTransformerModel(nn.Module):
         # Output projection
         logits = self.output_projection(output)
 
-        return logits
+        result: Tensor = logits
+        return result
 
     def generate_square_subsequent_mask(self, sz: int) -> Tensor:
-        """Generate a square mask for the sequence. The masked positions are filled with float('-inf')."""
+        """Generate a square mask for the sequence. The masked positions are
+        filled with float('-inf').
+        """
         mask = torch.triu(torch.ones(sz, sz) * float("-inf"), diagonal=1)
         return mask
 
     def get_checkpointing_report(self) -> Dict[str, Any]:
         """Get comprehensive checkpointing report."""
-        return self.distributed_checkpointing.get_distributed_profiling_report()
+        result: Dict[
+            str, Any
+        ] = self.distributed_checkpointing.get_distributed_profiling_report()
+        return result
 
     def reset_checkpointing_stats(self) -> None:
         """Reset checkpointing statistics."""

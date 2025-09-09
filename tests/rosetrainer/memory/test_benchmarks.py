@@ -20,8 +20,8 @@ import gc
 import statistics
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-from unittest.mock import MagicMock, patch
+from typing import Any, Dict, List, Optional
+from unittest.mock import patch
 
 import psutil
 import pytest
@@ -32,7 +32,6 @@ from rosellm.rosetrainer.memory.distributed_checkpoint import (
     DistributedActivationCheckpointing,
     DistributedCheckpointConfig,
     DistributedCheckpointStrategy,
-    create_distributed_checkpointing,
 )
 from rosellm.rosetrainer.memory.distributed_memory_optimizer import (
     DistributedMemoryConfig,
@@ -40,7 +39,6 @@ from rosellm.rosetrainer.memory.distributed_memory_optimizer import (
 )
 from rosellm.rosetrainer.memory.distributed_strategies import (
     CommunicationPattern,
-    create_distributed_strategy,
     estimate_communication_cost,
 )
 from rosellm.rosetrainer.memory.model_parallel_checkpoint import (
@@ -82,7 +80,7 @@ class BenchmarkSuite:
 
         # Run benchmark
         start_time = time.perf_counter()
-        result = func(*args, **kwargs)
+        func(*args, **kwargs)
         end_time = time.perf_counter()
 
         # Measure final memory
@@ -408,7 +406,6 @@ class CommunicationBenchmarks(BenchmarkSuite):
         with patch("torch.distributed.get_world_size", return_value=4), patch(
             "torch.distributed.get_rank", return_value=0
         ):
-
             checkpointing = DistributedActivationCheckpointing(config)
 
             layer = nn.Linear(512, 512)
@@ -470,7 +467,8 @@ class ModelParallelBenchmarks(BenchmarkSuite):
             result = self.run_benchmark(create_and_use_layer, f"mp_{layer_name}")
 
             print(
-                f"{layer_name}: {result.execution_time_ms:.2f}ms, {result.memory_usage_mb:.2f}MB"
+                f"{layer_name}: {result.execution_time_ms:.2f}ms, "
+                f"{result.memory_usage_mb:.2f}MB"
             )
 
     def test_tensor_parallel_scaling(self):
@@ -483,7 +481,8 @@ class ModelParallelBenchmarks(BenchmarkSuite):
 
             # Mock tensor parallel size
             with patch(
-                "rosellm.rosetrainer.parallelism.parallel_state.get_tensor_model_parallel_size",
+                "rosellm.rosetrainer.parallelism.parallel_state."
+                "get_tensor_model_parallel_size",
                 return_value=tp_size,
             ):
                 manager = ModelParallelActivationManager(config)
@@ -700,7 +699,8 @@ class TestBenchmarkSuite:
         summary = benchmarks.get_summary()
         print("Communication benchmark summary:")
         print(
-            f"  Mean coordination time: {summary['execution_time_stats']['mean_ms']:.2f}ms"
+            f"  Mean coordination time: "
+            f"{summary['execution_time_stats']['mean_ms']:.2f}ms"
         )
 
     def test_run_model_parallel_benchmarks(self):
@@ -784,7 +784,8 @@ def run_comprehensive_benchmarks():
         if "error" not in results:
             print(f"  Benchmarks run: {results['total_benchmarks']}")
             print(
-                f"  Mean execution time: {results['execution_time_stats']['mean_ms']:.2f}ms"
+                f"  Mean execution time: "
+                f"{results['execution_time_stats']['mean_ms']:.2f}ms"
             )
             print(f"  Mean memory usage: {results['memory_stats']['mean_mb']:.2f}MB")
 

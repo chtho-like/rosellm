@@ -25,15 +25,12 @@ import enum
 import logging
 import math
 import threading
-import time
-import warnings
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Set, cast
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 
 from ..parallelism import parallel_state
 from .distributed_checkpoint import (
@@ -43,7 +40,6 @@ from .distributed_checkpoint import (
 from .selective_recompute import (
     BaseSelectionStrategy,
     LayerProfile,
-    SelectionStrategy,
     SelectiveCheckpointConfig,
 )
 
@@ -91,18 +87,18 @@ class CommunicationCost:
             CommunicationPattern.ALL_GATHER,
         ]:
             # O(log n) for tree-based algorithms
-            scaling_factor = math.log2(max(self.num_participants, 2))
+            scaling_factor = int(math.log2(max(self.num_participants, 2)))
         elif self.pattern == CommunicationPattern.POINT_TO_POINT:
             # O(1) for direct communication
-            scaling_factor = 1.0
+            scaling_factor = 1
         elif self.pattern == CommunicationPattern.BROADCAST:
             # O(log n) for tree-based broadcast
-            scaling_factor = math.log2(max(self.num_participants, 2))
+            scaling_factor = int(math.log2(max(self.num_participants, 2)))
         elif self.pattern == CommunicationPattern.REDUCE_SCATTER:
             # O(log n) for tree-based reduce-scatter
-            scaling_factor = math.log2(max(self.num_participants, 2))
+            scaling_factor = int(math.log2(max(self.num_participants, 2)))
         else:
-            scaling_factor = 1.0
+            scaling_factor = 1
 
         return bandwidth_time * scaling_factor + latency_time
 
@@ -157,7 +153,9 @@ class DistributedLayerProfile(LayerProfile):
 
 
 class DistributedCoordinatedStrategy(BaseSelectionStrategy):
-    """Coordinated strategy that synchronizes decisions across specified parallel dimensions."""
+    """Coordinated strategy that synchronizes decisions across specified
+    parallel dimensions.
+    """
 
     def __init__(self, config: SelectiveCheckpointConfig) -> None:
         super().__init__(config)
@@ -197,9 +195,9 @@ class DistributedCoordinatedStrategy(BaseSelectionStrategy):
             self.rank = 0
             self.tp_size = self.pp_size = self.dp_size = self.cp_size = self.ep_size = 1
             self.tp_rank = self.pp_rank = self.dp_rank = self.cp_rank = self.ep_rank = 0
-            self.tp_group = self.pp_group = self.dp_group = self.cp_group = (
-                self.ep_group
-            ) = None
+            self.tp_group = (
+                self.pp_group
+            ) = self.dp_group = self.cp_group = self.ep_group = None
 
         # Coordination cache
         self.coordination_cache: Dict[str, bool] = {}
@@ -330,9 +328,9 @@ class DistributedLoadBalancedStrategy(BaseSelectionStrategy):
         self.last_memory_update = 0
 
         # Load balancing state
-        self.checkpoint_assignments: Dict[str, Set[int]] = (
-            {}
-        )  # layer_id -> set of ranks
+        self.checkpoint_assignments: Dict[
+            str, Set[int]
+        ] = {}  # layer_id -> set of ranks
         self.target_memory_per_rank = 0.0
 
         # Thread safety
@@ -836,7 +834,9 @@ class DistributedPipelineAwareStrategy(BaseSelectionStrategy):
 
 
 class DistributedAdaptiveStrategy(BaseSelectionStrategy):
-    """Adaptive strategy that dynamically selects the best approach based on runtime conditions."""
+    """Adaptive strategy that dynamically selects the best approach based on
+    runtime conditions.
+    """
 
     def __init__(self, config: SelectiveCheckpointConfig) -> None:
         super().__init__(config)
@@ -921,11 +921,11 @@ class DistributedAdaptiveStrategy(BaseSelectionStrategy):
                         len(self.strategy_memory_efficiency[strategy])
                         > self.performance_window
                     ):
-                        self.strategy_memory_efficiency[strategy] = (
-                            self.strategy_memory_efficiency[strategy][
-                                -self.performance_window :
-                            ]
-                        )
+                        self.strategy_memory_efficiency[
+                            strategy
+                        ] = self.strategy_memory_efficiency[strategy][
+                            -self.performance_window :
+                        ]
         else:
             self.strategy_performance[self.current_strategy].append(
                 current_metrics["performance"]
@@ -939,7 +939,8 @@ class DistributedAdaptiveStrategy(BaseSelectionStrategy):
 
         if best_strategy != self.current_strategy:
             logger.info(
-                f"Switching distributed strategy from {self.current_strategy} to {best_strategy}"
+                f"Switching distributed strategy from {self.current_strategy} "
+                f"to {best_strategy}"
             )
             self.current_strategy = best_strategy
 

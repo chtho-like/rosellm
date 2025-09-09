@@ -28,17 +28,10 @@ Usage Example:
 import logging
 from typing import Any, Dict, Optional, Union
 
-import torch
 import torch.nn as nn
-from torch.optim import Optimizer
 
 from ..parallelism import parallel_state
-from .distributed_checkpoint import DistributedCheckpointStrategy
-from .distributed_memory_optimizer import (
-    DistributedMemoryConfig,
-    DistributedMemoryOptimizer,
-    create_distributed_memory_optimizer,
-)
+from .distributed_memory_optimizer import create_distributed_memory_optimizer
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +137,8 @@ def create_distributed_trainer_config(
     base_config: Dict[str, Any],
     distributed_strategy: str = "hierarchical",
     enable_advanced_checkpointing: bool = True,
-    memory_optimization_level: str = "balanced",  # "conservative", "balanced", "aggressive"
+    memory_optimization_level: str = "balanced",  # "conservative", "balanced",
+    # "aggressive"
 ) -> Dict[str, Any]:
     """Create training configuration optimized for distributed checkpointing.
 
@@ -197,7 +191,7 @@ def create_distributed_trainer_config(
             "enable_distributed_profiling": True,
         }
 
-    distributed_config["memory_optimization"] = memory_config
+    distributed_config["memory_optimization"] = dict(memory_config)
 
     # Model parallel settings
     if enable_advanced_checkpointing:
@@ -208,7 +202,7 @@ def create_distributed_trainer_config(
             "sync_row_parallel_activations": True,
             "overlap_communication_computation": True,
         }
-        distributed_config["model_parallel"] = model_parallel_config
+        distributed_config["model_parallel"] = dict(model_parallel_config)
 
     config.update(distributed_config)
 
@@ -216,7 +210,8 @@ def create_distributed_trainer_config(
 
 
 def get_optimal_distributed_strategy() -> str:
-    """Determine optimal distributed checkpointing strategy based on current parallelism setup.
+    """Determine optimal distributed checkpointing strategy based on current
+    parallelism setup.
 
     Returns:
         Recommended distributed checkpointing strategy name
@@ -325,7 +320,8 @@ def auto_integrate_distributed_checkpointing(trainer: Any) -> Any:
     if hasattr(trainer, "model"):
         savings_estimate = estimate_memory_savings(trainer.model, strategy)
         logger.info(
-            f"Estimated memory savings: {savings_estimate['estimated_savings_gb']:.2f} GB "
+            f"Estimated memory savings: "
+            f"{savings_estimate['estimated_savings_gb']:.2f} GB "
             f"({savings_estimate['savings_percentage']:.1f}%) with {strategy} strategy"
         )
 

@@ -16,10 +16,7 @@ Test Categories:
 7. Memory efficiency benchmarks
 """
 
-import gc
-import time
-from typing import Any, Dict, List, Optional, Tuple
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -37,10 +34,6 @@ from rosellm.rosetrainer.memory.distributed_memory_optimizer import (
     DistributedMemoryCoordinator,
     DistributedMemoryOptimizer,
     MemoryBalance,
-)
-from rosellm.rosetrainer.memory.model_parallel_checkpoint import (
-    ModelParallelActivationManager,
-    ModelParallelCheckpointConfig,
 )
 
 
@@ -219,7 +212,7 @@ class TestMemoryImbalanceCorrection:
 
             result = coordinator.balance_memory_across_ranks(100)
 
-            assert result["balanced"] == False
+            assert result["balanced"] is False
             assert result["reason"] == "not_distributed"
 
     @patch("torch.distributed.all_gather_object")
@@ -234,7 +227,6 @@ class TestMemoryImbalanceCorrection:
         ), patch("torch.distributed.get_world_size", return_value=4), patch(
             "torch.distributed.get_rank", return_value=0
         ):
-
             coordinator = DistributedMemoryCoordinator(config)
 
             # Mock memory balances showing imbalance
@@ -254,7 +246,7 @@ class TestMemoryImbalanceCorrection:
             result = coordinator.balance_memory_across_ranks(100)
 
             # Should attempt balancing due to imbalance
-            assert result["balanced"] == True
+            assert result["balanced"] is True
             assert "imbalance_ratio" in result
             assert result["imbalance_ratio"] > 1.0
 
@@ -292,7 +284,6 @@ class TestMemoryProfilingAccuracy:
         ), patch(
             "torch.cuda.synchronize", return_value=None
         ):
-
             stats = profiler.profile_memory_distributed("test_layer", "before")
 
             # Check accuracy (allowing for floating point precision)
@@ -374,7 +365,7 @@ class TestLoadBalancingEffectiveness:
         integrated_model = memory_optimizer.integrate_with_model()
 
         assert integrated_model is not None
-        assert memory_optimizer.fully_integrated == True
+        assert memory_optimizer.fully_integrated is True
 
         # Should be callable - ensure input dtype matches model
         test_input = torch.randn(4, 128)
@@ -703,9 +694,17 @@ class TestMemoryValidationIntegration:
 
 
 # Custom pytest marks for different test categories
-pytest.mark.memory_validation = pytest.mark.memory_validation
-pytest.mark.integration = pytest.mark.integration
-pytest.mark.benchmark = pytest.mark.benchmark
+class MarkGenerator:
+    """Generator for pytest marks to avoid linting issues."""
+
+    def __init__(self):
+        self.memory_validation = pytest.mark.memory_validation
+        self.integration = pytest.mark.integration
+        self.benchmark = pytest.mark.benchmark
+
+
+# Create mark generator instance
+marks = MarkGenerator()
 
 
 if __name__ == "__main__":

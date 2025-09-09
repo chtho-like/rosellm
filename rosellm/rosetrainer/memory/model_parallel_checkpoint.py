@@ -21,13 +21,12 @@ References:
 [4] FairScale Model Parallelism
 """
 
-import functools
 import logging
 import threading
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -41,7 +40,6 @@ from .distributed_checkpoint import (
     DistributedCheckpointCoordinator,
     DistributedMemoryProfiler,
 )
-from .selective_recompute import SelectiveCheckpointConfig
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +245,8 @@ class TensorParallelCheckpointFunction(Function):
                         outputs = ctx.run_function(*inputs)
                 except Exception as e:
                     logger.error(
-                        f"Tensor parallel recomputation failed for {ctx.layer_type}: {e}"
+                        f"Tensor parallel recomputation failed for "
+                        f"{ctx.layer_type}: {e}"
                     )
                     raise
 
@@ -326,9 +325,10 @@ class ColumnParallelLinearCheckpoint(nn.Module):
             self.tp_group = None
 
         # Calculate parallel dimensions
-        assert (
-            out_features % self.tp_size == 0
-        ), f"out_features ({out_features}) must be divisible by tp_size ({self.tp_size})"
+        assert out_features % self.tp_size == 0, (
+            f"out_features ({out_features}) must be divisible by "
+            f"tp_size ({self.tp_size})"
+        )
         self.out_features_per_partition = out_features // self.tp_size
 
         # Initialize weight and bias
@@ -573,9 +573,10 @@ class MultiHeadAttentionCheckpoint(nn.Module):
             self.tp_rank = 0
 
         # Calculate attention dimensions
-        assert (
-            num_attention_heads % self.tp_size == 0
-        ), f"num_attention_heads ({num_attention_heads}) must be divisible by tp_size ({self.tp_size})"
+        assert num_attention_heads % self.tp_size == 0, (
+            f"num_attention_heads ({num_attention_heads}) must be divisible by "
+            f"tp_size ({self.tp_size})"
+        )
         self.num_attention_heads_per_partition = num_attention_heads // self.tp_size
         self.attention_head_size = hidden_size // num_attention_heads
         self.all_head_size = (
@@ -695,7 +696,7 @@ class MultiHeadAttentionCheckpoint(nn.Module):
         context = context.contiguous().view(batch_size, seq_len, self.all_head_size)
 
         # Output projection
-        output = self.dense(context)
+        output: torch.Tensor = self.dense(context)
 
         return output
 
@@ -781,6 +782,7 @@ class MLPCheckpoint(nn.Module):
             )
 
         # Activation function
+        self.activation: Union[nn.GELU, nn.ReLU, nn.SiLU]
         if activation_function == "gelu":
             self.activation = nn.GELU()
         elif activation_function == "relu":
@@ -795,7 +797,8 @@ class MLPCheckpoint(nn.Module):
         if self.config.checkpoint_mlp_layers:
             return self._checkpointed_forward(hidden_states)
         else:
-            return self._standard_forward(hidden_states)
+            result: torch.Tensor = self._standard_forward(hidden_states)
+        return result
 
     def _standard_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Standard forward pass."""
@@ -824,7 +827,8 @@ class MLPCheckpoint(nn.Module):
         else:
             output = intermediate
 
-        return output
+        result: torch.Tensor = output
+        return result
 
     def _checkpointed_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Checkpointed forward pass."""
@@ -1087,9 +1091,13 @@ class ModelParallelActivationManager:
                 "config": {
                     "checkpoint_attention": self.config.checkpoint_attention_layers,
                     "checkpoint_mlp": self.config.checkpoint_mlp_layers,
-                    "sync_column_parallel": self.config.sync_column_parallel_activations,
+                    "sync_column_parallel": (
+                        self.config.sync_column_parallel_activations
+                    ),
                     "sync_row_parallel": self.config.sync_row_parallel_activations,
-                    "communication_overlap": self.config.overlap_communication_computation,
+                    "communication_overlap": (
+                        self.config.overlap_communication_computation
+                    ),
                 },
                 "layers": layer_info,
             },
