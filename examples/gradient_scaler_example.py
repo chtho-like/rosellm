@@ -16,11 +16,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from rosellm.rosetrainer.mixed_precision import AbstractGradScaler
+from rosellm.rosetrainer.mixed_precision import (
+    AbstractGradScaler,
+)
 from rosellm.rosetrainer.mixed_precision import (
     EnhancedDynamicGradScaler as DynamicGradScaler,
 )
-from rosellm.rosetrainer.mixed_precision import GradScalerConfig
+from rosellm.rosetrainer.mixed_precision import (
+    GradScalerConfig,
+)
 from rosellm.rosetrainer.mixed_precision.gradient_scaler import check_for_inf_and_nan
 
 logging.basicConfig(
