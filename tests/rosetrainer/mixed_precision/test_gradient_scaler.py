@@ -13,21 +13,15 @@ import unittest
 import torch
 import torch.nn as nn
 
-from rosellm.rosetrainer.mixed_precision import (
-    ConstantGradScaler,
-)
+from rosellm.rosetrainer.mixed_precision import ConstantGradScaler
 from rosellm.rosetrainer.mixed_precision import (
     EnhancedDynamicGradScaler as DynamicGradScaler,
 )
-from rosellm.rosetrainer.mixed_precision import (
-    GradScalerConfig,
-)
+from rosellm.rosetrainer.mixed_precision import GradScalerConfig
 from rosellm.rosetrainer.mixed_precision.gradient_scaler import (
     DynamicGradScaler as LegacyDynamicGradScaler,
 )
-from rosellm.rosetrainer.mixed_precision.gradient_scaler import (
-    check_for_inf_and_nan,
-)
+from rosellm.rosetrainer.mixed_precision.gradient_scaler import check_for_inf_and_nan
 
 
 class SimpleModel(nn.Module):

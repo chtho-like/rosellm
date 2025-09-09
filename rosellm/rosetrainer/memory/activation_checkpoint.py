@@ -451,8 +451,8 @@ class ActivationCheckpointing:
 
         # Add selective checkpointing report if available
         if self.selective_manager is not None:
-            report["selective_checkpointing"] = (
-                self.selective_manager.get_profiling_report()
-            )
+            report[
+                "selective_checkpointing"
+            ] = self.selective_manager.get_profiling_report()
 
         return report  # type: ignore[no-any-return]

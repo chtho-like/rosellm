@@ -599,10 +599,12 @@ class DistributedOptimizer(Optimizer):
             offset += numel
 
     @overload
-    def step(self, closure: None = None) -> None: ...
+    def step(self, closure: None = None) -> None:
+        ...
 
     @overload
-    def step(self, closure: Callable[[], float]) -> float: ...
+    def step(self, closure: Callable[[], float]) -> float:
+        ...
 
     def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]:
         """Perform optimization step.

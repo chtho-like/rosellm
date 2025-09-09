@@ -68,9 +68,9 @@ class TensorMemoryPool:
     """Memory pool for reusing tensor buffers in gradient operations."""
 
     def __init__(self) -> None:
-        self._pools: Dict[Tuple[torch.device, torch.dtype, int], List[torch.Tensor]] = (
-            {}
-        )
+        self._pools: Dict[
+            Tuple[torch.device, torch.dtype, int], List[torch.Tensor]
+        ] = {}
         self._lock = threading.Lock()
 
     def get_buffer(

@@ -335,20 +335,20 @@ class GradientFinalizer:
         # Get process groups from parallel state
         if parallel_state.is_initialized():
             self.process_groups["tp"] = parallel_state.get_tensor_model_parallel_group()
-            self.process_groups["pp"] = (
-                parallel_state.get_pipeline_model_parallel_group()
-            )
+            self.process_groups[
+                "pp"
+            ] = parallel_state.get_pipeline_model_parallel_group()
             self.process_groups["dp"] = parallel_state.get_data_parallel_group()
             self.process_groups["cp"] = parallel_state.get_context_parallel_group()
             self.process_groups["ep"] = parallel_state.get_expert_model_parallel_group()
 
             # Combined groups for optimized communication
-            self.process_groups["tp_dp"] = (
-                parallel_state.get_tensor_and_data_parallel_group()
-            )
-            self.process_groups["tp_dp_cp"] = (
-                parallel_state.get_tensor_and_data_parallel_group_with_cp()
-            )
+            self.process_groups[
+                "tp_dp"
+            ] = parallel_state.get_tensor_and_data_parallel_group()
+            self.process_groups[
+                "tp_dp_cp"
+            ] = parallel_state.get_tensor_and_data_parallel_group_with_cp()
             self.process_groups["model"] = parallel_state.get_model_parallel_group()
         else:
             # Fallback to default world group
