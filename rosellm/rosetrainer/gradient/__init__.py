@@ -21,6 +21,7 @@ from .bucketing import (
     GradientBucketManager,
     create_gradient_buckets,
 )
+from .clip_grads import ClipType, GradientClipper, clip_grad_norm, clip_grad_value
 from .config import GradientFinalizationConfig
 from .decoupled_grad import (
     DecoupledGradientBuffer,
@@ -60,6 +61,11 @@ __all__ = [
     "GradientBucketConfig",
     "GradientBucketManager",
     "create_gradient_buckets",
+    # Gradient Clipping
+    "ClipType",
+    "GradientClipper",
+    "clip_grad_norm",
+    "clip_grad_value",
     # Gradient Finalization
     "GradientFinalizationConfig",
     "GradientFinalizer",
