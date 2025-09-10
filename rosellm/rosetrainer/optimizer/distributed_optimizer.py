@@ -21,6 +21,8 @@ from ..utils.gradient_utils import (
 from ..utils.multi_tensor_ops import MultiTensorOperator, multi_tensor_scale
 from .config import DistributedOptimizerConfig
 from .param_range import ParameterPartitioner, ParameterRange
+from .range_aware_gradient_buffer import RangeAwareGradientBuffer
+from .range_buffer_mapping import RangeBufferConfig
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,7 @@ class DistributedOptimizer(Optimizer):
         process_group: Optional[dist.ProcessGroup] = None,
         decoupled_grad_config: Optional[DecoupledGradientConfig] = None,
         model: Optional[nn.Module] = None,
+        range_buffer_config: Optional[RangeBufferConfig] = None,
     ):
         """Initialize distributed optimizer.
 
@@ -75,11 +78,13 @@ class DistributedOptimizer(Optimizer):
             process_group: Process group for communication.
             decoupled_grad_config: Configuration for decoupled gradient storage.
             model: Model for decoupled gradient management.
+            range_buffer_config: Configuration for range-based buffer mapping.
         """
         self.config = config
         self.process_group = process_group or dist.group.WORLD
         self.world_size = dist.get_world_size(self.process_group)
         self.rank = dist.get_rank(self.process_group)
+        self.range_buffer_config = range_buffer_config
 
         # Initialize decoupled gradient manager if configured
         self.decoupled_grad_manager: Optional[DecoupledGradientManager] = None
@@ -137,6 +142,30 @@ class DistributedOptimizer(Optimizer):
 
         # Initialize communication buffers
         self._init_communication_buffers()
+
+        # Initialize range-aware gradient buffer if configured
+        self.range_aware_gradient_buffer: Optional[RangeAwareGradientBuffer] = None
+        if range_buffer_config is not None and self.local_params:
+            try:
+                self.range_aware_gradient_buffer = RangeAwareGradientBuffer(
+                    params=self.local_params,
+                    range_buffer_config=range_buffer_config,
+                    bucket_size_mb=config.reduce_bucket_size_mb,
+                    world_size=self.world_size,
+                    rank=self.rank,
+                    process_group=self.process_group,
+                    enable_profiling=config.verbose,
+                )
+                logger.info(
+                    f"Initialized range-aware gradient buffer with "
+                    f"{len(self.range_aware_gradient_buffer.buckets)} buckets"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to initialize range-aware gradient buffer: {e}. "
+                    f"Falling back to standard gradient handling."
+                )
+                self.range_aware_gradient_buffer = None
 
         # Statistics and state management
         self.step_count = 0
@@ -304,6 +333,13 @@ class DistributedOptimizer(Optimizer):
             # Don't use set_to_none for decoupled gradients as we want to keep buffers
             self.decoupled_grad_manager.zero_gradients(set_to_none=False)
 
+        # Zero range-aware gradient buffer if available
+        if self.range_aware_gradient_buffer is not None:
+            try:
+                self.range_aware_gradient_buffer.reset()
+            except Exception as e:
+                logger.debug(f"Failed to reset range-aware gradient buffer: {e}")
+
         # Zero local gradients
         for param in self.local_params:
             if set_to_none:
@@ -325,7 +361,37 @@ class DistributedOptimizer(Optimizer):
             # Use non-cloning sync for efficiency during reduction
             self.decoupled_grad_manager.sync_gradients_to_params(clone=False)
 
-        # Reduce gradients
+        # Use range-aware gradient buffer if available
+        if self.range_aware_gradient_buffer is not None:
+            try:
+                # Range-aware gradient buffer handles reduction automatically via hooks
+                # Just synchronize all buckets
+                num_synchronized = (
+                    self.range_aware_gradient_buffer.synchronize_all_buckets()
+                )
+                if self.config.verbose and num_synchronized > 0:
+                    logger.debug(f"Synchronized {num_synchronized} gradient buckets")
+
+                # Apply post-divide scaling factor if needed
+                if self.config.gradient_postdivide_factor != 1.0:
+                    grads_to_scale = [
+                        p.grad for p in self.local_params if p.grad is not None
+                    ]
+                    if grads_to_scale:
+                        multi_tensor_scale(
+                            grads_to_scale,
+                            self.config.gradient_postdivide_factor,
+                            self.multi_tensor_operator,
+                        )
+                return
+            except Exception as e:
+                logger.warning(
+                    f"Range-aware gradient reduction failed: {e}. "
+                    f"Falling back to standard gradient reduction."
+                )
+                # Fall through to standard gradient reduction
+
+        # Standard gradient reduction fallback
         if self.config.contiguous_gradients and self.grad_buffer is not None:
             # Pack gradients into contiguous buffer
             offset = 0
@@ -599,10 +665,12 @@ class DistributedOptimizer(Optimizer):
             offset += numel
 
     @overload
-    def step(self, closure: None = None) -> None: ...
+    def step(self, closure: None = None) -> None:
+        ...
 
     @overload
-    def step(self, closure: Callable[[], float]) -> float: ...
+    def step(self, closure: Callable[[], float]) -> float:
+        ...
 
     def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]:
         """Perform optimization step.
@@ -775,7 +843,7 @@ class DistributedOptimizer(Optimizer):
         Returns:
             Dictionary with memory usage in MB.
         """
-        memory_stats = {}
+        memory_stats: Dict[str, float] = {}
 
         # Parameter memory
         param_memory = sum(p.numel() * p.element_size() for p in self.local_params)
@@ -797,7 +865,33 @@ class DistributedOptimizer(Optimizer):
                     state_memory += v.numel() * v.element_size()
         memory_stats["optimizer_states_mb"] = state_memory / (1024 * 1024)
 
+        # Range-aware gradient buffer memory
+        if self.range_aware_gradient_buffer is not None:
+            try:
+                range_stats = self.range_aware_gradient_buffer.get_memory_usage()
+                memory_stats.update(
+                    {
+                        "range_buffer_allocated_mb": range_stats["total_allocated_mb"],
+                        "range_buffer_used_mb": range_stats["total_used_mb"],
+                        "range_buffer_fragmentation": range_stats[
+                            "fragmentation_ratio"
+                        ],
+                        "gradient_buffers_mb": range_stats["gradient_buffers_mb"],
+                        "num_gradient_buckets": range_stats["num_buckets"],
+                        "num_memory_ranges": range_stats["num_ranges"],
+                    }
+                )
+            except Exception as e:
+                logger.debug(f"Failed to get range buffer memory stats: {e}")
+                # Don't add error strings to numeric stats dict
+
         # Total memory
-        memory_stats["total_mb"] = sum(memory_stats.values())
+        base_memory = (
+            memory_stats["parameters_mb"]
+            + memory_stats["gradients_mb"]
+            + memory_stats["optimizer_states_mb"]
+        )
+        range_memory = memory_stats.get("range_buffer_allocated_mb", 0.0)
+        memory_stats["total_mb"] = base_memory + range_memory
 
         return memory_stats

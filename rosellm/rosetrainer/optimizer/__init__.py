@@ -30,6 +30,23 @@ from .param_grad_mapping import (
     ReductionStrategy,
 )
 from .param_range import ParameterPartitioner, ParameterRange
+from .range_aware_gradient_buffer import (
+    GradientReductionStats,
+    RangeAwareBucket,
+    RangeAwareGradientBuffer,
+)
+from .range_buffer_mapping import (
+    BufferAllocationMode,
+    BufferRange,
+    RangeBufferConfig,
+    RangeBufferMapper,
+    RangeBufferStrategy,
+)
+from .range_multi_tensor_ops import (
+    RangeMultiTensorOperator,
+    create_range_multi_tensor_operator,
+    multi_tensor_range_scale,
+)
 
 __all__ = [
     # Core classes
@@ -37,6 +54,20 @@ __all__ = [
     "DistributedOptimizerConfig",
     "ParameterPartitioner",
     "ParameterRange",
+    # Range-based buffer mapping
+    "RangeBufferConfig",
+    "RangeBufferMapper",
+    "RangeBufferStrategy",
+    "BufferAllocationMode",
+    "BufferRange",
+    # Range-aware gradient buffer
+    "RangeAwareGradientBuffer",
+    "RangeAwareBucket",
+    "GradientReductionStats",
+    # Range multi-tensor operations
+    "RangeMultiTensorOperator",
+    "create_range_multi_tensor_operator",
+    "multi_tensor_range_scale",
     # Multi-Tensor Adam Optimizer
     "MultiTensorAdam",
     "MultiTensorAdamConfig",
@@ -55,7 +86,6 @@ __all__ = [
     # Factory and utilities
     "OptimizerFactory",
     "MemoryProfiler",
-    "MemoryStats",
     # Enums
     "PartitioningStrategy",
 ]
