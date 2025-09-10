@@ -32,14 +32,17 @@ References:
 """
 
 import logging
+import threading
 import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
+
+from .memory_pool import CoalescingMemoryPool
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,9 @@ class CoalescingConfig:
         adaptive_sizing: Dynamically adjust coalesce size based on performance
         profile_communication: Enable detailed communication profiling
         fallback_on_error: Fallback to non-coalesced mode on errors
+        min_coalesce_size_mb: Minimum coalesce size in MB
+        size_adjustment_factor: Factor for adaptive size adjustments
+        max_performance_history: Maximum entries in performance history
     """
 
     enable_coalescing: bool = True
@@ -75,6 +81,50 @@ class CoalescingConfig:
     adaptive_sizing: bool = True
     profile_communication: bool = False
     fallback_on_error: bool = True
+    min_coalesce_size_mb: float = 10.0
+    size_adjustment_factor: float = 1.1
+    max_performance_history: int = 100
+    use_memory_pool: bool = True
+    memory_pool_size_mb: float = 100.0
+
+    def __post_init__(self):
+        """Validate configuration parameters."""
+        if self.max_coalesce_size_mb <= 0:
+            raise ValueError(
+                f"max_coalesce_size_mb must be positive, "
+                f"got {self.max_coalesce_size_mb}"
+            )
+        if self.min_coalesce_size_mb <= 0:
+            raise ValueError(
+                f"min_coalesce_size_mb must be positive, "
+                f"got {self.min_coalesce_size_mb}"
+            )
+        if self.min_coalesce_size_mb > self.max_coalesce_size_mb:
+            raise ValueError(
+                f"min_coalesce_size_mb ({self.min_coalesce_size_mb}) "
+                f"cannot be greater than max_coalesce_size_mb "
+                f"({self.max_coalesce_size_mb})"
+            )
+        if self.min_buckets_to_coalesce < 1:
+            raise ValueError(
+                f"min_buckets_to_coalesce must be at least 1, "
+                f"got {self.min_buckets_to_coalesce}"
+            )
+        if self.coalesce_timeout_ms <= 0:
+            raise ValueError(
+                f"coalesce_timeout_ms must be positive, "
+                f"got {self.coalesce_timeout_ms}"
+            )
+        if self.size_adjustment_factor <= 0:
+            raise ValueError(
+                f"size_adjustment_factor must be positive, "
+                f"got {self.size_adjustment_factor}"
+            )
+        if self.max_performance_history < 1:
+            raise ValueError(
+                f"max_performance_history must be at least 1, "
+                f"got {self.max_performance_history}"
+            )
 
 
 @dataclass
@@ -148,7 +198,8 @@ class CoalescingManager:
         self.config = config or CoalescingConfig()
         self.metrics = CoalescingMetrics()
 
-        # State management
+        # State management with thread safety
+        self._lock = threading.RLock()
         self.is_coalescing = False
         self.pending_operations: List[Any] = []
         self.coalesce_buffer_size = 0
@@ -157,8 +208,27 @@ class CoalescingManager:
         # Adaptive sizing state
         if self.config.adaptive_sizing:
             self.adaptive_size_mb = self.config.max_coalesce_size_mb
-            self.size_adjustment_factor = 1.1
-            self.performance_history: List[dict] = []
+            self.performance_history: List[Dict[str, float]] = []
+
+        # Memory pool for efficient buffer management
+        self.memory_pool: Optional[CoalescingMemoryPool] = None
+        if self.config.use_memory_pool:
+            # Determine device
+            device = torch.device("cpu")
+            if torch.cuda.is_available() and dist.is_initialized():
+                backend = (
+                    dist.get_backend(self.process_group)
+                    if self.process_group
+                    else dist.get_backend()
+                )
+                if backend == "nccl":
+                    device = torch.device("cuda")
+
+            self.memory_pool = CoalescingMemoryPool(
+                initial_size_mb=self.config.memory_pool_size_mb / 2,
+                max_size_mb=self.config.memory_pool_size_mb,
+                device=device,
+            )
 
         # Check backend support
         if dist.is_initialized() and self.process_group is not None:
@@ -166,7 +236,8 @@ class CoalescingManager:
         elif dist.is_initialized():
             self.backend = dist.get_backend()
         else:
-            self.backend = "gloo"  # Default for non-distributed
+            # Default for non-distributed
+            self.backend = dist.Backend.GLOO  # type: ignore[assignment]
         self.supports_coalescing = self._check_coalescing_support()
 
         if not self.supports_coalescing and self.config.enable_coalescing:
@@ -285,68 +356,85 @@ class CoalescingManager:
         """
         Fallback coalescing implementation for older PyTorch versions.
 
-        This implementation manually batches operations but doesn't achieve
-        the same level of kernel fusion as the native implementation.
+        This implementation batches operations to reduce Python overhead,
+        though it doesn't achieve kernel-level fusion.
         """
-        # For older PyTorch, we can't truly coalesce at the kernel level
-        # but we can at least batch the Python-level calls
         logger.debug("Using fallback coalescing implementation")
         self.metrics.num_fallbacks += 1
 
-        # Return None to indicate no handle is available
-        return None
+        # Collect operations in a batch for reduced Python overhead
+        class FallbackHandle:
+            def __init__(self) -> None:
+                self.handles: List[Any] = []
+
+            def add_handle(self, handle: Any) -> None:
+                if handle is not None:
+                    self.handles.append(handle)
+
+            def wait(self) -> None:
+                """Wait for all collected handles."""
+                for handle in self.handles:
+                    if hasattr(handle, "wait"):
+                        handle.wait()
+
+        return FallbackHandle() if async_ops else None
 
     def _adjust_coalesce_size(self, num_ops: int, total_bytes: int, elapsed_ms: float):
         """
         Adjust coalescing size based on performance history.
 
         Uses a simple heuristic to find the optimal coalescing size
-        that balances latency and throughput.
+        that balances latency and throughput. Thread-safe implementation.
         """
         if not self.config.adaptive_sizing:
             return
 
         # Calculate throughput
-        throughput_gbps = (total_bytes / 1e9) / (elapsed_ms / 1000)
+        if elapsed_ms > 0:
+            throughput_gbps = (total_bytes / 1e9) / (elapsed_ms / 1000)
+        else:
+            throughput_gbps = 0.0
 
-        # Store performance history
-        self.performance_history.append(
-            {
-                "size_mb": total_bytes / 1e6,
-                "num_ops": num_ops,
-                "time_ms": elapsed_ms,
-                "throughput_gbps": throughput_gbps,
-            }
-        )
+        with self._lock:
+            # Store performance history
+            self.performance_history.append(
+                {
+                    "size_mb": total_bytes / 1e6,
+                    "num_ops": float(num_ops),
+                    "time_ms": elapsed_ms,
+                    "throughput_gbps": throughput_gbps,
+                }
+            )
 
-        # Adjust size based on recent performance
-        if len(self.performance_history) >= 5:
-            recent = self.performance_history[-5:]
-            avg_throughput = sum(h["throughput_gbps"] for h in recent) / len(recent)
+            # Adjust size based on recent performance
+            if len(self.performance_history) >= 5:
+                recent = self.performance_history[-5:]
+                avg_throughput = sum(h["throughput_gbps"] for h in recent) / len(recent)
 
-            # If throughput is increasing, try larger sizes
-            if recent[-1]["throughput_gbps"] > avg_throughput * 1.05:
-                self.adaptive_size_mb = min(
-                    self.adaptive_size_mb * self.size_adjustment_factor,
-                    self.config.max_coalesce_size_mb,
-                )
-                logger.debug(
-                    f"Increased coalesce size to {self.adaptive_size_mb:.1f}MB"
-                )
+                # If throughput is increasing, try larger sizes
+                if recent[-1]["throughput_gbps"] > avg_throughput * 1.05:
+                    self.adaptive_size_mb = min(
+                        self.adaptive_size_mb * self.config.size_adjustment_factor,
+                        self.config.max_coalesce_size_mb,
+                    )
+                    logger.debug(
+                        f"Increased coalesce size to {self.adaptive_size_mb:.1f}MB"
+                    )
 
-            # If throughput is decreasing, try smaller sizes
-            elif recent[-1]["throughput_gbps"] < avg_throughput * 0.95:
-                self.adaptive_size_mb = max(
-                    self.adaptive_size_mb / self.size_adjustment_factor,
-                    10.0,  # Minimum 10MB
-                )
-                logger.debug(
-                    f"Decreased coalesce size to {self.adaptive_size_mb:.1f}MB"
-                )
+                # If throughput is decreasing, try smaller sizes
+                elif recent[-1]["throughput_gbps"] < avg_throughput * 0.95:
+                    self.adaptive_size_mb = max(
+                        self.adaptive_size_mb / self.config.size_adjustment_factor,
+                        self.config.min_coalesce_size_mb,
+                    )
+                    logger.debug(
+                        f"Decreased coalesce size to {self.adaptive_size_mb:.1f}MB"
+                    )
 
-            # Trim history to prevent unbounded growth
-            if len(self.performance_history) > 100:
-                self.performance_history = self.performance_history[-50:]
+                # Trim history to prevent unbounded growth
+                if len(self.performance_history) > self.config.max_performance_history:
+                    trim_size = self.config.max_performance_history // 2
+                    self.performance_history = self.performance_history[-trim_size:]
 
     def get_optimal_bucket_size(self) -> float:
         """
@@ -355,20 +443,38 @@ class CoalescingManager:
         Returns:
             Optimal bucket size in MB
         """
-        if self.config.adaptive_sizing and hasattr(self, "adaptive_size_mb"):
-            return self.adaptive_size_mb
-        return self.config.max_coalesce_size_mb
+        with self._lock:
+            if self.config.adaptive_sizing and hasattr(self, "adaptive_size_mb"):
+                return self.adaptive_size_mb
+            return self.config.max_coalesce_size_mb
 
     def reset_metrics(self):
         """Reset performance metrics."""
-        self.metrics = CoalescingMetrics()
-        if self.config.adaptive_sizing:
-            self.performance_history.clear()
-            self.adaptive_size_mb = self.config.max_coalesce_size_mb
+        with self._lock:
+            self.metrics = CoalescingMetrics()
+            if self.config.adaptive_sizing:
+                self.performance_history.clear()
+                self.adaptive_size_mb = self.config.max_coalesce_size_mb
 
     def log_metrics(self):
         """Log summary of coalescing metrics."""
         self.metrics.log_summary()
+        if self.memory_pool:
+            self.memory_pool.log_stats()
+
+    def get_memory_pool_stats(self) -> Optional[Dict[str, float]]:
+        """Get memory pool statistics if available."""
+        if self.memory_pool:
+            return self.memory_pool.get_stats()
+        return None
+
+    def cleanup(self):
+        """Clean up resources used by the manager."""
+        with self._lock:
+            if self.memory_pool:
+                self.memory_pool.clear()
+            self.pending_operations.clear()
+            self.performance_history.clear()
 
 
 class CoalescingError(Exception):

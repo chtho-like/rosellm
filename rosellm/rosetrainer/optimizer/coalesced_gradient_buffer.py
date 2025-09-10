@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 class CoalescedBucket(Bucket):
     """Extended bucket with coalescing-specific metadata."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.coalesce_group_id: Optional[int] = None
         self.bytes_size: int = 0
@@ -228,32 +228,71 @@ class CoalescedGradientBuffer(GradientBuffer):
             return
 
         # Check if all buckets in group are ready
-        if not all(b.is_ready for b in buckets):
+        unready_buckets = [b for b in buckets if not b.is_ready]
+        if unready_buckets:
             logger.warning(
-                f"Coalescing group {group_id} has unready buckets, "
-                f"falling back to individual reductions"
+                f"Coalescing group {group_id} has {len(unready_buckets)} "
+                f"unready buckets, "
+                f"falling back to individual reductions for ready buckets"
             )
-            for bucket in buckets:
-                if bucket.is_ready:
+            # Process only ready buckets
+            ready_buckets = [b for b in buckets if b.is_ready]
+            for bucket in ready_buckets:
+                try:
                     self._reduce_bucket_standard(bucket)
+                except Exception as e:
+                    logger.error(f"Failed to reduce bucket {bucket.index}: {e}")
+                    if (
+                        not self.coalescing_manager
+                        or not self.coalescing_manager.config.fallback_on_error
+                    ):
+                        raise
             return
 
         # Perform coalesced reduction
         if self.coalescing_manager is None:
-            return
-        with self.coalescing_manager.coalesce_context(async_ops=True) as handle:
+            logger.debug("No coalescing manager available, using standard reduction")
             for bucket in buckets:
-                if self.use_distributed_optimizer:
-                    self._reduce_scatter_bucket(bucket, async_op=True)
-                else:
-                    self._all_reduce_bucket(bucket, async_op=True)
+                self._reduce_bucket_standard(bucket)
+            return
 
-                bucket.is_reduced = True
+        try:
+            with self.coalescing_manager.coalesce_context(async_ops=True) as handle:
+                for bucket in buckets:
+                    try:
+                        if self.use_distributed_optimizer:
+                            self._reduce_scatter_bucket(bucket, async_op=True)
+                        else:
+                            self._all_reduce_bucket(bucket, async_op=True)
+                        bucket.is_reduced = True
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to reduce bucket {bucket.index} in "
+                            f"coalesced group: {e}"
+                        )
+                        # Mark bucket as not reduced so it can be retried
+                        bucket.is_reduced = False
+                        if not self.coalescing_manager.config.fallback_on_error:
+                            raise
 
-        # Store handle for later synchronization
-        if handle and hasattr(handle, "wait"):
-            with self.handle_lock:
-                self.active_handles[group_id] = handle
+            # Store handle for later synchronization
+            if handle:
+                with self.handle_lock:
+                    self.active_handles[group_id] = handle
+
+        except Exception as e:
+            logger.error(f"Coalescing failed for group {group_id}: {e}")
+            # Fallback to standard reduction if configured
+            if (
+                self.coalescing_manager
+                and self.coalescing_manager.config.fallback_on_error
+            ):
+                logger.info(f"Falling back to standard reduction for group {group_id}")
+                for bucket in buckets:
+                    if not bucket.is_reduced:
+                        self._reduce_bucket_standard(bucket)
+            else:
+                raise
 
     def _all_reduce_bucket(self, bucket: CoalescedBucket, async_op: bool = True):
         """
@@ -262,25 +301,37 @@ class CoalescedGradientBuffer(GradientBuffer):
         Args:
             bucket: Bucket to reduce
             async_op: Whether to perform asynchronous operation
+
+        Raises:
+            GradientBufferError: If bucket has no gradient buffer
         """
         if bucket.grad_buffer is None:
             raise GradientBufferError(f"Bucket {bucket.index} has no gradient buffer")
 
-        # Scale gradients if needed (e.g., for gradient averaging)
-        world_size = dist.get_world_size(self.process_group)
-        if world_size > 1:
-            bucket.grad_buffer.div_(world_size)
+        try:
+            # Scale gradients if needed (e.g., for gradient averaging)
+            world_size = (
+                dist.get_world_size(self.process_group) if self.process_group else 1
+            )
+            if world_size > 1:
+                bucket.grad_buffer.div_(world_size)
 
-        # Perform all-reduce
-        handle = dist.all_reduce(
-            bucket.grad_buffer,
-            op=dist.ReduceOp.SUM,
-            group=self.process_group,
-            async_op=async_op,
-        )
+            # Perform all-reduce
+            handle = dist.all_reduce(
+                bucket.grad_buffer,
+                op=dist.ReduceOp.SUM,
+                group=self.process_group,
+                async_op=async_op,
+            )
 
-        if async_op and handle:
-            bucket.all_reduce_handle = handle
+            if async_op and handle:
+                bucket.all_reduce_handle = handle
+
+        except Exception as e:
+            logger.error(f"All-reduce failed for bucket {bucket.index}: {e}")
+            raise CommunicationError(
+                f"Failed to all-reduce bucket {bucket.index}: {e}"
+            ) from e
 
     def _reduce_scatter_bucket(self, bucket: CoalescedBucket, async_op: bool = True):
         """
@@ -292,52 +343,74 @@ class CoalescedGradientBuffer(GradientBuffer):
         Args:
             bucket: Bucket to reduce-scatter
             async_op: Whether to perform asynchronous operation
+
+        Raises:
+            GradientBufferError: If bucket configuration is invalid
+            CommunicationError: If reduce-scatter operation fails
         """
         if bucket.grad_buffer is None:
             raise GradientBufferError(f"Bucket {bucket.index} has no gradient buffer")
 
-        world_size = dist.get_world_size(self.process_group)
-        if world_size == 1:
-            return
+        try:
+            world_size = (
+                dist.get_world_size(self.process_group) if self.process_group else 1
+            )
+            if world_size == 1:
+                return
 
-        # Ensure buffer is evenly divisible
-        if bucket.grad_buffer.numel() % world_size != 0:
-            raise GradientBufferError(
-                f"Buffer size {bucket.grad_buffer.numel()} not divisible by "
-                f"world size {world_size} for reduce-scatter"
+            # Ensure buffer is evenly divisible
+            if bucket.grad_buffer.numel() % world_size != 0:
+                # Try to pad the buffer if possible
+                padding_needed = world_size - (bucket.grad_buffer.numel() % world_size)
+                logger.warning(
+                    f"Buffer size {bucket.grad_buffer.numel()} not divisible "
+                    f"by world size {world_size}. "
+                    f"Would need {padding_needed} elements of padding."
+                )
+                raise GradientBufferError(
+                    f"Buffer size {bucket.grad_buffer.numel()} not divisible by "
+                    f"world size {world_size} for reduce-scatter"
+                )
+
+            # Create output buffer for local shard
+            shard_size = bucket.grad_buffer.numel() // world_size
+            output_buffer = torch.zeros(
+                shard_size,
+                dtype=bucket.grad_buffer.dtype,
+                device=bucket.grad_buffer.device,
             )
 
-        # Create output buffer for local shard
-        shard_size = bucket.grad_buffer.numel() // world_size
-        output_buffer = torch.zeros(
-            shard_size, dtype=bucket.grad_buffer.dtype, device=bucket.grad_buffer.device
-        )
+            # Perform reduce-scatter
+            if hasattr(dist, "reduce_scatter_tensor"):
+                handle = dist.reduce_scatter_tensor(
+                    output_buffer,
+                    bucket.grad_buffer,
+                    op=dist.ReduceOp.SUM,
+                    group=self.process_group,
+                    async_op=async_op,
+                )
+            else:
+                # Fallback for older PyTorch versions
+                input_list = list(bucket.grad_buffer.chunk(world_size))
+                handle = dist.reduce_scatter(
+                    output_buffer,
+                    input_list,
+                    op=dist.ReduceOp.SUM,
+                    group=self.process_group,
+                    async_op=async_op,
+                )
 
-        # Perform reduce-scatter
-        if hasattr(dist, "reduce_scatter_tensor"):
-            handle = dist.reduce_scatter_tensor(
-                output_buffer,
-                bucket.grad_buffer,
-                op=dist.ReduceOp.SUM,
-                group=self.process_group,
-                async_op=async_op,
-            )
-        else:
-            # Fallback for older PyTorch versions
-            input_list = list(bucket.grad_buffer.chunk(world_size))
-            handle = dist.reduce_scatter(
-                output_buffer,
-                input_list,
-                op=dist.ReduceOp.SUM,
-                group=self.process_group,
-                async_op=async_op,
-            )
+            if async_op and handle:
+                bucket.all_reduce_handle = handle
 
-        if async_op and handle:
-            bucket.all_reduce_handle = handle
+            # Store the reduced shard
+            bucket.grad_buffer = output_buffer
 
-        # Store the reduced shard
-        bucket.grad_buffer = output_buffer
+        except Exception as e:
+            logger.error(f"Reduce-scatter failed for bucket {bucket.index}: {e}")
+            raise CommunicationError(
+                f"Failed to reduce-scatter bucket {bucket.index}: {e}"
+            ) from e
 
     def _reduce_bucket_standard(self, bucket: CoalescedBucket):
         """Fallback to standard (non-coalesced) bucket reduction."""
@@ -349,16 +422,36 @@ class CoalescedGradientBuffer(GradientBuffer):
 
     def _wait_all_handles(self):
         """Wait for all active communication handles to complete."""
+        failed_groups = []
         with self.handle_lock:
-            for group_id, handle in self.active_handles.items():
-                try:
+            handles_to_wait = list(self.active_handles.items())
+
+        # Wait for handles outside the lock to avoid deadlock
+        for group_id, handle in handles_to_wait:
+            try:
+                if hasattr(handle, "wait"):
                     handle.wait()
-                except Exception as e:
-                    raise CommunicationError(
-                        f"Failed to complete coalesced communication for "
-                        f"group {group_id}: {e}"
-                    )
+                elif hasattr(handle, "handles"):  # Fallback handle
+                    for h in handle.handles:
+                        if hasattr(h, "wait"):
+                            h.wait()
+            except Exception as e:
+                logger.error(
+                    f"Failed to complete coalesced communication for "
+                    f"group {group_id}: {e}"
+                )
+                failed_groups.append((group_id, e))
+
+        # Clear handles after waiting
+        with self.handle_lock:
             self.active_handles.clear()
+
+        # Raise aggregated error if any failures occurred
+        if failed_groups:
+            error_msg = "Communication failures in groups: " + ", ".join(
+                f"{gid} ({str(e)})" for gid, e in failed_groups
+            )
+            raise CommunicationError(error_msg)
 
     def get_coalescing_stats(self) -> Dict[str, Any]:
         """

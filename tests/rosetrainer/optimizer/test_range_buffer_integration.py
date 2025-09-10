@@ -246,6 +246,11 @@ class TestRangeBufferDistributedIntegration:
 
         parameters = list(model.parameters())
 
+        # Import RangeBufferStrategy
+        from rosellm.rosetrainer.optimizer.range_buffer_mapping import (
+            RangeBufferStrategy,
+        )
+
         # Test different strategies
         strategies = [
             RangeBufferStrategy.CONTIGUOUS,
@@ -288,9 +293,6 @@ class TestRangeBufferDistributedIntegration:
         logger.info(f"Rank {rank} memory results: {memory_results}")
 
         # Basic validation - all strategies should work
-        from rosellm.rosetrainer.optimizer.range_buffer_mapping import (
-            RangeBufferStrategy,
-        )
 
         for strategy_name, results in memory_results.items():
             strategy = (
