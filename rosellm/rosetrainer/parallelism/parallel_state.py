@@ -25,6 +25,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch.distributed as dist
 
+from ..memory.global_memory_buffer import (
+    BufferConfig,
+    GlobalMemoryBuffer,
+    initialize_global_memory_buffer,
+)
+
 
 class ParallelismDimension(Enum):
     """Enumeration of parallelism dimensions"""
@@ -98,6 +104,9 @@ _NCCL_CONFIG: Optional[NCCLConfig] = None
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_SIZE: Optional[int] = None
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK: Optional[int] = None
 
+# Global memory buffer for preventing dynamic allocations
+_GLOBAL_MEMORY_BUFFER: Optional[GlobalMemoryBuffer] = None
+
 # Sequence parallel settings
 _SEQUENCE_PARALLEL_ENABLED: bool = False
 _SEQUENCE_PARALLEL_GROUP: Optional[dist.ProcessGroup] = None  # Same as TP group
@@ -119,6 +128,7 @@ def initialize_model_parallel(
     hierarchical_context_parallel_sizes: Optional[List[int]] = None,
     nccl_config: Optional[NCCLConfig] = None,
     backend: str = "nccl",
+    buffer_config: Optional[BufferConfig] = None,
 ) -> None:
     """
     Initialize model parallel groups with multi-dimensional parallelism support.
@@ -135,6 +145,7 @@ def initialize_model_parallel(
         hierarchical_context_parallel_sizes: Nested context parallel group sizes
         nccl_config: NCCL optimization configuration
         backend: Communication backend (nccl, gloo, etc.)
+        buffer_config: Configuration for global memory buffer system
     """
     global _INITIALIZED, _WORLD_SIZE, _RANK
     global _TENSOR_MODEL_PARALLEL_SIZE, _PIPELINE_MODEL_PARALLEL_SIZE
@@ -201,6 +212,12 @@ def initialize_model_parallel(
 
     # Create process groups based on specified order
     _create_parallel_groups(order, hierarchical_context_parallel_sizes)
+
+    # Initialize global memory buffer system
+    global _GLOBAL_MEMORY_BUFFER
+    if buffer_config is not None:
+        initialize_global_memory_buffer(buffer_config)
+        _GLOBAL_MEMORY_BUFFER = GlobalMemoryBuffer()
 
     _INITIALIZED = True
 
@@ -1011,3 +1028,23 @@ def restore_parallel_rng(checkpoint: Dict[str, Any]) -> None:
         restore_parallel_rng_state(checkpoint)
     except ImportError:
         warnings.warn("RNG state management not available")
+
+
+def get_global_memory_buffer() -> Optional[GlobalMemoryBuffer]:
+    """
+    Get the global memory buffer instance.
+
+    Returns:
+        The global memory buffer if initialized, None otherwise
+    """
+    return _GLOBAL_MEMORY_BUFFER
+
+
+def is_global_memory_buffer_initialized() -> bool:
+    """
+    Check if the global memory buffer is initialized.
+
+    Returns:
+        True if the global memory buffer is initialized
+    """
+    return _GLOBAL_MEMORY_BUFFER is not None

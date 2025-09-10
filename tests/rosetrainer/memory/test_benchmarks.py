@@ -149,6 +149,9 @@ class BenchmarkSuite:
 class CheckpointingOverheadBenchmarks(BenchmarkSuite):
     """Benchmarks for checkpointing overhead analysis."""
 
+    def __init__(self):
+        super().__init__()
+
     def test_basic_checkpointing_overhead(self):
         """Benchmark basic checkpointing overhead."""
         config = DistributedCheckpointConfig()
@@ -232,6 +235,9 @@ class CheckpointingOverheadBenchmarks(BenchmarkSuite):
 
 class MemoryScalingBenchmarks(BenchmarkSuite):
     """Benchmarks for memory scaling analysis."""
+
+    def __init__(self):
+        super().__init__()
 
     def test_memory_scaling_with_model_size(self):
         """Test memory scaling with increasing model size."""
@@ -350,6 +356,9 @@ class MemoryScalingBenchmarks(BenchmarkSuite):
 class CommunicationBenchmarks(BenchmarkSuite):
     """Benchmarks for communication coordination."""
 
+    def __init__(self):
+        super().__init__()
+
     def test_communication_cost_estimation(self):
         """Test communication cost estimation accuracy."""
         patterns = [
@@ -429,6 +438,9 @@ class CommunicationBenchmarks(BenchmarkSuite):
 class ModelParallelBenchmarks(BenchmarkSuite):
     """Benchmarks for model parallel checkpointing."""
 
+    def __init__(self):
+        super().__init__()
+
     def test_model_parallel_manager_overhead(self):
         """Test overhead of model parallel activation manager."""
         config = ModelParallelCheckpointConfig()
@@ -500,6 +512,9 @@ class ModelParallelBenchmarks(BenchmarkSuite):
 
 class DistributedMemoryOptimizerBenchmarks(BenchmarkSuite):
     """Benchmarks for distributed memory optimizer."""
+
+    def __init__(self):
+        super().__init__()
 
     def test_memory_optimizer_integration_overhead(self):
         """Test overhead of memory optimizer integration."""
@@ -579,6 +594,9 @@ class DistributedMemoryOptimizerBenchmarks(BenchmarkSuite):
 
 class LargeModelBenchmarks(BenchmarkSuite):
     """Benchmarks for large model scenarios."""
+
+    def __init__(self):
+        super().__init__()
 
     @pytest.mark.slow
     def test_large_transformer_benchmark(self):

@@ -75,7 +75,7 @@ class SharedWeightGradientReducer:
         config: Configuration object with gradient settings
     """
 
-    def __init__(self, config):
+    def __init__(self, config: object) -> None:
         self.config = config
         self.timers = getattr(config, "timers", None)
 
