@@ -3,6 +3,17 @@
 Advanced gradient handling with multi-dimensional parallelism support.
 """
 
+from .accumulation_fusion import (
+    AccumulationState,
+    AsyncReductionOrchestrator,
+    FusedParamGradMapping,
+    FusionConfig,
+    FusionMetrics,
+    FusionStrategy,
+    GradientAccumulationFusion,
+    GradientFusionBuffer,
+    OverlapStrategy,
+)
 from .bucketing import (
     BucketingStrategy,
     GradientBucket,
@@ -33,6 +44,16 @@ from .strategies import (
 )
 
 __all__ = [
+    # Gradient Accumulation Fusion
+    "AccumulationState",
+    "AsyncReductionOrchestrator",
+    "FusedParamGradMapping",
+    "FusionConfig",
+    "FusionMetrics",
+    "FusionStrategy",
+    "GradientAccumulationFusion",
+    "GradientFusionBuffer",
+    "OverlapStrategy",
     # Gradient Bucketing
     "BucketingStrategy",
     "GradientBucket",
