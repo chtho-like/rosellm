@@ -38,6 +38,7 @@ from torch.autograd import Function
 
 from ..parallelism import parallel_state
 from .activation_checkpoint import ActivationCheckpointing, MemoryProfiler
+from .checkpoint_strategies import CheckpointStrategyFactory, create_auto_strategy
 from .selective_recompute import SelectiveCheckpointConfig, SelectiveRecomputeManager
 
 logger = logging.getLogger(__name__)
@@ -1092,10 +1093,46 @@ class DistributedCheckpointCoordinator:
         # Thread safety
         self._lock = threading.RLock() if config.base_config.thread_safe else None
 
+        # Initialize checkpoint strategy
+        self._init_checkpoint_strategy()
+
         if config.verbose_distributed:
             logger.info(
                 f"Initialized DistributedCheckpointCoordinator for rank {self.rank} "
                 f"with strategy: {config.strategy.value}"
+            )
+
+    def _init_checkpoint_strategy(self) -> None:
+        """Initialize the checkpoint strategy based on configuration."""
+        strategy_name = self.config.strategy.value
+
+        # Build strategy configuration
+        strategy_config = {
+            "checkpoint_interval": 3,
+            "memory_threshold_mb": self.config.expert_memory_threshold_mb,
+            "expert_group_size": min(4, self.ep_size) if self.ep_size > 1 else 1,
+            "total_pipeline_stages": self.pp_size,
+            "bubble_optimization": self.config.pipeline_bubble_optimization,
+            "pipeline_stages": self.config.pipeline_checkpoint_stages,
+        }
+
+        try:
+            # Try to create configured strategy
+            self.checkpoint_strategy = CheckpointStrategyFactory.create_strategy(
+                strategy_name, strategy_config
+            )
+        except ValueError:
+            # Fall back to auto strategy
+            logger.warning(
+                f"Unknown strategy '{strategy_name}', using auto-selected strategy"
+            )
+            parallel_config = {
+                "tp_size": self.tp_size,
+                "pp_size": self.pp_size,
+                "ep_size": self.ep_size,
+            }
+            self.checkpoint_strategy = create_auto_strategy(
+                self.world_size, parallel_config
             )
 
     def coordinate_checkpoint_decision(self, layer_id: str) -> bool:
