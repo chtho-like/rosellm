@@ -4,6 +4,7 @@ import torch
 import torch.distributed as dist
 
 from ..memory.global_memory_buffer import BufferType, allocate_tensor, release_tensor
+from .async_linear import register_parameter_for_async_allreduce
 from .parallel_state import get_global_memory_buffer as get_buffer_from_state
 
 # References:
@@ -172,7 +173,11 @@ class TensorParallelism:
         return result
 
     def parallelize_layer(
-        self, layer: torch.nn.Module, tp_type: str
+        self,
+        layer: torch.nn.Module,
+        tp_type: str,
+        enable_async_allreduce: bool = False,
+        layer_name: Optional[str] = None,
     ) -> torch.nn.Module:
         """
         Parallelize a layer according to its type.
@@ -181,6 +186,8 @@ class TensorParallelism:
             layer: The layer to parallelize.
             tp_type: Type of tensor parallelism to apply
                     ('row', 'column', or 'attention').
+            enable_async_allreduce: Enable async gradient allreduce for this layer.
+            layer_name: Name of this layer for async allreduce prioritization.
 
         Returns:
             The parallelized layer.
@@ -194,6 +201,8 @@ class TensorParallelism:
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
                 layer=layer,
+                enable_async_allreduce=enable_async_allreduce,
+                layer_name=layer_name,
             )
         elif tp_type == "column" and isinstance(layer, torch.nn.Linear):
             return ColumnParallelLinear(
@@ -204,6 +213,8 @@ class TensorParallelism:
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
                 layer=layer,
+                enable_async_allreduce=enable_async_allreduce,
+                layer_name=layer_name,
             )
         else:
             # Unsupported layer or type combo
@@ -227,6 +238,8 @@ class ColumnParallelLinear(torch.nn.Module):
         tp_size: int = 1,
         tp_rank: int = 0,
         layer: Optional[torch.nn.Linear] = None,
+        enable_async_allreduce: bool = False,
+        layer_name: Optional[str] = None,
     ) -> None:
         """
         Initialize the column parallel linear layer.
@@ -239,6 +252,8 @@ class ColumnParallelLinear(torch.nn.Module):
             tp_size: Size of tensor parallel group.
             tp_rank: Rank in tensor parallel group.
             layer: Existing layer to parallelize (optional).
+            enable_async_allreduce: Enable async gradient allreduce for this layer.
+            layer_name: Name of this layer for async allreduce prioritization.
         """
         super(ColumnParallelLinear, self).__init__()
 
@@ -251,6 +266,10 @@ class ColumnParallelLinear(torch.nn.Module):
         self.tp_group = tp_group
         self.tp_size = tp_size
         self.tp_rank = tp_rank
+
+        # Async allreduce configuration
+        self.enable_async_allreduce = enable_async_allreduce
+        self.layer_name = layer_name
 
         # Create weights
         if layer is not None:
@@ -273,6 +292,10 @@ class ColumnParallelLinear(torch.nn.Module):
                 self.register_parameter("bias", None)
             self._init_weights()
 
+        # Register parameters for async allreduce if enabled
+        if self.enable_async_allreduce:
+            self._register_async_allreduce()
+
     def _init_weights(self) -> None:
         """Initialize the weights and bias."""
         torch.nn.init.xavier_uniform_(self.weight)
@@ -289,6 +312,13 @@ class ColumnParallelLinear(torch.nn.Module):
         """Split the bias tensor along the output dimension."""
         bias_chunks = torch.split(bias, self.output_size_per_partition, dim=0)
         return bias_chunks[self.tp_rank]
+
+    def _register_async_allreduce(self) -> None:
+        """Register parameters for async gradient allreduce."""
+        register_parameter_for_async_allreduce(self.weight, self.layer_name)
+        if self.bias is not None:
+            bias_layer_name = f"{self.layer_name}_bias" if self.layer_name else None
+            register_parameter_for_async_allreduce(self.bias, bias_layer_name)
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
         """
@@ -323,6 +353,8 @@ class RowParallelLinear(torch.nn.Module):
         tp_rank: int = 0,
         layer: Optional[torch.nn.Linear] = None,
         skip_all_reduce: bool = False,
+        enable_async_allreduce: bool = False,
+        layer_name: Optional[str] = None,
     ) -> None:
         """
         Initialize the row parallel linear layer.
@@ -336,6 +368,8 @@ class RowParallelLinear(torch.nn.Module):
             tp_rank: Rank in tensor parallel group.
             layer: Existing layer to parallelize (optional).
             skip_all_reduce: Whether to skip the all-reduce step.
+            enable_async_allreduce: Enable async gradient allreduce for this layer.
+            layer_name: Name of this layer for async allreduce prioritization.
         """
         super(RowParallelLinear, self).__init__()
 
@@ -349,6 +383,10 @@ class RowParallelLinear(torch.nn.Module):
         self.tp_size = tp_size
         self.tp_rank = tp_rank
         self.skip_all_reduce = skip_all_reduce
+
+        # Async allreduce configuration
+        self.enable_async_allreduce = enable_async_allreduce
+        self.layer_name = layer_name
 
         # Create weights
         if layer is not None:
@@ -369,6 +407,10 @@ class RowParallelLinear(torch.nn.Module):
                 self.register_parameter("bias", None)
             self._init_weights()
 
+        # Register parameters for async allreduce if enabled
+        if self.enable_async_allreduce:
+            self._register_async_allreduce()
+
     def _init_weights(self) -> None:
         """Initialize the weights and bias."""
         torch.nn.init.xavier_uniform_(self.weight)
@@ -380,6 +422,13 @@ class RowParallelLinear(torch.nn.Module):
         # Weight is (out_features, in_features)
         input_chunks = torch.split(weight, self.input_size_per_partition, dim=1)
         return input_chunks[self.tp_rank]
+
+    def _register_async_allreduce(self) -> None:
+        """Register parameters for async gradient allreduce."""
+        register_parameter_for_async_allreduce(self.weight, self.layer_name)
+        if self.bias is not None:
+            bias_layer_name = f"{self.layer_name}_bias" if self.layer_name else None
+            register_parameter_for_async_allreduce(self.bias, bias_layer_name)
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
         """
