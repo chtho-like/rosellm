@@ -9,10 +9,31 @@ This module provides various parallelism strategies for distributed training:
 - Expert Parallelism (EP)
 - ZeRO Optimizer
 - Advanced Parallel State Management
+- Parameter Gathering Overlap with Computation
 """
 
 from .data_parallel import DataParallelTrainer
+from .microbatch_calculator import (
+    AdaptiveMicrobatchCalculator,
+    ConstantNumMicrobatches,
+    MicrobatchCalculatorBase,
+    RampupBatchSizeNumMicrobatches,
+    calculate_optimal_microbatch_size,
+    destroy_microbatch_calculator,
+    get_micro_batch_size,
+    get_microbatch_calculator,
+    get_microbatch_schedule,
+    get_num_microbatches,
+    initialize_microbatch_calculator,
+    update_microbatch_calculator,
+)
 from .model_parallel import ColumnParallelLinear, RowParallelLinear, TensorParallelism
+from .overlap_integration import (
+    OverlappedColumnParallelLinear,
+    OverlappedPipelineEngine,
+    OverlappedRowParallelLinear,
+    convert_to_overlapped_model,
+)
 from .parallel_state import (
     NCCLConfig,
     ParallelismDimension,
@@ -68,10 +89,28 @@ __all__ = [
     "TensorParallelism",
     "ColumnParallelLinear",
     "RowParallelLinear",
+    # Overlap Integration
+    "OverlappedColumnParallelLinear",
+    "OverlappedRowParallelLinear",
+    "OverlappedPipelineEngine",
+    "convert_to_overlapped_model",
     # Pipeline Parallel
     "PipelineParallel",
     "PipelineStage",
     "MicrobatchInfo",
+    # Microbatch Calculator
+    "MicrobatchCalculatorBase",
+    "ConstantNumMicrobatches",
+    "RampupBatchSizeNumMicrobatches",
+    "AdaptiveMicrobatchCalculator",
+    "initialize_microbatch_calculator",
+    "get_microbatch_calculator",
+    "get_num_microbatches",
+    "get_micro_batch_size",
+    "update_microbatch_calculator",
+    "destroy_microbatch_calculator",
+    "calculate_optimal_microbatch_size",
+    "get_microbatch_schedule",
     # Sequence Parallel
     "scatter_to_sequence_parallel_region",
     "gather_from_sequence_parallel_region",

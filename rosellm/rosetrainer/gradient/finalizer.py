@@ -42,6 +42,7 @@ from ..utils.gradient_utils import (
     check_gradient_finite,
     get_gradient_stats,
 )
+from ..utils.multi_tensor_ops import MultiTensorOperator, multi_tensor_clip_grad_norm
 from .config import GradientFinalizationConfig
 from .strategies import (
     BucketedGradientSync,
@@ -304,6 +305,22 @@ class GradientFinalizer:
         self.gradient_buffers: Dict[str, torch.Tensor] = {}
         self._init_gradient_buffers()
 
+        # Initialize multi-tensor operator for optimized operations
+        try:
+            first_param = next(self.model.parameters())
+            device = first_param.device
+        except StopIteration:
+            device = None
+
+        self.multi_tensor_operator = MultiTensorOperator(
+            device=device,
+            enable_benchmarking=(
+                config.enable_timing_stats
+                if hasattr(config, "enable_timing_stats")
+                else False
+            ),
+        )
+
         if config.verbose:
             logger.info(
                 f"Initialized GradientFinalizer with strategy: "
@@ -318,20 +335,20 @@ class GradientFinalizer:
         # Get process groups from parallel state
         if parallel_state.is_initialized():
             self.process_groups["tp"] = parallel_state.get_tensor_model_parallel_group()
-            self.process_groups[
-                "pp"
-            ] = parallel_state.get_pipeline_model_parallel_group()
+            self.process_groups["pp"] = (
+                parallel_state.get_pipeline_model_parallel_group()
+            )
             self.process_groups["dp"] = parallel_state.get_data_parallel_group()
             self.process_groups["cp"] = parallel_state.get_context_parallel_group()
             self.process_groups["ep"] = parallel_state.get_expert_model_parallel_group()
 
             # Combined groups for optimized communication
-            self.process_groups[
-                "tp_dp"
-            ] = parallel_state.get_tensor_and_data_parallel_group()
-            self.process_groups[
-                "tp_dp_cp"
-            ] = parallel_state.get_tensor_and_data_parallel_group_with_cp()
+            self.process_groups["tp_dp"] = (
+                parallel_state.get_tensor_and_data_parallel_group()
+            )
+            self.process_groups["tp_dp_cp"] = (
+                parallel_state.get_tensor_and_data_parallel_group_with_cp()
+            )
             self.process_groups["model"] = parallel_state.get_model_parallel_group()
         else:
             # Fallback to default world group
@@ -746,11 +763,32 @@ class GradientFinalizer:
                 ]
 
                 if params_with_grad:
-                    # Cast to proper type for gradient clipping
-                    params_or_tensors: Union[List[torch.Tensor], nn.Module] = cast(
-                        List[torch.Tensor], [p for p in params_with_grad]
+                    # Use multi-tensor operations for optimized clipping
+                    use_multi_tensor = getattr(
+                        self.config, "use_multi_tensor_ops", True
                     )
-                    clip_stats = apply_gradient_clipping(params_or_tensors, clip_config)
+                    if use_multi_tensor:
+                        # Use optimized multi-tensor clipping
+                        clip_stats = multi_tensor_clip_grad_norm(
+                            params_with_grad,
+                            clip_config.max_norm,
+                            clip_config.norm_type,
+                            self.multi_tensor_operator,
+                        )
+                        # Convert to expected format
+                        clip_stats = {
+                            "clipped": clip_stats["was_clipped"],
+                            "grad_norm": clip_stats["total_norm"],
+                            "clip_coeff": clip_stats["clip_coeff"],
+                        }
+                    else:
+                        # Fall back to standard clipping
+                        params_or_tensors: Union[List[torch.Tensor], nn.Module] = cast(
+                            List[torch.Tensor], [p for p in params_with_grad]
+                        )
+                        clip_stats = apply_gradient_clipping(
+                            params_or_tensors, clip_config
+                        )
                 else:
                     clip_stats = {"clipped": False, "grad_norm": 0.0}
             else:

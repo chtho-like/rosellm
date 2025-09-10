@@ -61,6 +61,77 @@ MIN_GRADIENT_VALUE = -1e10
 # Thread-local storage for gradient accumulation to avoid race conditions
 _thread_local_data = threading.local()
 
+# Memory pool for tensor operations to reduce allocations
+
+
+class TensorMemoryPool:
+    """Memory pool for reusing tensor buffers in gradient operations."""
+
+    def __init__(self) -> None:
+        self._pools: Dict[
+            Tuple[torch.device, torch.dtype, int], List[torch.Tensor]
+        ] = {}
+        self._lock = threading.Lock()
+
+    def get_buffer(
+        self, size: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Get a buffer from the pool or allocate a new one."""
+        key = (device, dtype, size)
+
+        with self._lock:
+            if key in self._pools and self._pools[key]:
+                return self._pools[key].pop()
+
+        return torch.empty(size, device=device, dtype=dtype)
+
+    def return_buffer(self, tensor: torch.Tensor) -> None:
+        """Return a buffer to the pool for reuse."""
+        if tensor.numel() == 0:
+            return
+
+        # Only pool reasonably sized tensors to prevent memory bloat
+        if tensor.numel() > 1e7:  # Don't pool tensors larger than 10M elements
+            return
+
+        key = (tensor.device, tensor.dtype, tensor.numel())
+
+        with self._lock:
+            if key not in self._pools:
+                self._pools[key] = []
+            # Keep pool size reasonable with exponential decay
+            max_pool_size = max(5, min(10, 100 // (tensor.numel() // 1000 + 1)))
+            if len(self._pools[key]) < max_pool_size:
+                # Clear gradients to prevent memory leaks
+                tensor.detach_()
+                tensor.zero_()
+                self._pools[key].append(tensor)
+
+    def clear(self) -> None:
+        """Clear all pooled buffers."""
+        with self._lock:
+            self._pools.clear()
+
+    def cleanup_stale_buffers(self, max_age_seconds: float = 300.0) -> None:
+        """Remove stale buffers that haven't been used recently."""
+        # This is a simplified cleanup - in production you'd track usage timestamps
+        with self._lock:
+            # Remove pools with excessive unused capacity
+            keys_to_remove = []
+            for key, pool in self._pools.items():
+                if len(pool) > 20:  # Too many unused buffers
+                    # Keep only the most recently added ones
+                    self._pools[key] = pool[-5:]
+                elif len(pool) == 0:
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                del self._pools[key]
+
+
+# Global memory pool instance
+_memory_pool = TensorMemoryPool()
+
 
 def _get_accumulation_counters() -> Dict[int, int]:
     """Get thread-local accumulation counters."""
@@ -77,11 +148,85 @@ class ClipType(str, Enum):
     NONE = "none"
 
 
+class GradientErrorRecovery:
+    """Sophisticated error recovery mechanism for gradient operations."""
+
+    def __init__(self, max_retries: int = 3, exponential_backoff: bool = True):
+        self.max_retries = max_retries
+        self.exponential_backoff = exponential_backoff
+        self.error_counts: Dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def execute_with_recovery(
+        self,
+        primary_fn: Callable,
+        fallback_fns: List[Callable],
+        operation_name: str,
+        *args,
+        **kwargs,
+    ) -> Any:
+        """Execute function with automatic fallback chain."""
+        errors = []
+
+        # Try primary function
+        try:
+            return primary_fn(*args, **kwargs)
+        except Exception as e:
+            errors.append((primary_fn.__name__, str(e)))
+            logger.debug(f"{operation_name}: Primary method failed - {e}")
+
+        # Try fallback functions in order
+        for fallback_fn in fallback_fns:
+            try:
+                logger.debug(
+                    f"{operation_name}: Trying fallback {fallback_fn.__name__}"
+                )
+                return fallback_fn(*args, **kwargs)
+            except Exception as e:
+                errors.append((fallback_fn.__name__, str(e)))
+                err_msg = (
+                    f"{operation_name}: Fallback {fallback_fn.__name__} failed - {e}"
+                )
+                logger.debug(err_msg)
+
+        # Record error for monitoring
+        with self._lock:
+            self.error_counts[operation_name] = (
+                self.error_counts.get(operation_name, 0) + 1
+            )
+
+        # All methods failed
+        error_msg = f"{operation_name} failed after trying all methods: {errors}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
+    def reset_error_counts(self) -> None:
+        """Reset error tracking."""
+        with self._lock:
+            self.error_counts.clear()
+
+    def get_error_statistics(self) -> Dict[str, int]:
+        """Get error statistics for monitoring."""
+        with self._lock:
+            return self.error_counts.copy()
+
+
+# Global error recovery instance
+_error_recovery = GradientErrorRecovery()
+
+
 def _performance_monitor(func: F) -> F:
-    """Decorator to monitor performance of gradient operations."""
+    """Decorator to monitor performance of gradient operations.
+
+    Only adds monitoring overhead if logging level is DEBUG or lower.
+    """
 
     @wraps(func)
     def wrapper(*args, **kwargs):
+        # Skip monitoring unless DEBUG level is enabled
+        if logger.getEffectiveLevel() > logging.DEBUG:
+            return func(*args, **kwargs)
+
         start_time = time.perf_counter()
         try:
             result = func(*args, **kwargs)
@@ -307,7 +452,7 @@ def calculate_gradient_norm_multitensor(
     if not gradients:
         logger.debug("No gradients found for norm calculation")
         device = _get_default_device(parameters)
-        return torch.tensor(0.0, device=device)
+        return torch.tensor(0.0, device=device, dtype=torch.float32)
 
     # Try to use multi-tensor operations if requested and available
     if use_multitensor:
@@ -505,21 +650,24 @@ def _group_tensors_by_device_dtype(
     """
     Group tensors by device and dtype for efficient multi-tensor operations.
 
+    Uses single-pass algorithm for O(n) complexity.
+
     Args:
         tensors: List of tensors to group
 
     Returns:
         Dictionary mapping (device, dtype) to list of tensors
     """
-    groups: Dict[Tuple[torch.device, torch.dtype], List[torch.Tensor]] = {}
+    from collections import defaultdict
 
+    groups: Dict[Tuple[torch.device, torch.dtype], List[torch.Tensor]] = defaultdict(
+        list
+    )
     for tensor in tensors:
         key = (tensor.device, tensor.dtype)
-        if key not in groups:
-            groups[key] = []
         groups[key].append(tensor)
 
-    return groups
+    return dict(groups)
 
 
 def _reduce_across_model_parallel_groups(
@@ -570,12 +718,24 @@ def apply_gradient_clipping(
         ValueError: If configuration is invalid
         RuntimeError: If gradient clipping fails
     """
-    # Input validation
+    # Input validation with comprehensive checks
     if not isinstance(config, GradientClipConfig):
         raise ValueError("config must be a GradientClipConfig instance")
 
     if config.clip_type not in ["norm", "value", "none"]:
         raise ValueError(f"Invalid clip_type: {config.clip_type}")
+
+    # Validate tensor compatibility
+    if isinstance(parameters, (list, tuple)):
+        devices = set()
+        for p in parameters:
+            if hasattr(p, "grad") and p.grad is not None:
+                devices.add(p.grad.device)
+
+        if len(devices) > 1:
+            logger.warning(
+                f"Multiple devices detected: {devices}. Performance may be suboptimal."
+            )
 
     stats = {
         "grad_norm": 0.0,
@@ -955,6 +1115,7 @@ def get_gradient_stats(
     parameters: Union[List[torch.nn.Parameter], nn.Module],
     include_histograms: bool = False,
     compute_percentiles: bool = False,
+    cache_results: bool = False,
 ) -> Dict[str, Any]:
     """
     Get comprehensive gradient statistics for monitoring and debugging.
@@ -963,6 +1124,7 @@ def get_gradient_stats(
         parameters: Model parameters or list of tensors
         include_histograms: Whether to include gradient histograms (expensive)
         compute_percentiles: Whether to compute gradient percentiles
+        cache_results: Whether to cache results for repeated calls
 
     Returns:
         Dictionary with gradient statistics including norms, moments,

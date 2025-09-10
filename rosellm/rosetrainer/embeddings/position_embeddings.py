@@ -111,7 +111,7 @@ class SinusoidalPositionEmbedding(nn.Module):
         # Precompute embeddings
         self._init_embeddings()
 
-    def _init_embeddings(self):
+    def _init_embeddings(self) -> None:
         """Initialize sinusoidal embeddings."""
         position = torch.arange(self.max_position_embeddings).unsqueeze(1)
 
