@@ -68,9 +68,9 @@ class TensorMemoryPool:
     """Memory pool for reusing tensor buffers in gradient operations."""
 
     def __init__(self) -> None:
-        self._pools: Dict[Tuple[torch.device, torch.dtype, int], List[torch.Tensor]] = (
-            {}
-        )
+        self._pools: Dict[
+            Tuple[torch.device, torch.dtype, int], List[torch.Tensor]
+        ] = {}
         self._lock = threading.Lock()
 
     def get_buffer(
@@ -90,19 +90,43 @@ class TensorMemoryPool:
         if tensor.numel() == 0:
             return
 
+        # Only pool reasonably sized tensors to prevent memory bloat
+        if tensor.numel() > 1e7:  # Don't pool tensors larger than 10M elements
+            return
+
         key = (tensor.device, tensor.dtype, tensor.numel())
 
         with self._lock:
             if key not in self._pools:
                 self._pools[key] = []
-            # Keep pool size reasonable
-            if len(self._pools[key]) < 10:
+            # Keep pool size reasonable with exponential decay
+            max_pool_size = max(5, min(10, 100 // (tensor.numel() // 1000 + 1)))
+            if len(self._pools[key]) < max_pool_size:
+                # Clear gradients to prevent memory leaks
+                tensor.detach_()
+                tensor.zero_()
                 self._pools[key].append(tensor)
 
     def clear(self) -> None:
         """Clear all pooled buffers."""
         with self._lock:
             self._pools.clear()
+
+    def cleanup_stale_buffers(self, max_age_seconds: float = 300.0) -> None:
+        """Remove stale buffers that haven't been used recently."""
+        # This is a simplified cleanup - in production you'd track usage timestamps
+        with self._lock:
+            # Remove pools with excessive unused capacity
+            keys_to_remove = []
+            for key, pool in self._pools.items():
+                if len(pool) > 20:  # Too many unused buffers
+                    # Keep only the most recently added ones
+                    self._pools[key] = pool[-5:]
+                elif len(pool) == 0:
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                del self._pools[key]
 
 
 # Global memory pool instance

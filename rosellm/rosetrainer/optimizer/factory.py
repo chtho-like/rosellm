@@ -13,6 +13,7 @@ from torch.optim import Optimizer
 
 from .config import DistributedOptimizerConfig, PartitioningStrategy
 from .distributed_optimizer import DistributedOptimizer
+from .multi_tensor_adam import MultiTensorAdam, MultiTensorAdamConfig
 
 
 class OptimizerFactory:
@@ -54,6 +55,23 @@ class OptimizerFactory:
             partition_gradients=False,
             partition_optimizer_states=False,
             contiguous_gradients=False,
+        ),
+        "multi_tensor_performance": DistributedOptimizerConfig(
+            partition_parameters=False,
+            partition_gradients=True,
+            partition_optimizer_states=False,
+            contiguous_gradients=True,
+            overlap_grad_reduce=True,
+            mixed_precision=False,
+        ),
+        "multi_tensor_mixed_precision": DistributedOptimizerConfig(
+            partition_parameters=True,
+            partition_gradients=True,
+            partition_optimizer_states=True,
+            mixed_precision=True,
+            memory_efficient_fp16=True,
+            check_gradients=True,
+            contiguous_gradients=True,
         ),
     }
 
@@ -154,6 +172,8 @@ class OptimizerFactory:
         optimizer_map = {
             "Adam": torch.optim.Adam,
             "AdamW": torch.optim.AdamW,
+            "MultiTensorAdam": MultiTensorAdam,
+            "MultiTensorAdamW": MultiTensorAdam,  # Same class, different config
             "SGD": torch.optim.SGD,
             "RMSprop": torch.optim.RMSprop,
             "Adagrad": torch.optim.Adagrad,
@@ -174,6 +194,24 @@ class OptimizerFactory:
             optimizer_kwargs["weight_decay"] = weight_decay
             optimizer_kwargs["betas"] = (0.9, 0.999)
             optimizer_kwargs["eps"] = 1e-8
+        elif optimizer_name in ["MultiTensorAdam", "MultiTensorAdamW"]:
+            # Import WeightDecayMode for proper type conversion
+            from .multi_tensor_adam import WeightDecayMode
+
+            # Create configuration for multi-tensor Adam
+            optimizer_kwargs["config"] = MultiTensorAdamConfig(
+                lr=lr,
+                weight_decay=weight_decay,
+                betas=(0.9, 0.999),
+                eps=1e-8,
+                weight_decay_mode=(
+                    WeightDecayMode.DECOUPLED
+                    if optimizer_name == "MultiTensorAdamW"
+                    else WeightDecayMode.L2_REGULARIZATION
+                ),
+                use_mixed_precision=bool(config and config.mixed_precision),
+                enable_multi_tensor=True,
+            )
         elif optimizer_name == "SGD":
             optimizer_kwargs["weight_decay"] = weight_decay
             optimizer_kwargs["momentum"] = 0.9
@@ -222,6 +260,86 @@ class OptimizerFactory:
             List of preset names.
         """
         return list(cls.PRESETS.keys())
+
+    @classmethod
+    def create_multi_tensor_optimizer(
+        cls,
+        params: Union[Iterator[nn.Parameter], List[Dict[str, Any]]],
+        optimizer_type: str = "MultiTensorAdamW",
+        lr: float = 1e-4,
+        weight_decay: float = 0.01,
+        mixed_precision: bool = False,
+        max_grad_norm: Optional[float] = None,
+        preset: Optional[str] = None,
+        config: Optional[DistributedOptimizerConfig] = None,
+        process_group: Optional[dist.ProcessGroup] = None,
+        **optimizer_kwargs: Any,
+    ) -> DistributedOptimizer:
+        """Create a multi-tensor optimizer with advanced features.
+
+        Args:
+            params: Model parameters or parameter groups.
+            optimizer_type: Type of multi-tensor optimizer.
+            lr: Learning rate.
+            weight_decay: Weight decay coefficient.
+            mixed_precision: Enable mixed precision training.
+            max_grad_norm: Maximum gradient norm for clipping.
+            preset: Configuration preset name.
+            config: Custom configuration.
+            process_group: Process group for communication.
+            **optimizer_kwargs: Additional optimizer arguments.
+
+        Returns:
+            Configured multi-tensor optimizer.
+
+        Example:
+            >>> optimizer = OptimizerFactory.create_multi_tensor_optimizer(
+            ...     model.parameters(),
+            ...     optimizer_type="MultiTensorAdamW",
+            ...     lr=1e-4,
+            ...     mixed_precision=True,
+            ...     max_grad_norm=1.0,
+            ...     preset="multi_tensor_mixed_precision"
+            ... )
+        """
+        # Choose appropriate preset if not specified
+        if preset is None:
+            if mixed_precision:
+                preset = "multi_tensor_mixed_precision"
+            else:
+                preset = "multi_tensor_performance"
+
+        # Create multi-tensor Adam configuration
+        from .multi_tensor_adam import WeightDecayMode
+
+        mt_config_kwargs = {
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "weight_decay_mode": (
+                WeightDecayMode.DECOUPLED
+                if "AdamW" in optimizer_type
+                else WeightDecayMode.L2_REGULARIZATION
+            ),
+            "use_mixed_precision": mixed_precision,
+            "max_grad_norm": max_grad_norm,
+            "enable_multi_tensor": True,
+            "enable_profiling": False,
+            **optimizer_kwargs,
+        }
+
+        mt_config = MultiTensorAdamConfig(**mt_config_kwargs)
+
+        # Create optimizer kwargs
+        opt_kwargs = {"config": mt_config}
+
+        return cls.create(
+            params=params,
+            optimizer_class=MultiTensorAdam,
+            optimizer_kwargs=opt_kwargs,
+            preset=preset,
+            config=config,
+            process_group=process_group,
+        )
 
     @classmethod
     def describe_preset(cls, name: str) -> Dict[str, Any]:
