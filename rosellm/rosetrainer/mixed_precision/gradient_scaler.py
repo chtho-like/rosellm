@@ -13,7 +13,7 @@ References:
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -420,10 +420,11 @@ def check_for_inf_and_nan(
     parameters: Union[list, nn.Module], scaler: Optional[AbstractGradScaler] = None
 ) -> bool:
     """
-    Check for infinite or NaN values in gradients and update scaler.
+    Check for infinite or NaN values in gradients with optimized multi-tensor
+    operations.
 
-    This function checks all gradients for non-finite values and optionally
-    updates a gradient scaler based on the result.
+    This function efficiently checks all gradients for non-finite values using
+    optimized tensor operations and optionally updates a gradient scaler.
 
     Args:
         parameters: Model or list of parameters to check
@@ -432,21 +433,49 @@ def check_for_inf_and_nan(
     Returns:
         True if any infinite or NaN gradients were found, False otherwise
     """
-    found_inf = False
-
     if isinstance(parameters, nn.Module):
         param_list = list(parameters.parameters())
     else:
         param_list = parameters
 
-    for param in param_list:
-        if param.grad is not None:
-            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                found_inf = True
-                break
+    # Filter parameters with gradients
+    grad_tensors = [p.grad for p in param_list if p.grad is not None]
+
+    if not grad_tensors:
+        # No gradients to check
+        if scaler is not None:
+            scaler.update(False)
+        return False
+
+    # Optimized approach: concatenate all gradients and check at once for small counts
+    # For large numbers of tensors, check individually to avoid memory issues
+    found_inf = False
+
+    if len(grad_tensors) <= 10:  # Configurable threshold
+        try:
+            # Efficient batch check for small number of tensors
+            # Stack all gradients into single tensor for vectorized operation
+            grad_views = [g.view(-1) for g in grad_tensors]
+            if grad_views:
+                all_grads = torch.cat(grad_views)
+                found_inf = not torch.isfinite(all_grads).all().item()
+        except (RuntimeError, torch.cuda.OutOfMemoryError):
+            # Fallback to individual checking if memory issues
+            found_inf = _check_gradients_individually(grad_tensors)
+    else:
+        # For many tensors, check individually to avoid memory overhead
+        found_inf = _check_gradients_individually(grad_tensors)
 
     # Update scaler if provided
     if scaler is not None:
         scaler.update(found_inf)
 
     return found_inf
+
+
+def _check_gradients_individually(grad_tensors: List[torch.Tensor]) -> bool:
+    """Helper function to check gradients individually."""
+    for grad in grad_tensors:
+        if not torch.isfinite(grad).all():
+            return True
+    return False

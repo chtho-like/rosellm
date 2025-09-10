@@ -248,6 +248,13 @@ try:
 except ImportError:
     AbstractGradScaler = None  # type: ignore
 
+# Import advanced gradient scalers
+try:
+    from .grad_scaler import AbstractGradientScaler, DynamicGradientScaler
+except ImportError:
+    AbstractGradientScaler = None  # type: ignore
+    DynamicGradientScaler = None  # type: ignore
+
 
 @dataclass
 class GradientClipConfig:
@@ -1018,12 +1025,12 @@ def check_for_inf_and_nan_with_scaler(
     """
     Check for infinite or NaN values in gradients and optionally update scaler.
 
-    This function is compatible with both PyTorch native scalers and custom
-    AbstractGradScaler instances.
+    This function is compatible with PyTorch native scalers, custom AbstractGradScaler
+    instances, and the new DynamicGradientScaler.
 
     Args:
         parameters: Model or list of parameters to check
-        scaler: Optional gradient scaler to update (AbstractGradScaler or native)
+        scaler: Optional gradient scaler to update (various types supported)
 
     Returns:
         True if any infinite or NaN gradients were found, False otherwise
@@ -1043,30 +1050,58 @@ def check_for_inf_and_nan_with_scaler(
     else:
         param_list = list(parameters)
 
-    for param in param_list:
-        if param.grad is not None:
-            has_nan = torch.isnan(param.grad).any()
-            has_inf = torch.isinf(param.grad).any()
+    # Use optimized overflow detection if we have a DynamicGradientScaler
+    if DynamicGradientScaler is not None and isinstance(scaler, DynamicGradientScaler):
+        gradients = []
+        for param in param_list:
+            if param.grad is not None:
+                gradients.append(param.grad)
 
-            if has_nan:
-                nan_params += 1
-                found_inf = True
-            if has_inf:
-                inf_params += 1
-                found_inf = True
+        if gradients:
+            overflow_result = scaler.overflow_detector.check_overflow(
+                gradients, per_tensor=False
+            )
+            found_inf = (
+                bool(overflow_result) if isinstance(overflow_result, bool) else False
+            )
+            if found_inf:
+                logger.debug(f"Found non-finite gradients using optimized detection")
+    else:
+        # Fallback to standard detection
+        for param in param_list:
+            if param.grad is not None:
+                has_nan = torch.isnan(param.grad).any()
+                has_inf = torch.isinf(param.grad).any()
 
-            if found_inf and not (nan_params > 0 or inf_params > 0):
-                break
+                if has_nan:
+                    nan_params += 1
+                    found_inf = True
+                if has_inf:
+                    inf_params += 1
+                    found_inf = True
 
-    if found_inf:
-        logger.debug(
-            f"Found non-finite gradients: {nan_params} NaN, {inf_params} Inf parameters"
-        )
+                if found_inf and not (nan_params > 0 or inf_params > 0):
+                    break
+
+        if found_inf:
+            logger.debug(
+                f"Found non-finite gradients: {nan_params} NaN, "
+                f"{inf_params} Inf parameters"
+            )
 
     # Update scaler if provided
     if scaler is not None:
-        if AbstractGradScaler is not None and isinstance(scaler, AbstractGradScaler):
-            # Custom scaler
+        if AbstractGradientScaler is not None and isinstance(
+            scaler, AbstractGradientScaler
+        ):
+            # New advanced gradient scaler
+            # Note: DynamicGradientScaler handles overflow in its step() method
+            if DynamicGradientScaler is None or not isinstance(
+                scaler, DynamicGradientScaler
+            ):
+                scaler.update()
+        elif AbstractGradScaler is not None and isinstance(scaler, AbstractGradScaler):
+            # Legacy custom scaler
             scaler.update(found_inf)
         elif hasattr(scaler, "update"):
             # PyTorch native scaler - needs to be called after optimizer step
@@ -1231,3 +1266,222 @@ def get_gradient_stats(
                 logger.warning(f"Failed to compute gradient percentiles: {e}")
 
     return stats
+
+
+def apply_gradient_clipping_with_scaler(
+    parameters: Union[List[torch.Tensor], nn.Module],
+    config: GradientClipConfig,
+    scaler: Optional[Any] = None,
+    unscale_first: bool = True,
+) -> Dict[str, Any]:
+    """
+    Apply gradient clipping with integrated loss scaling support.
+
+    This function combines gradient unscaling, clipping, and overflow detection
+    in an optimized workflow for mixed precision training.
+
+    Args:
+        parameters: Model parameters or list of tensors
+        config: Gradient clipping configuration
+        scaler: Optional gradient scaler (supports multiple types)
+        unscale_first: Whether to unscale gradients before clipping
+
+    Returns:
+        Dictionary with comprehensive clipping and scaling statistics
+
+    Example:
+        >>> scaler = create_gradient_scaler()
+        >>> clip_config = GradientClipConfig(clip_type="norm", max_norm=1.0)
+        >>> stats = apply_gradient_clipping_with_scaler(
+        ...     model, clip_config, scaler
+        ... )
+        >>> print(f"Clipped: {stats['clipped']}, Scale: {stats['scale']}")
+    """
+    stats = {
+        "grad_norm": 0.0,
+        "clipped": False,
+        "scale_factor": 1.0,
+        "num_parameters": 0,
+        "num_gradients": 0,
+        "scale": 1.0,
+        "found_overflow": False,
+        "scaler_skipped_step": False,
+    }
+
+    # Convert model to parameter list if needed
+    param_list: Union[List[torch.nn.Parameter], List[torch.Tensor]]
+    if isinstance(parameters, nn.Module):
+        param_list = _get_model_parameters_with_grad(
+            parameters, requires_grad_only=True
+        )
+    else:
+        param_list = [p for p in parameters if p.grad is not None]
+
+    stats["num_parameters"] = len(param_list)
+    if not param_list:
+        logger.warning("No parameters with gradients found for clipping with scaler")
+        return stats
+
+    gradients = _get_gradient_tensors(param_list)
+    stats["num_gradients"] = len(gradients)
+
+    # Handle scaler unscaling if requested
+    if scaler is not None and unscale_first:
+        stats["scale"] = getattr(scaler, "get_scale", lambda: 1.0)()
+
+        # Unscale gradients using scaler's method
+        if hasattr(scaler, "unscale_"):
+            # Create a mock optimizer for unscaling
+            mock_optimizer = torch.optim.SGD(param_list, lr=1.0)
+            try:
+                scaler.unscale_(mock_optimizer)
+            except Exception as e:
+                logger.warning(f"Failed to unscale gradients: {e}")
+
+    # Check for overflow after unscaling
+    if scaler is not None:
+        # Use the original parameters for overflow checking
+        if isinstance(parameters, nn.Module):
+            stats["found_overflow"] = check_for_inf_and_nan_with_scaler(
+                parameters, None
+            )
+        else:
+            # For list of parameters, we cast to List[nn.Parameter]
+            param_check_list = [p for p in param_list if isinstance(p, nn.Parameter)]
+            if param_check_list:
+                stats["found_overflow"] = check_for_inf_and_nan_with_scaler(
+                    param_check_list, None
+                )
+            else:
+                stats["found_overflow"] = False
+
+        # If overflow detected, skip clipping
+        if stats["found_overflow"]:
+            stats["scaler_skipped_step"] = True
+            logger.debug("Overflow detected, skipping gradient clipping")
+            return stats
+
+    # Apply standard gradient clipping
+    try:
+        if isinstance(parameters, nn.Module):
+            clip_stats = apply_gradient_clipping(parameters, config)
+        else:
+            # Convert to List[torch.Tensor] by extracting the tensors
+            tensor_list = [
+                p if isinstance(p, torch.Tensor) else p.data for p in param_list
+            ]
+            clip_stats = apply_gradient_clipping(tensor_list, config)
+        stats.update(clip_stats)
+    except Exception as e:
+        logger.error(f"Gradient clipping failed: {e}")
+        if config.error_if_nonfinite:
+            raise
+
+    return stats
+
+
+def create_integrated_training_step(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: Optional[Any] = None,
+    clip_config: Optional[GradientClipConfig] = None,
+    accumulation_steps: int = 1,
+) -> Callable[[torch.Tensor], Dict[str, Any]]:
+    """
+    Create an integrated training step function with gradient scaling and clipping.
+
+    This function returns a closure that encapsulates the full training step
+    workflow including loss scaling, gradient accumulation, clipping, and
+    optimizer stepping.
+
+    Args:
+        model: PyTorch model
+        optimizer: Optimizer
+        scaler: Optional gradient scaler
+        clip_config: Optional gradient clipping configuration
+        accumulation_steps: Number of gradient accumulation steps
+
+    Returns:
+        Training step function that takes loss and returns statistics
+
+    Example:
+        >>> scaler = create_gradient_scaler()
+        >>> clip_config = GradientClipConfig(clip_type="norm", max_norm=1.0)
+        >>> step_fn = create_integrated_training_step(
+        ...     model, optimizer, scaler, clip_config
+        ... )
+        >>>
+        >>> for batch in dataloader:
+        ...     loss = model(batch)
+        ...     stats = step_fn(loss)
+        ...     if stats['stepped']:
+        ...         print(f"Step completed, grad norm: {stats['grad_norm']:.3f}")
+    """
+    step_count = 0
+
+    def training_step(loss: torch.Tensor) -> Dict[str, Any]:
+        nonlocal step_count
+        step_count += 1
+
+        stats = {
+            "stepped": False,
+            "grad_norm": 0.0,
+            "clipped": False,
+            "scale": 1.0,
+            "found_overflow": False,
+            "accumulation_step": step_count % accumulation_steps,
+        }
+
+        # Scale loss if scaler is provided
+        if scaler is not None:
+            scaled_loss = scaler.scale(loss)
+            stats["scale"] = scaler.get_scale()
+        else:
+            scaled_loss = loss
+
+        # Backward pass with accumulation
+        scaled_loss = scaled_loss / accumulation_steps
+        scaled_loss.backward()
+
+        # Check if we should step optimizer
+        is_accumulation_step = (step_count % accumulation_steps) == 0
+
+        if is_accumulation_step:
+            # Apply gradient clipping with scaler integration
+            if clip_config is not None:
+                clip_stats = apply_gradient_clipping_with_scaler(
+                    model, clip_config, scaler
+                )
+                stats.update(clip_stats)
+
+                # Skip step if overflow detected
+                if stats.get("found_overflow", False):
+                    optimizer.zero_grad()
+                    if scaler is not None and hasattr(scaler, "update"):
+                        scaler.update()
+                    return stats
+
+            # Step optimizer
+            if scaler is not None and hasattr(scaler, "step"):
+                # Use scaler's step method which handles overflow detection
+                result = scaler.step(optimizer)
+                stats["stepped"] = result is not None
+
+                # Update scaler
+                if hasattr(scaler, "update"):
+                    scaler.update()
+            else:
+                # Standard optimizer step
+                optimizer.step()
+                stats["stepped"] = True
+
+                # Update scaler if provided
+                if scaler is not None and hasattr(scaler, "update"):
+                    scaler.update()
+
+            # Clear gradients
+            optimizer.zero_grad()
+
+        return stats
+
+    return training_step
