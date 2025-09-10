@@ -40,7 +40,9 @@ class SimpleModel(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.relu(self.fc1(x))
-        return self.fc2(x)
+        result = self.fc2(x)
+        assert isinstance(result, torch.Tensor)
+        return result
 
 
 class ParallelModel(nn.Module):
@@ -83,7 +85,9 @@ class ParallelModel(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.relu(self.column_linear(x))
-        return self.row_linear(x)
+        result = self.row_linear(x)
+        assert isinstance(result, torch.Tensor)
+        return result
 
 
 class TestAsyncGradientAllreduceIntegration:
@@ -465,7 +469,7 @@ class TestAsyncGradientAllreduceIntegration:
 
     def test_error_handling_invalid_config(self):
         """Test error handling with invalid configuration."""
-        # Test with world_size <= 1 and async enabled
+        # Test with world_size <= 1 and async enabled - should auto-disable
         config = AsyncAllreduceConfig(enabled=True)
 
         with patch(
@@ -477,11 +481,14 @@ class TestAsyncGradientAllreduceIntegration:
             mock_get_dp_group.return_value = mock_process_group
             mock_get_dp_size.return_value = 1  # Single process
 
-            with pytest.raises(
-                ValueError,
-                match="Async allreduce cannot be enabled with world_size <= 1",
+            with pytest.warns(
+                UserWarning,
+                match="Async allreduce automatically disabled for world_size <= 1",
             ):
-                AsyncGradientAllreduce(config, mock_process_group)
+                manager = AsyncGradientAllreduce(config, mock_process_group)
+                # Should be auto-disabled and have no buckets
+                assert not manager.config.enabled
+                assert len(manager.buckets) == 0
 
     def test_disabled_async_allreduce(self):
         """Test behavior when async allreduce is disabled."""

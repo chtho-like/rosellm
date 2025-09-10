@@ -622,10 +622,10 @@ class TestAsyncGradientAllreduce:
             assert stats["world_size"] == 4
             assert stats["num_buckets"] == len(manager.buckets)
             assert stats["config"] == config
-            assert stats["avg_comm_time"] == 0.15
+            assert abs(stats["avg_comm_time"] - 0.15) < 1e-10
             assert stats["min_comm_time"] == 0.1
             assert stats["max_comm_time"] == 0.2
-            assert stats["avg_overlap_ratio"] == 0.85
+            assert abs(stats["avg_overlap_ratio"] - 0.85) < 1e-10
 
     def test_reset_statistics(self, config, mock_process_group):
         """Test resetting performance statistics."""

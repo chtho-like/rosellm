@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 
 import torch
@@ -6,6 +7,8 @@ import torch.distributed as dist
 from ..memory.global_memory_buffer import BufferType, allocate_tensor, release_tensor
 from .async_linear import register_parameter_for_async_allreduce
 from .parallel_state import get_global_memory_buffer as get_buffer_from_state
+
+logger = logging.getLogger(__name__)
 
 # References:
 # [1] Shoeybi, M. et al. "Megatron-LM: Training Multi-Billion Parameter
@@ -42,15 +45,39 @@ class TensorParallelism:
             world_size: Total number of processes.
             tp_size: Size of the tensor parallel group.
             tp_group: Optional existing tensor parallel process group.
+
+        Raises:
+            ValueError: If parameters are invalid
+            RuntimeError: If distributed setup is invalid
         """
+        # Validate inputs
+        if not isinstance(local_rank, int) or local_rank < 0:
+            raise ValueError(
+                f"local_rank must be non-negative integer, got {local_rank}"
+            )
+        if not isinstance(world_size, int) or world_size <= 0:
+            raise ValueError(f"world_size must be positive integer, got {world_size}")
+        if not isinstance(tp_size, int) or tp_size <= 0:
+            raise ValueError(f"tp_size must be positive integer, got {tp_size}")
+        if local_rank >= world_size:
+            raise ValueError(
+                f"local_rank ({local_rank}) must be less than "
+                f"world_size ({world_size})"
+            )
+        if world_size % tp_size != 0:
+            raise ValueError(
+                f"world_size ({world_size}) must be divisible by "
+                f"tp_size ({tp_size})"
+            )
+        if tp_size > world_size:
+            raise ValueError(
+                f"tp_size ({tp_size}) cannot be larger than "
+                f"world_size ({world_size})"
+            )
+
         self.local_rank = local_rank
         self.world_size = world_size
         self.tp_size = tp_size
-
-        # Ensure world_size is divisible by tp_size
-        assert (
-            world_size % tp_size == 0
-        ), "World size must be divisible by tensor parallel size"
 
         # Set up process groups if not provided
         if tp_group is None:
@@ -58,8 +85,16 @@ class TensorParallelism:
         else:
             self.tp_group = tp_group
 
-        # Get tensor parallel rank
-        self.tp_rank = dist.get_rank(self.tp_group)
+        # Get tensor parallel rank with error handling
+        try:
+            self.tp_rank = dist.get_rank(self.tp_group) if self.tp_group else 0
+        except Exception as e:
+            raise RuntimeError(f"Failed to get tensor parallel rank: {e}") from e
+
+        logger.info(
+            f"Initialized TensorParallelism: tp_size={tp_size}, "
+            f"tp_rank={self.tp_rank}, world_size={world_size}"
+        )
 
     def _initialize_process_group(self) -> dist.ProcessGroup:
         """Initialize the tensor parallel process group."""
@@ -94,24 +129,57 @@ class TensorParallelism:
 
         Returns:
             The split tensor for this TP rank.
+
+        Raises:
+            ValueError: If tensor or dimension is invalid
         """
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor, got {type(tensor)}")
+        if tensor.numel() == 0:
+            raise ValueError("Cannot split empty tensor")
+        if not (-tensor.ndim <= dim < tensor.ndim):
+            raise ValueError(
+                f"dim {dim} out of range for tensor with {tensor.ndim} dimensions"
+            )
+        if tensor.size(dim) < self.tp_size:
+            raise ValueError(
+                f"Tensor dimension {dim} size ({tensor.size(dim)}) is smaller "
+                f"than tp_size ({self.tp_size})"
+            )
+
+        # Normalize negative dimension
+        if dim < 0:
+            dim = tensor.ndim + dim
+
         # Calculate the split size
         split_size = tensor.size(dim) // self.tp_size
 
-        # Handle uneven division
+        # Handle uneven division with more efficient padding
         if tensor.size(dim) % self.tp_size != 0:
+            logger.warning(
+                f"Tensor size {tensor.size(dim)} not evenly divisible by "
+                f"tp_size {self.tp_size}, padding will be applied"
+            )
             # Pad tensor to make it evenly divisible
             pad_size = self.tp_size - (tensor.size(dim) % self.tp_size)
-            pad_shape = list(tensor.shape)
-            pad_shape[dim] = pad_size
-            padding = torch.zeros(pad_shape, dtype=tensor.dtype, device=tensor.device)
-            tensor = torch.cat([tensor, padding], dim=dim)
+
+            # Create padding specification for torch.nn.functional.pad
+            # pad format is (pad_left, pad_right) for the last dim,
+            # then second-to-last, etc.
+            pad_spec = [0] * (tensor.ndim * 2)
+            # pad_right for the specified dimension
+            pad_spec[-(dim + 1) * 2 - 1] = pad_size
+
+            tensor = torch.nn.functional.pad(tensor, pad_spec, mode="constant", value=0)
             # Recalculate split size
             split_size = tensor.size(dim) // self.tp_size
 
-        # Split the tensor
-        chunks = torch.split(tensor, split_size, dim=dim)
-        return chunks[self.tp_rank]
+        # Split the tensor efficiently
+        try:
+            chunks = torch.split(tensor, split_size, dim=dim)
+            return chunks[self.tp_rank].contiguous()  # Ensure contiguous memory layout
+        except Exception as e:
+            raise RuntimeError(f"Failed to split tensor: {e}") from e
 
     def gather_tensor(self, tensor: torch.Tensor, dim: int = 0) -> torch.Tensor:
         """
@@ -123,54 +191,106 @@ class TensorParallelism:
 
         Returns:
             The gathered tensor.
+
+        Raises:
+            ValueError: If tensor or dimension is invalid
+            RuntimeError: If gather operation fails
         """
-        # First, gather sizes to handle uneven splits
-        local_size = torch.tensor([tensor.size(dim)], device=tensor.device)
-        sizes = [torch.zeros_like(local_size) for _ in range(self.tp_size)]
-        dist.all_gather(sizes, local_size, group=self.tp_group)
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor, got {type(tensor)}")
+        if tensor.numel() == 0:
+            raise ValueError("Cannot gather empty tensor")
+        if not (-tensor.ndim <= dim < tensor.ndim):
+            raise ValueError(
+                f"dim {dim} out of range for tensor with {tensor.ndim} dimensions"
+            )
+        if self.tp_group is None:
+            raise RuntimeError(
+                "Cannot gather tensor: no tensor parallel group available"
+            )
 
-        # Convert sizes to integers
-        sizes_int = [int(size.item()) for size in sizes]
+        # Normalize negative dimension
+        if dim < 0:
+            dim = tensor.ndim + dim
 
-        # All-gather tensors
-        tensors = []
-        buffer_manager = get_buffer_from_state()
+        try:
+            # First, gather sizes to handle uneven splits
+            local_size = torch.tensor(
+                [tensor.size(dim)], device=tensor.device, dtype=torch.long
+            )
+            sizes = [torch.zeros_like(local_size) for _ in range(self.tp_size)]
+            dist.all_gather(sizes, local_size, group=self.tp_group)
 
-        # Use global buffers if available
-        if buffer_manager is not None:
-            for size in sizes_int:
-                # Create shape dynamically
-                shape = list(tensor.shape)
-                shape[dim] = size
-                # Allocate from global buffer
-                buf_tensor = allocate_tensor(
-                    tuple(shape),  # Convert list to tuple
-                    dtype=tensor.dtype,
-                    device=tensor.device,
-                    buffer_type=BufferType.COMMUNICATION,
-                    caller_info="TensorParallelism.all_gather_tensor",
-                )
-                tensors.append(buf_tensor)
-        else:
-            # Fallback to regular allocation
-            for size in sizes_int:
-                shape = list(tensor.shape)
-                shape[dim] = size
-                tensors.append(
-                    torch.zeros(shape, dtype=tensor.dtype, device=tensor.device)
-                )
+            # Convert sizes to integers
+            sizes_int = [int(size.item()) for size in sizes]
+            total_size = sum(sizes_int)
 
-        dist.all_gather(tensors, tensor, group=self.tp_group)
+            if total_size == 0:
+                raise ValueError("Total gathered size is zero")
 
-        # Concatenate along specified dimension
-        result = torch.cat(tensors, dim=dim)
+            # All-gather tensors with optimized buffer management
+            tensors = []
+            buffer_manager = get_buffer_from_state()
+            use_buffer_manager = buffer_manager is not None
 
-        # Release buffers if we used them
-        if buffer_manager is not None:
-            for t in tensors:
-                release_tensor(t)
+            # Pre-allocate output tensors
+            if use_buffer_manager:
+                try:
+                    for i, size in enumerate(sizes_int):
+                        # Create shape dynamically
+                        shape = list(tensor.shape)
+                        shape[dim] = size
+                        # Allocate from global buffer
+                        buf_tensor = allocate_tensor(
+                            tuple(shape),
+                            dtype=tensor.dtype,
+                            device=tensor.device,
+                            buffer_type=BufferType.COMMUNICATION,
+                            caller_info=f"TensorParallelism.gather_tensor.{i}",
+                        )
+                        tensors.append(buf_tensor)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to allocate from buffer manager: {e}, "
+                        "falling back to regular allocation"
+                    )
+                    use_buffer_manager = False
+                    # Clean up any allocated tensors
+                    for t in tensors:
+                        try:
+                            release_tensor(t)
+                        except Exception:
+                            pass
+                    tensors.clear()
 
-        return result
+            if not use_buffer_manager:
+                # Fallback to regular allocation
+                for size in sizes_int:
+                    shape = list(tensor.shape)
+                    shape[dim] = size
+                    tensors.append(
+                        torch.zeros(shape, dtype=tensor.dtype, device=tensor.device)
+                    )
+
+            # Perform all-gather
+            dist.all_gather(tensors, tensor, group=self.tp_group)
+
+            # Concatenate along specified dimension
+            result = torch.cat(tensors, dim=dim)
+
+            # Release buffers if we used them
+            if use_buffer_manager:
+                for t in tensors:
+                    try:
+                        release_tensor(t)
+                    except Exception as e:
+                        logger.warning(f"Error releasing tensor buffer: {e}")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error during tensor gather: {e}")
+            raise RuntimeError(f"Tensor gather failed: {e}") from e
 
     def parallelize_layer(
         self,
@@ -304,21 +424,51 @@ class ColumnParallelLinear(torch.nn.Module):
 
     def _split_weight(self, weight: torch.Tensor) -> torch.Tensor:
         """Split the weight tensor along the output dimension."""
+        if not isinstance(weight, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor, got {type(weight)}")
+        if weight.size(0) < self.tp_size:
+            raise ValueError(
+                f"Weight output dimension {weight.size(0)} is smaller than "
+                f"tp_size {self.tp_size}"
+            )
+
         # Weight is (out_features, in_features)
         output_chunks = torch.split(weight, self.output_size_per_partition, dim=0)
-        return output_chunks[self.tp_rank]
+        return output_chunks[self.tp_rank].contiguous()
 
     def _split_bias(self, bias: torch.Tensor) -> torch.Tensor:
         """Split the bias tensor along the output dimension."""
+        if not isinstance(bias, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor, got {type(bias)}")
+        if bias.size(0) < self.tp_size:
+            raise ValueError(
+                f"Bias size {bias.size(0)} is smaller than tp_size {self.tp_size}"
+            )
+
         bias_chunks = torch.split(bias, self.output_size_per_partition, dim=0)
-        return bias_chunks[self.tp_rank]
+        return bias_chunks[self.tp_rank].contiguous()
 
     def _register_async_allreduce(self) -> None:
         """Register parameters for async gradient allreduce."""
-        register_parameter_for_async_allreduce(self.weight, self.layer_name)
-        if self.bias is not None:
-            bias_layer_name = f"{self.layer_name}_bias" if self.layer_name else None
-            register_parameter_for_async_allreduce(self.bias, bias_layer_name)
+        try:
+            weight_layer_name = (
+                f"{self.layer_name}.weight" if self.layer_name else "weight"
+            )
+            register_parameter_for_async_allreduce(self.weight, weight_layer_name)
+            if self.bias is not None:
+                bias_layer_name = (
+                    f"{self.layer_name}.bias" if self.layer_name else "bias"
+                )
+                register_parameter_for_async_allreduce(self.bias, bias_layer_name)
+            logger.debug(
+                f"Registered async allreduce for ColumnParallelLinear layer "
+                f"{self.layer_name or 'unnamed'}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to register async allreduce for ColumnParallelLinear: {e}"
+            )
+            # Don't re-raise to avoid breaking model initialization
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
         """
@@ -329,10 +479,25 @@ class ColumnParallelLinear(torch.nn.Module):
 
         Returns:
             Output tensor.
+
+        Raises:
+            ValueError: If input tensor is invalid
         """
-        # Local linear operation
-        output = torch.nn.functional.linear(input_, self.weight, self.bias)
-        return output
+        if not isinstance(input_, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor input, got {type(input_)}")
+        if input_.size(-1) != self.in_features:
+            raise ValueError(
+                f"Input feature dimension mismatch: expected {self.in_features}, "
+                f"got {input_.size(-1)}"
+            )
+
+        try:
+            # Local linear operation
+            output = torch.nn.functional.linear(input_, self.weight, self.bias)
+            return output
+        except Exception as e:
+            logger.error(f"Error in ColumnParallelLinear forward: {e}")
+            raise RuntimeError(f"ColumnParallelLinear forward failed: {e}") from e
 
 
 class RowParallelLinear(torch.nn.Module):
@@ -419,16 +584,39 @@ class RowParallelLinear(torch.nn.Module):
 
     def _split_weight(self, weight: torch.Tensor) -> torch.Tensor:
         """Split the weight tensor along the input dimension."""
+        if not isinstance(weight, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor, got {type(weight)}")
+        if weight.size(1) < self.tp_size:
+            raise ValueError(
+                f"Weight input dimension {weight.size(1)} is smaller than "
+                f"tp_size {self.tp_size}"
+            )
+
         # Weight is (out_features, in_features)
         input_chunks = torch.split(weight, self.input_size_per_partition, dim=1)
-        return input_chunks[self.tp_rank]
+        return input_chunks[self.tp_rank].contiguous()
 
     def _register_async_allreduce(self) -> None:
         """Register parameters for async gradient allreduce."""
-        register_parameter_for_async_allreduce(self.weight, self.layer_name)
-        if self.bias is not None:
-            bias_layer_name = f"{self.layer_name}_bias" if self.layer_name else None
-            register_parameter_for_async_allreduce(self.bias, bias_layer_name)
+        try:
+            weight_layer_name = (
+                f"{self.layer_name}.weight" if self.layer_name else "weight"
+            )
+            register_parameter_for_async_allreduce(self.weight, weight_layer_name)
+            if self.bias is not None:
+                bias_layer_name = (
+                    f"{self.layer_name}.bias" if self.layer_name else "bias"
+                )
+                register_parameter_for_async_allreduce(self.bias, bias_layer_name)
+            logger.debug(
+                f"Registered async allreduce for RowParallelLinear layer "
+                f"{self.layer_name or 'unnamed'}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to register async allreduce for RowParallelLinear: {e}"
+            )
+            # Don't re-raise to avoid breaking model initialization
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
         """
@@ -439,38 +627,72 @@ class RowParallelLinear(torch.nn.Module):
 
         Returns:
             Output tensor.
+
+        Raises:
+            ValueError: If input tensor is invalid
+            RuntimeError: If forward pass fails
         """
-        # Partition input tensor along sequence dimension
-        input_parallel = torch.split(input_, self.input_size_per_partition, dim=-1)[
-            self.tp_rank
-        ]
+        if not isinstance(input_, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor input, got {type(input_)}")
+        if input_.size(-1) != self.in_features:
+            raise ValueError(
+                f"Input feature dimension mismatch: expected {self.in_features}, "
+                f"got {input_.size(-1)}"
+            )
 
-        # Local linear operation
-        output_parallel = torch.nn.functional.linear(input_parallel, self.weight)
-
-        # All-reduce across processes
-        if not self.skip_all_reduce and self.tp_size > 1:
-            buffer_manager = get_buffer_from_state()
-
-            # Use global buffer for all-reduce if available
-            if buffer_manager is not None:
-                # Allocate buffer for all-reduce operation
-                comm_buffer = allocate_tensor(
-                    tuple(output_parallel.shape),  # Convert to tuple
-                    dtype=output_parallel.dtype,
-                    device=output_parallel.device,
-                    buffer_type=BufferType.COMMUNICATION,
-                    caller_info="RowParallelLinear.forward",
+        try:
+            # Partition input tensor along last dimension
+            input_chunks = torch.split(input_, self.input_size_per_partition, dim=-1)
+            if self.tp_rank >= len(input_chunks):
+                raise RuntimeError(
+                    f"tp_rank {self.tp_rank} exceeds number of input chunks "
+                    f"{len(input_chunks)}"
                 )
-                comm_buffer.copy_(output_parallel)
-                dist.all_reduce(comm_buffer, group=self.tp_group)
-                output_parallel.copy_(comm_buffer)
-                release_tensor(comm_buffer)
-            else:
-                dist.all_reduce(output_parallel, group=self.tp_group)
 
-        # Add bias
-        if self.bias is not None:
-            output_parallel = output_parallel + self.bias
+            input_parallel = input_chunks[self.tp_rank].contiguous()
 
-        return output_parallel
+            # Local linear operation
+            output_parallel = torch.nn.functional.linear(input_parallel, self.weight)
+
+            # All-reduce across processes
+            if (
+                not self.skip_all_reduce
+                and self.tp_size > 1
+                and self.tp_group is not None
+            ):
+                buffer_manager = get_buffer_from_state()
+                use_buffer_manager = buffer_manager is not None
+
+                # Use global buffer for all-reduce if available
+                if use_buffer_manager:
+                    try:
+                        # Allocate buffer for all-reduce operation
+                        comm_buffer = allocate_tensor(
+                            tuple(output_parallel.shape),
+                            dtype=output_parallel.dtype,
+                            device=output_parallel.device,
+                            buffer_type=BufferType.COMMUNICATION,
+                            caller_info="RowParallelLinear.forward",
+                        )
+                        comm_buffer.copy_(output_parallel, non_blocking=True)
+                        dist.all_reduce(comm_buffer, group=self.tp_group)
+                        output_parallel.copy_(comm_buffer, non_blocking=True)
+                        release_tensor(comm_buffer)
+                    except Exception as e:
+                        logger.warning(
+                            f"Buffer manager allocation failed: {e}, "
+                            "falling back to in-place allreduce"
+                        )
+                        dist.all_reduce(output_parallel, group=self.tp_group)
+                else:
+                    dist.all_reduce(output_parallel, group=self.tp_group)
+
+            # Add bias
+            if self.bias is not None:
+                output_parallel = output_parallel + self.bias
+
+            return output_parallel
+
+        except Exception as e:
+            logger.error(f"Error in RowParallelLinear forward: {e}")
+            raise RuntimeError(f"RowParallelLinear forward failed: {e}") from e

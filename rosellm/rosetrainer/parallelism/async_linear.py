@@ -451,7 +451,7 @@ class AsyncGradientAllreduce:
         Returns:
             Dictionary containing performance metrics
         """
-        stats = {
+        stats: Dict[str, Any] = {
             "step_count": self.step_count,
             "world_size": self.world_size,
             "num_buckets": len(self.buckets),

@@ -96,30 +96,121 @@ class AsyncAllreduceConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
+        # Validate basic numeric constraints
         if self.bucket_size <= 0:
-            raise ValueError("bucket_size must be positive")
+            raise ValueError(f"bucket_size must be positive, got {self.bucket_size}")
+
+        if self.bucket_size < 512:  # Minimum 512 bytes for testing
+            raise ValueError(
+                f"bucket_size too small, minimum 512 bytes required, "
+                f"got {self.bucket_size}"
+            )
+
+        if self.bucket_size > 1024 * 1024 * 1024:  # Maximum 1GB
+            raise ValueError(
+                f"bucket_size too large, maximum 1GB allowed, "
+                f"got {self.bucket_size}"
+            )
 
         if self.max_buckets <= 0:
-            raise ValueError("max_buckets must be positive")
+            raise ValueError(f"max_buckets must be positive, got {self.max_buckets}")
+
+        if self.max_buckets > 32:  # Reasonable upper limit
+            raise ValueError(
+                f"max_buckets too large, maximum 32 allowed, " f"got {self.max_buckets}"
+            )
 
         if self.overlap_threshold < 0:
-            raise ValueError("overlap_threshold must be non-negative")
+            raise ValueError(
+                f"overlap_threshold must be non-negative, "
+                f"got {self.overlap_threshold}"
+            )
+
+        if self.overlap_threshold > 10.0:  # 10 seconds reasonable upper bound
+            raise ValueError(
+                f"overlap_threshold too large, maximum 10.0s allowed, "
+                f"got {self.overlap_threshold}"
+            )
 
         if self.warmup_steps < 0:
-            raise ValueError("warmup_steps must be non-negative")
+            raise ValueError(
+                f"warmup_steps must be non-negative, got {self.warmup_steps}"
+            )
+
+        if self.warmup_steps > 1000:  # Reasonable upper limit
+            raise ValueError(
+                f"warmup_steps too large, maximum 1000 allowed, "
+                f"got {self.warmup_steps}"
+            )
 
         if self.buffer_growth_factor <= 1.0:
-            raise ValueError("buffer_growth_factor must be greater than 1.0")
+            raise ValueError(
+                f"buffer_growth_factor must be greater than 1.0, "
+                f"got {self.buffer_growth_factor}"
+            )
+
+        if self.buffer_growth_factor > 2.0:
+            raise ValueError(
+                f"buffer_growth_factor too large, maximum 2.0 allowed, "
+                f"got {self.buffer_growth_factor}"
+            )
 
         if self.max_buffer_size <= 0:
-            raise ValueError("max_buffer_size must be positive")
+            raise ValueError(
+                f"max_buffer_size must be positive, got {self.max_buffer_size}"
+            )
 
-        if self.async_op_timeout is not None and self.async_op_timeout <= 0:
-            raise ValueError("async_op_timeout must be positive or None")
+        if self.max_buffer_size > 10 * 1024 * 1024 * 1024:  # 10GB limit
+            raise ValueError(
+                f"max_buffer_size too large, maximum 10GB allowed, "
+                f"got {self.max_buffer_size}"
+            )
+
+        if self.async_op_timeout is not None:
+            if self.async_op_timeout <= 0:
+                raise ValueError(
+                    f"async_op_timeout must be positive or None, "
+                    f"got {self.async_op_timeout}"
+                )
+            if self.async_op_timeout > 3600:  # 1 hour limit
+                raise ValueError(
+                    f"async_op_timeout too large, maximum 3600s allowed, "
+                    f"got {self.async_op_timeout}"
+                )
 
         # Ensure bucket size doesn't exceed max buffer size
         if self.bucket_size > self.max_buffer_size:
-            raise ValueError("bucket_size cannot exceed max_buffer_size")
+            raise ValueError(f"bucket_size cannot exceed max_buffer_size")
+        # Validate list parameters
+        if self.priority_layers is not None:
+            if not isinstance(self.priority_layers, list):
+                raise TypeError(
+                    f"priority_layers must be a list or None, "
+                    f"got {type(self.priority_layers)}"
+                )
+            if not all(isinstance(layer, str) for layer in self.priority_layers):
+                raise TypeError("All priority_layers elements must be strings")
+
+        if self.skip_layers is not None:
+            if not isinstance(self.skip_layers, list):
+                raise TypeError(
+                    f"skip_layers must be a list or None, "
+                    f"got {type(self.skip_layers)}"
+                )
+            if not all(isinstance(layer, str) for layer in self.skip_layers):
+                raise TypeError("All skip_layers elements must be strings")
+        # Validate enum types
+        if not isinstance(self.strategy, AsyncAllreduceStrategy):
+            raise TypeError(
+                f"strategy must be AsyncAllreduceStrategy, "
+                f"got {type(self.strategy)}"
+            )
+
+        if not isinstance(self.bucketing_strategy, GradientBucketingStrategy):
+            raise TypeError(
+                f"bucketing_strategy must be GradientBucketingStrategy, "
+                f"got {type(self.bucketing_strategy)}"
+            )
 
     @classmethod
     def create_optimized_config(
@@ -127,55 +218,120 @@ class AsyncAllreduceConfig:
         world_size: int,
         model_size_mb: float,
         gpu_memory_gb: float = 16.0,
+        target_overlap_ratio: float = 0.8,
     ) -> "AsyncAllreduceConfig":
         """
-        Create an optimized async allreduce configuration based on system parameters.
+        Create optimized async allreduce config based on system parameters.
 
         Args:
             world_size: Number of processes in distributed training
             model_size_mb: Model size in megabytes
             gpu_memory_gb: Available GPU memory in gigabytes
+            target_overlap_ratio: Target computation/communication overlap
+                ratio (0.0-1.0)
 
         Returns:
             Optimized AsyncAllreduceConfig instance
-        """
-        # Calculate optimal bucket size based on model size and world size
-        optimal_bucket_size = int(
-            min(
-                model_size_mb
-                * 1024
-                * 1024
-                // (world_size * 4),  # 1/4 model per process
-                25 * 1024 * 1024,  # Cap at 25MB
-            )
-        )
-        optimal_bucket_size = max(optimal_bucket_size, 1024 * 1024)  # Min 1MB
 
-        # Adjust max buckets based on available memory
-        max_buckets = min(
-            int(
-                gpu_memory_gb * 1024 * 1024 * 1024 * 0.02 / optimal_bucket_size
-            ),  # 2% of GPU memory
-            8,
-        )
+        Raises:
+            ValueError: If parameters are invalid
+        """
+        # Validate inputs
+        if not isinstance(world_size, int) or world_size < 1:
+            raise ValueError(f"world_size must be a positive integer, got {world_size}")
+        if not isinstance(model_size_mb, (int, float)) or model_size_mb <= 0:
+            raise ValueError(f"model_size_mb must be positive, got {model_size_mb}")
+        if not isinstance(gpu_memory_gb, (int, float)) or gpu_memory_gb <= 0:
+            raise ValueError(f"gpu_memory_gb must be positive, got {gpu_memory_gb}")
+        if not isinstance(target_overlap_ratio, (int, float)) or not (
+            0 <= target_overlap_ratio <= 1
+        ):
+            raise ValueError(
+                f"target_overlap_ratio must be between 0 and 1, "
+                f"got {target_overlap_ratio}"
+            )
+        # Calculate optimal bucket size based on model size and world size
+        # Target: each bucket contains roughly 1/8 of model gradients per process
+        base_bucket_size = model_size_mb * 1024 * 1024 // (world_size * 8)
+
+        # Apply constraints based on world size and memory
+        if world_size <= 4:
+            # Small world size: use larger buckets for efficiency
+            optimal_bucket_size = min(
+                base_bucket_size * 2, 50 * 1024 * 1024
+            )  # Max 50MB
+        elif world_size <= 16:
+            # Medium world size: balanced approach
+            optimal_bucket_size = min(base_bucket_size, 25 * 1024 * 1024)  # Max 25MB
+        else:
+            # Large world size: smaller buckets for better parallelization
+            optimal_bucket_size = min(base_bucket_size, 10 * 1024 * 1024)  # Max 10MB
+
+        # Ensure minimum bucket size
+        optimal_bucket_size = max(int(optimal_bucket_size), 1024 * 1024)  # Min 1MB
+
+        # Adjust max buckets based on available memory and world size
+        memory_based_buckets = int(
+            gpu_memory_gb * 1024 * 1024 * 1024 * 0.02 / optimal_bucket_size
+        )  # 2% of GPU memory
+
+        # Scale buckets with world size but cap appropriately
+        if world_size <= 4:
+            max_buckets = min(memory_based_buckets, 4)
+        elif world_size <= 16:
+            max_buckets = min(memory_based_buckets, 8)
+        else:
+            max_buckets = min(memory_based_buckets, 16)
+
         max_buckets = max(max_buckets, 2)  # Minimum 2 buckets
 
-        # Set buffer size based on GPU memory
+        # Set buffer size based on GPU memory (more conservative)
         max_buffer_size = int(
-            gpu_memory_gb * 1024 * 1024 * 1024 * 0.05
-        )  # 5% of GPU memory
+            gpu_memory_gb * 1024 * 1024 * 1024 * 0.03
+        )  # 3% of GPU memory
+        max_buffer_size = max(
+            max_buffer_size, int(optimal_bucket_size * max_buckets * 1.2)
+        )  # 20% safety margin
 
-        return cls(
+        # Determine strategy based on world size and target overlap
+        if world_size <= 2:
+            strategy = AsyncAllreduceStrategy.IMMEDIATE
+        elif world_size >= 16 and target_overlap_ratio >= 0.9:
+            strategy = AsyncAllreduceStrategy.PRIORITY_BASED
+        else:
+            strategy = AsyncAllreduceStrategy.BUCKETED
+
+        # Calculate optimal warmup and threshold based on world size
+        warmup_steps = min(
+            max(10, world_size // 2), 50
+        )  # Scale with world size, cap at 50
+        overlap_threshold = (
+            0.05 if world_size >= 8 else 0.1
+        )  # Less threshold for more processes
+
+        # Adjust timeout based on world size
+        timeout = min(
+            30.0 + world_size * 0.5, 120.0
+        )  # Scale with world size, cap at 2 minutes
+
+        config = cls(
             enabled=True,
-            strategy=AsyncAllreduceStrategy.BUCKETED,
+            strategy=strategy,
             bucket_size=optimal_bucket_size,
             max_buckets=max_buckets,
             max_buffer_size=max_buffer_size,
-            warmup_steps=max(10, world_size),  # More warmup for larger world sizes
-            overlap_threshold=0.05
-            if world_size >= 8
-            else 0.1,  # Less threshold for more processes
+            warmup_steps=warmup_steps,
+            overlap_threshold=overlap_threshold,
+            async_op_timeout=timeout,
+            gradient_predivision=True,  # Enable for numerical stability
+            enable_gradient_monitoring=world_size <= 8,  # Smaller setups
+            log_communication_stats=world_size <= 16,  # Smaller setups
         )
+
+        # Validate the generated config
+        config.validate_for_world_size(world_size)
+
+        return config
 
     def validate_for_world_size(self, world_size: int) -> None:
         """
@@ -187,15 +343,46 @@ class AsyncAllreduceConfig:
         Raises:
             ValueError: If configuration is invalid for the given world size
         """
+        if not isinstance(world_size, int) or world_size < 1:
+            raise ValueError(f"world_size must be a positive integer, got {world_size}")
+
+        if world_size > 1024:  # Reasonable upper limit
+            raise ValueError(
+                f"world_size too large, maximum 1024 supported, " f"got {world_size}"
+            )
+
         if world_size <= 1 and self.enabled:
-            raise ValueError("Async allreduce cannot be enabled with world_size <= 1")
+            raise ValueError(
+                f"Async allreduce cannot be enabled with world_size <= 1, "
+                f"got {world_size}"
+            )
 
         # For small world sizes, ensure we don't over-optimize
-        if world_size < 4 and self.max_buckets > world_size:
+        if world_size < 4 and self.max_buckets > world_size * 2:
             import warnings
 
             warnings.warn(
                 f"max_buckets ({self.max_buckets}) is larger than "
-                f"world_size ({world_size}). Consider reducing max_buckets "
-                f"for better performance."
+                f"world_size ({world_size}). Consider reducing max_buckets to "
+                f"{world_size} for better performance."
+            )
+
+        # For very large world sizes, ensure enough buckets for efficiency
+        if world_size > 16 and self.max_buckets < 4:
+            import warnings
+
+            warnings.warn(
+                f"max_buckets ({self.max_buckets}) may be too small for "
+                f"world_size ({world_size}). Consider increasing max_buckets "
+                f"for better parallelization."
+            )
+
+        # Validate bucket size relative to world size
+        if self.bucket_size < world_size * 1024:  # At least 1KB per process
+            import warnings
+
+            warnings.warn(
+                f"bucket_size ({self.bucket_size}) may be too small for "
+                f"world_size ({world_size}). Consider increasing bucket_size "
+                f"to at least {world_size * 1024} bytes."
             )

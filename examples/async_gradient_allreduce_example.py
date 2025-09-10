@@ -22,7 +22,7 @@ import argparse
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -108,6 +108,7 @@ class SimpleTransformerBlock(nn.Module):
             .contiguous()
             .view(batch_size, seq_len, hidden_size)
         )
+        assert isinstance(attention_output, torch.Tensor)
 
         # Attention output projection
         attention_output = self.attention_output(attention_output)
@@ -123,6 +124,7 @@ class SimpleTransformerBlock(nn.Module):
 
         # Add & norm
         output = self.output_layernorm(x + output)
+        assert isinstance(output, torch.Tensor)
 
         return output
 
@@ -227,6 +229,7 @@ class ParallelTransformerBlock(nn.Module):
         )
         attention_weights = torch.softmax(attention_scores, dim=-1)
         attention_output = torch.matmul(attention_weights, v)
+        assert isinstance(attention_output, torch.Tensor)
 
         attention_output = self.attention_output(attention_output)  # Row parallel
         attention_output = self.dropout(attention_output)
@@ -241,6 +244,7 @@ class ParallelTransformerBlock(nn.Module):
 
         # Add & norm
         output = self.output_layernorm(x + output)
+        assert isinstance(output, torch.Tensor)
 
         return output
 
@@ -275,7 +279,9 @@ class SimpleModel(nn.Module):
         self.layers = nn.ModuleList()
         for i in range(num_layers):
             if use_parallel:
-                layer = ParallelTransformerBlock(
+                layer: Union[
+                    ParallelTransformerBlock, SimpleTransformerBlock
+                ] = ParallelTransformerBlock(
                     hidden_size,
                     intermediate_size,
                     num_heads,
@@ -321,6 +327,7 @@ class SimpleModel(nn.Module):
 
         # Output projection
         logits = self.output_layer(x)
+        assert isinstance(logits, torch.Tensor)
 
         return logits
 
@@ -561,9 +568,11 @@ def main():
             warmup_steps=args.warmup_steps,
             log_communication_stats=args.log_comm_stats,
             # Set priority layers for priority strategy
-            priority_layers=["attention.query", "attention.output"]
-            if args.strategy == "priority"
-            else None,
+            priority_layers=(
+                ["attention.query", "attention.output"]
+                if args.strategy == "priority"
+                else None
+            ),
         )
 
         # Initialize async allreduce manager
