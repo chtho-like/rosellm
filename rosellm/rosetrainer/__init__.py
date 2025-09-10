@@ -7,6 +7,13 @@ This module provides a comprehensive distributed training framework with support
 - Advanced communication patterns
 """
 
+from .datasets import (  # Memory-mapped indexed datasets
+    DistributedIndexedDataset,
+    DType,
+    IndexedDataset,
+    IndexedDatasetBuilder,
+    MMapIndexedDataset,
+)
 from .engine import RoseTrainer
 from .fusions import (  # Fused operations
     FusedLayerNorm,
@@ -115,6 +122,12 @@ from .utils import (  # Gradient utilities
 
 __all__ = [
     "RoseTrainer",
+    # Memory-mapped indexed datasets
+    "DType",
+    "MMapIndexedDataset",
+    "IndexedDataset",
+    "IndexedDatasetBuilder",
+    "DistributedIndexedDataset",
     # Data Parallel
     "DataParallelTrainer",
     # Model Parallel
