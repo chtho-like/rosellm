@@ -195,7 +195,7 @@ class TestGradientClipper:
             clip_type=ClipType.ADAPTIVE,
         )
 
-        # Clip gradients
+        # Clip gradients multiple times to build history
         stats = clipper.clip_gradients(simple_model)
 
         # Check statistics
@@ -204,10 +204,36 @@ class TestGradientClipper:
         assert "adaptive_threshold" in stats
         assert "total_norm" in stats
         assert "clipped" in stats
+        assert "history_size" in stats
 
-        # Adaptive threshold should be computed
-        expected_threshold = stats["mean_norm"] + 2 * stats["std_norm"]
-        assert abs(stats["adaptive_threshold"] - expected_threshold) < 1e-5
+        # With first clipping, history is minimal so threshold should be
+        # constrained by max_norm
+        assert clipper.max_norm is not None
+        assert stats["adaptive_threshold"] <= clipper.max_norm
+
+        # Add more gradients to build history and test adaptive behavior
+        for _ in range(5):
+            # Create different gradient magnitudes
+            for param in simple_model.parameters():
+                if param.grad is not None:
+                    param.grad.data += torch.randn_like(param.grad.data) * 0.1
+            stats = clipper.clip_gradients(simple_model)
+
+        # Now with history, the adaptive threshold should be properly computed
+        # The stats should report the raw adaptive threshold, while max_norm
+        # shows the constrained value
+        expected_raw_threshold = (
+            stats["mean_norm"] + 2.0 * stats["std_norm"]
+        )  # Default sigma = 2.0
+
+        # The adaptive_threshold should be the raw computation
+        assert abs(stats["adaptive_threshold"] - expected_raw_threshold) < 1e-5
+
+        # The max_norm field should show the actual applied threshold
+        # (constrained)
+        assert clipper.max_norm is not None
+        expected_applied_threshold = min(expected_raw_threshold, clipper.max_norm)
+        assert stats["max_norm"] == expected_applied_threshold
 
     def test_parameter_list_input(self, simple_model):
         """Test clipping with parameter list input."""
@@ -244,22 +270,20 @@ class TestGradientClipper:
             check_for_nan_in_grad=True,
         )
 
-        with pytest.raises(ValueError, match="NaN gradient found"):
+        with pytest.raises(ValueError, match="NaN gradients found"):
             clipper.clip_gradients(simple_model)
 
     def test_invalid_max_norm(self, simple_model):
         """Test error on invalid max_norm."""
-        clipper = GradientClipper(max_norm=-1.0, clip_type=ClipType.NORM)
-
-        with pytest.raises(ValueError, match="max_norm must be positive"):
-            clipper.clip_gradients(simple_model)
+        # Now validation happens in constructor
+        with pytest.raises(ValueError, match="max_norm must be a positive number"):
+            GradientClipper(max_norm=-1.0, clip_type=ClipType.NORM)
 
     def test_invalid_max_value(self, simple_model):
         """Test error on invalid max_value."""
-        clipper = GradientClipper(max_value=-1.0, clip_type=ClipType.VALUE)
-
-        with pytest.raises(ValueError, match="max_value must be positive"):
-            clipper.clip_gradients(simple_model)
+        # Now validation happens in constructor
+        with pytest.raises(ValueError, match="max_value must be a positive number"):
+            GradientClipper(max_value=-1.0, clip_type=ClipType.VALUE)
 
     def test_multi_tensor_fallback(self, simple_model):
         """Test fallback when multi-tensor ops fail."""
@@ -324,8 +348,12 @@ class TestGradientClipper:
         call_args = mock_all_reduce.call_args
         assert call_args[1]["group"] == mock_group
 
-    def test_statistics_logging(self, simple_model, capsys):
+    def test_statistics_logging(self, simple_model, caplog):
         """Test statistics logging."""
+        import logging
+
+        # Set logging level to capture INFO messages
+        caplog.set_level(logging.INFO)
         clipper = GradientClipper(
             max_norm=1.0,
             clip_type=ClipType.NORM,
@@ -334,11 +362,11 @@ class TestGradientClipper:
 
         stats = clipper.clip_gradients(simple_model)
 
-        # Check console output
-        captured = capsys.readouterr()
-        assert "Gradient norm:" in captured.out
-        assert "Clipped:" in captured.out
-        assert "Scale:" in captured.out
+        # Check log output
+        log_messages = [record.message for record in caplog.records]
+        assert any("Gradient norm:" in msg for msg in log_messages)
+        assert any("Clipped:" in msg for msg in log_messages)
+        assert any("Scale:" in msg for msg in log_messages)
 
         # Check stored stats
         assert clipper.stats["total_norm"] == stats["total_norm"]
@@ -385,7 +413,8 @@ class TestClipGradNorm:
         param = next(simple_model.parameters())
         param.grad[0, 0] = float("inf")
 
-        with pytest.raises(RuntimeError, match="Gradient norm is"):
+        # Now the check happens earlier and uses a different error type
+        with pytest.raises(ValueError, match="Inf gradients found"):
             clip_grad_norm(
                 simple_model.parameters(),
                 max_norm=1.0,
@@ -565,10 +594,9 @@ class TestEdgeCases:
 
     def test_zero_max_norm(self, simple_model):
         """Test with zero max_norm."""
-        clipper = GradientClipper(max_norm=0, clip_type=ClipType.NORM)
-
-        with pytest.raises(ValueError, match="max_norm must be positive"):
-            clipper.clip_gradients(simple_model)
+        # Now validation happens in constructor
+        with pytest.raises(ValueError, match="max_norm must be a positive number"):
+            GradientClipper(max_norm=0, clip_type=ClipType.NORM)
 
     def test_infinite_max_norm(self, simple_model):
         """Test with infinite max_norm."""

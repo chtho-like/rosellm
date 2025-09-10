@@ -9,6 +9,7 @@ This module provides comprehensive gradient clipping functionality with support 
 - Model and expert parallel group support
 """
 
+import logging
 import warnings
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
@@ -20,6 +21,12 @@ from rosellm.rosetrainer.utils.multi_tensor_ops import (
     MultiTensorOperator,
     get_default_operator,
 )
+
+# Constants for numerical stability
+DEFAULT_EPSILON = 1e-6
+DEFAULT_ADAPTIVE_SIGMA = 2.0
+
+logger = logging.getLogger(__name__)
 
 
 class ClipType(Enum):
@@ -51,6 +58,8 @@ class GradientClipper:
         megatron_compatible: Enable Megatron-LM compatibility mode
         check_for_nan_in_grad: Check for NaN values in gradients
         log_stats: Enable detailed clipping statistics
+        epsilon: Small value to prevent division by zero in norm clipping
+        adaptive_sigma: Multiplier for standard deviation in adaptive clipping
     """
 
     def __init__(
@@ -64,6 +73,8 @@ class GradientClipper:
         megatron_compatible: bool = False,
         check_for_nan_in_grad: bool = False,
         log_stats: bool = False,
+        epsilon: float = DEFAULT_EPSILON,
+        adaptive_sigma: float = DEFAULT_ADAPTIVE_SIGMA,
     ):
         self.max_norm = max_norm
         self.max_value = max_value
@@ -74,6 +85,11 @@ class GradientClipper:
         self.megatron_compatible = megatron_compatible
         self.check_for_nan_in_grad = check_for_nan_in_grad
         self.log_stats = log_stats
+        self.epsilon = epsilon
+        self.adaptive_sigma = adaptive_sigma
+
+        # Validate input parameters
+        self._validate_parameters()
 
         # Multi-tensor operator
         self.operator: Optional[MultiTensorOperator] = None
@@ -84,8 +100,37 @@ class GradientClipper:
                 warnings.warn(f"Failed to initialize multi-tensor operator: {e}")
                 self.use_multi_tensor = False
 
-        # Statistics tracking
+        # Statistics tracking (thread-safe access should be handled by caller)
         self.stats: Dict[str, float] = {}
+        # Adaptive clipping state
+        self._adaptive_norm_history: List[float] = []
+        self._adaptive_window_size: int = 100  # Moving window for adaptive statistics
+
+    def _validate_parameters(self) -> None:
+        """Validate constructor parameters."""
+        if self.max_norm is not None and (
+            not isinstance(self.max_norm, (int, float)) or self.max_norm <= 0
+        ):
+            raise ValueError(f"max_norm must be a positive number, got {self.max_norm}")
+
+        if self.max_value is not None and (
+            not isinstance(self.max_value, (int, float)) or self.max_value <= 0
+        ):
+            raise ValueError(
+                f"max_value must be a positive number, got {self.max_value}"
+            )
+
+        if not isinstance(self.epsilon, (int, float)) or self.epsilon <= 0:
+            raise ValueError(f"epsilon must be a positive number, got {self.epsilon}")
+
+        if (
+            not isinstance(self.adaptive_sigma, (int, float))
+            or self.adaptive_sigma <= 0
+        ):
+            raise ValueError(
+                f"adaptive_sigma must be a positive number, "
+                f"got {self.adaptive_sigma}"
+            )
 
     def clip_gradients(
         self,
@@ -157,7 +202,7 @@ class GradientClipper:
             total_norm = self._aggregate_norm_distributed(total_norm)
 
         # Compute clipping coefficient
-        clip_coef = self.max_norm / (total_norm + 1e-6)
+        clip_coef = self.max_norm / (total_norm + self.epsilon)
         clipped = clip_coef < 1.0
 
         # Apply clipping if needed
@@ -237,7 +282,7 @@ class GradientClipper:
         Apply adaptive gradient clipping based on gradient statistics.
 
         This method dynamically adjusts the clipping threshold based on
-        the moving average of gradient norms.
+        a moving window of gradient norms for more stable adaptation.
 
         Args:
             parameters: List of parameters to clip
@@ -245,38 +290,74 @@ class GradientClipper:
         Returns:
             Clipping statistics
         """
-        # Compute gradient statistics
-        grad_norms = []
-        for param in parameters:
-            if param.grad is not None:
-                grad_norms.append(param.grad.data.norm().item())
-
-        if not grad_norms:
+        # Compute current total norm
+        if self.use_multi_tensor and self.operator is not None:
+            current_norm = self._compute_norm_multi_tensor(parameters)
+        else:
+            current_norm = self._compute_norm_single_tensor(parameters)
+        if current_norm == 0.0:
             return {"total_norm": 0.0, "clipped": False}
 
-        mean_norm = sum(grad_norms) / len(grad_norms)
-        std_norm = torch.tensor(grad_norms).std().item()
+        # Update moving window of norms
+        self._adaptive_norm_history.append(current_norm)
+        if len(self._adaptive_norm_history) > self._adaptive_window_size:
+            self._adaptive_norm_history.pop(0)
 
-        # Adaptive threshold (mean + 2*std)
-        adaptive_threshold = mean_norm + 2 * std_norm
+        # Compute statistics from history
+        if len(self._adaptive_norm_history) < 2:
+            # Not enough history, use conservative clipping
+            adaptive_threshold = self.max_norm or float("inf")
+            mean_norm = current_norm
+            std_norm = 0.0
+        else:
+            norms_tensor = torch.tensor(self._adaptive_norm_history)
+            mean_norm = norms_tensor.mean().item()
+            std_norm = norms_tensor.std().item()
 
-        # Use adaptive threshold for norm clipping
+            # Adaptive threshold (mean + sigma*std)
+            adaptive_threshold = mean_norm + self.adaptive_sigma * std_norm
+
+        # Compute the raw adaptive threshold for reporting
+        if len(self._adaptive_norm_history) >= 2:
+            raw_adaptive_threshold = mean_norm + self.adaptive_sigma * std_norm
+        else:
+            raw_adaptive_threshold = adaptive_threshold
+        # Use constrained threshold for actual clipping
         original_max_norm = self.max_norm
-        self.max_norm = min(adaptive_threshold, original_max_norm or float("inf"))
+        applied_threshold = min(adaptive_threshold, original_max_norm or float("inf"))
+        self.max_norm = applied_threshold
 
-        stats = self._clip_by_norm(parameters, None)
+        # Compute clipping coefficient directly to avoid recomputing norm
+        clip_coef = self.max_norm / (current_norm + self.epsilon)
+        clipped = clip_coef < 1.0
+
+        # Apply clipping if needed
+        if clipped:
+            if self.use_multi_tensor and self.operator is not None:
+                self._scale_gradients_multi_tensor(parameters, clip_coef)
+            else:
+                self._scale_gradients_single_tensor(parameters, clip_coef)
 
         # Restore original max_norm
         self.max_norm = original_max_norm
 
-        # Add adaptive stats
-        stats.update(
-            {
-                "mean_norm": mean_norm,
-                "std_norm": std_norm,
-                "adaptive_threshold": adaptive_threshold,
-            }
-        )
+        # Prepare statistics
+        stats = {
+            "total_norm": current_norm,
+            "clip_coef": clip_coef if clipped else 1.0,
+            "clipped": clipped,
+            # The actual applied threshold (constrained)
+            "max_norm": applied_threshold,
+            "mean_norm": mean_norm,
+            "std_norm": std_norm,
+            # The raw computed threshold
+            "adaptive_threshold": raw_adaptive_threshold,
+            "history_size": len(self._adaptive_norm_history),
+        }
+
+        if self.log_stats:
+            self.stats.update(stats)
+            self._log_statistics(stats)
 
         return stats
 
@@ -300,9 +381,17 @@ class GradientClipper:
         for (dtype, device), grads in grouped_grads.items():
             if self.operator is not None:
                 try:
-                    # Use multi-tensor L2 norm - compute manually
-                    for grad in grads:
-                        total_norm += grad.data.norm() ** 2
+                    # Use multi-tensor L2 norm computation
+                    group_norm = self.operator.calculate_norm(
+                        grads, norm_type=2.0, per_tensor=False
+                    )
+                    if isinstance(group_norm, torch.Tensor):
+                        total_norm += group_norm.item() ** 2
+                    elif isinstance(group_norm, (int, float)):
+                        total_norm += group_norm**2
+                    else:
+                        # Handle list case by fallback
+                        raise ValueError("Unexpected norm format")
                 except Exception:
                     # Fallback to single tensor
                     for grad in grads:
@@ -319,7 +408,7 @@ class GradientClipper:
         parameters: List[torch.nn.Parameter],
     ) -> float:
         """
-        Compute L2 norm using single tensor operations.
+        Compute L2 norm using single tensor operations with memory efficiency.
 
         Args:
             parameters: List of parameters
@@ -327,13 +416,41 @@ class GradientClipper:
         Returns:
             Total L2 norm
         """
-        total_norm = 0.0
+        # More memory-efficient approach using torch.norm with dim reduction
+        device = None
+
+        # Collect all gradient tensors and find common device/dtype
+        grad_tensors = []
         for param in parameters:
             if param.grad is not None:
-                param_norm = param.grad.data.norm()
-                total_norm += param_norm**2
+                grad_tensors.append(param.grad.data)
+                if device is None:
+                    device = param.grad.device
+        if not grad_tensors:
+            return 0.0
 
-        return float(total_norm**0.5)
+        # Use torch.stack if all tensors have same shape, else individual norms
+        try:
+            # Try more efficient batch computation for many small tensors
+            if len(grad_tensors) > 10:
+                norms_squared = torch.stack([t.norm() ** 2 for t in grad_tensors])
+                return float(norms_squared.sum().sqrt())
+            else:
+                # Fall back to individual computation for few tensors
+                total_norm_sq = sum(
+                    param.grad.data.norm() ** 2
+                    for param in parameters
+                    if param.grad is not None
+                )
+                return float(total_norm_sq**0.5)
+        except (RuntimeError, ValueError):
+            # Fallback to original method if stacking fails
+            total_norm_sq = sum(
+                param.grad.data.norm() ** 2
+                for param in parameters
+                if param.grad is not None
+            )
+            return float(total_norm_sq**0.5)
 
     def _scale_gradients_multi_tensor(
         self,
@@ -353,8 +470,9 @@ class GradientClipper:
         for (dtype, device), grads in grouped_grads.items():
             if self.operator is not None:
                 try:
-                    # Use multi-tensor scaling
-                    self.operator.scale_tensors(grads, scale, in_place=True)
+                    # Use multi-tensor scaling - convert scale to tensor
+                    scale_tensor = torch.tensor(scale, device=device, dtype=dtype)
+                    self.operator.scale_tensors(grads, scale_tensor, in_place=True)
                 except Exception:
                     # Fallback to single tensor
                     for grad in grads:
@@ -424,18 +542,72 @@ class GradientClipper:
         parameters: List[torch.nn.Parameter],
     ) -> None:
         """
-        Check for NaN values in gradients.
+        Check for NaN and Inf values in gradients with detailed reporting.
 
         Args:
             parameters: List of parameters to check
 
         Raises:
-            ValueError: If NaN values are found
+            ValueError: If NaN or Inf values are found
         """
+        nan_params = []
+        inf_params = []
+
         for i, param in enumerate(parameters):
             if param.grad is not None:
-                if torch.isnan(param.grad).any():
-                    raise ValueError(f"NaN gradient found in parameter {i}")
+                grad_data = param.grad.data
+
+                if torch.isnan(grad_data).any():
+                    nan_count = torch.isnan(grad_data).sum().item()
+                    param_info = {
+                        "index": i,
+                        "shape": tuple(grad_data.shape),
+                        "dtype": grad_data.dtype,
+                        "device": grad_data.device,
+                        "nan_count": nan_count,
+                        "total_elements": grad_data.numel(),
+                    }
+                    nan_params.append(param_info)
+
+                if torch.isinf(grad_data).any():
+                    inf_count = torch.isinf(grad_data).sum().item()
+                    param_info = {
+                        "index": i,
+                        "shape": tuple(grad_data.shape),
+                        "dtype": grad_data.dtype,
+                        "device": grad_data.device,
+                        "inf_count": inf_count,
+                        "total_elements": grad_data.numel(),
+                    }
+                    inf_params.append(param_info)
+
+        if nan_params:
+            param_descriptions = [
+                f"param_{p['index']} "
+                f"({p['nan_count']}/{p['total_elements']} elements)"
+                for p in nan_params[:5]  # Limit to first 5
+            ]
+            error_msg = (
+                f"NaN gradients found in {len(nan_params)} parameter(s): "
+                + ", ".join(param_descriptions)
+            )
+            if len(nan_params) > 5:
+                error_msg += f" and {len(nan_params) - 5} more"
+            raise ValueError(error_msg)
+
+        if inf_params:
+            param_descriptions = [
+                f"param_{p['index']} "
+                f"({p['inf_count']}/{p['total_elements']} elements)"
+                for p in inf_params[:5]  # Limit to first 5
+            ]
+            error_msg = (
+                f"Inf gradients found in {len(inf_params)} parameter(s): "
+                + ", ".join(param_descriptions)
+            )
+            if len(inf_params) > 5:
+                error_msg += f" and {len(inf_params) - 5} more"
+            raise ValueError(error_msg)
 
     def _group_gradients(
         self,
@@ -471,21 +643,24 @@ class GradientClipper:
             stats: Statistics dictionary
         """
         if self.clip_type == ClipType.NORM:
-            print(
-                f"Gradient norm: {stats.get('total_norm', 0):.4f}, "
-                f"Clipped: {stats.get('clipped', False)}, "
-                f"Scale: {stats.get('clip_coef', 1.0):.4f}"
+            logger.info(
+                "Gradient norm: %.4f, Clipped: %s, Scale: %.4f",
+                stats.get("total_norm", 0),
+                stats.get("clipped", False),
+                stats.get("clip_coef", 1.0),
             )
         elif self.clip_type == ClipType.VALUE:
-            print(
-                f"Max gradient: {stats.get('max_grad', 0):.4f}, "
-                f"Clipped params: {stats.get('num_clipped', 0)}"
+            logger.info(
+                "Max gradient: %.4f, Clipped params: %d",
+                stats.get("max_grad", 0),
+                stats.get("num_clipped", 0),
             )
         elif self.clip_type == ClipType.ADAPTIVE:
-            print(
-                f"Adaptive threshold: {stats.get('adaptive_threshold', 0):.4f}, "
-                f"Mean norm: {stats.get('mean_norm', 0):.4f}, "
-                f"Clipped: {stats.get('clipped', False)}"
+            logger.info(
+                "Adaptive threshold: %.4f, Mean norm: %.4f, Clipped: %s",
+                stats.get("adaptive_threshold", 0),
+                stats.get("mean_norm", 0),
+                stats.get("clipped", False),
             )
 
 
