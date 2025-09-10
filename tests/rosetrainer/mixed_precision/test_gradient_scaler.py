@@ -21,7 +21,10 @@ from rosellm.rosetrainer.mixed_precision import GradScalerConfig
 from rosellm.rosetrainer.mixed_precision.gradient_scaler import (
     DynamicGradScaler as LegacyDynamicGradScaler,
 )
-from rosellm.rosetrainer.mixed_precision.gradient_scaler import check_for_inf_and_nan
+from rosellm.rosetrainer.mixed_precision.gradient_scaler import (
+    _check_gradients_individually,
+    check_for_inf_and_nan,
+)
 
 
 class SimpleModel(nn.Module):
@@ -558,6 +561,122 @@ class TestIntegration(unittest.TestCase):
         # Verify state is restored
         self.assertEqual(new_scaler.scale.item(), scaler.scale.item())
         self.assertEqual(new_scaler._growth_tracker, scaler._growth_tracker)
+
+
+class TestOptimizedOperations(unittest.TestCase):
+    """Test cases for newly optimized operations."""
+
+    def test_optimized_inf_nan_check_small_tensors(self):
+        """Test optimized inf/nan checking for small number of tensors."""
+        model = SimpleModel()
+
+        # Set small number of gradients (should use batch optimization)
+        for param in model.parameters():
+            param.grad = torch.ones_like(param)
+
+        # Should use optimized batch checking path
+        found_inf = check_for_inf_and_nan(model)
+        self.assertFalse(found_inf)
+
+        # Add one NaN gradient
+        next(model.parameters()).grad = torch.full_like(
+            next(model.parameters()), float("nan")
+        )
+
+        found_inf = check_for_inf_and_nan(model)
+        self.assertTrue(found_inf)
+
+    def test_optimized_inf_nan_check_many_tensors(self):
+        """Test optimized inf/nan checking for many tensors."""
+
+        # Create model with many parameters to trigger individual checking
+        class LargeModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([nn.Linear(10, 10) for _ in range(15)])
+
+        model = LargeModel()
+
+        # Set gradients for all parameters
+        for param in model.parameters():
+            param.grad = torch.ones_like(param)
+
+        # Should use individual checking path
+        found_inf = check_for_inf_and_nan(model)
+        self.assertFalse(found_inf)
+
+    def test_gradient_individual_check_helper(self):
+        """Test the individual gradient checking helper function."""
+        tensors = [torch.ones(5, 5), torch.ones(3, 3), torch.ones(2, 2)]
+
+        # All finite
+        result = _check_gradients_individually(tensors)
+        self.assertFalse(result)
+
+        # Add NaN
+        tensors[1].fill_(float("nan"))
+        result = _check_gradients_individually(tensors)
+        self.assertTrue(result)
+
+        # Add Inf
+        tensors = [torch.ones(5, 5), torch.ones(3, 3), torch.ones(2, 2)]
+        tensors[2].fill_(float("inf"))
+        result = _check_gradients_individually(tensors)
+        self.assertTrue(result)
+
+    def test_enhanced_dynamic_scaler_edge_cases(self):
+        """Test enhanced dynamic scaler edge cases and optimizations."""
+        from rosellm.rosetrainer.mixed_precision.dynamic_scaler import (
+            DynamicGradScaler,
+            DynamicScalerConfig,
+        )
+
+        # Test with custom configuration
+        config = DynamicScalerConfig(
+            initial_scale=1024.0,
+            max_scale_change_history=500,
+            track_overflow_history=50,
+        )
+
+        scaler = DynamicGradScaler(config=config)
+
+        # Test scale info retrieval
+        info = scaler.get_scale_info()
+        self.assertEqual(info["current_scale"], 1024.0)
+        self.assertEqual(info["step_count"], 0)
+
+        # Test cached inverse scale with zero scale edge case
+        scaler._scale.fill_(0.0)
+        scaler._invalidate_inv_scale()
+
+        # This should handle zero scale gracefully
+        inv_scale = scaler.inv_scale
+        self.assertGreater(inv_scale.item(), 0)
+
+    def test_multi_tensor_overflow_detection_fallback(self):
+        """Test that multi-tensor overflow detection falls back gracefully."""
+        from rosellm.rosetrainer.mixed_precision.dynamic_scaler import (
+            MultiTensorOverflowDetector,
+        )
+
+        detector = MultiTensorOverflowDetector(use_apex=False)
+
+        # Create test tensors with different devices and dtypes
+        tensors = [
+            torch.ones(100, dtype=torch.float32),
+            torch.ones(50, dtype=torch.float16),
+            torch.ones(75, dtype=torch.float32),
+        ]
+
+        # All finite
+        has_overflow, info = detector.detect_overflow(tensors)
+        self.assertFalse(has_overflow)
+        self.assertEqual(info["total_tensors"], 3)
+
+        # Add overflow
+        tensors[1].fill_(float("inf"))
+        has_overflow, info = detector.detect_overflow(tensors)
+        self.assertTrue(has_overflow)
 
 
 if __name__ == "__main__":
