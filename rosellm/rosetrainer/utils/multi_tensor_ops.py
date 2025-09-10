@@ -184,7 +184,7 @@ class PyTorchBackendStrategy(BackendStrategy):
         return tensors
 
     def is_available(self) -> bool:
-        """PyTorch is always available."""
+        """Check if PyTorch is available."""
         return True
 
 
