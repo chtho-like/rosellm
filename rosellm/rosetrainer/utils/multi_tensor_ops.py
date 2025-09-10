@@ -179,7 +179,9 @@ class PyTorchBackendStrategy(BackendStrategy):
             tensors = [t.clone() for t in tensors]
 
         for tensor in tensors:
-            tensor.mul_(scale)
+            # Use torch.no_grad() to avoid issues with leaf tensors requiring grad
+            with torch.no_grad():
+                tensor.mul_(scale)
 
         return tensors
 

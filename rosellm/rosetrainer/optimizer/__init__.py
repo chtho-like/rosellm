@@ -6,11 +6,14 @@ This package provides a comprehensive distributed optimizer implementation with:
 - Memory profiling and optimization
 - Factory pattern for easy configuration
 - Parameter-gradient buffer mapping with bucket-based reduction
+- Gradient bucket coalescing for optimized communication
 """
 
+from .coalesced_gradient_buffer import CoalescedBucket, CoalescedGradientBuffer
 from .config import DistributedOptimizerConfig, PartitioningStrategy
 from .distributed_optimizer import DistributedOptimizer
 from .factory import OptimizerFactory
+from .gradient_buffer import Bucket, GradientBuffer
 from .memory_profiler import MemoryProfiler, MemoryStats
 from .multi_tensor_adam import (
     MultiTensorAdam,
@@ -54,6 +57,11 @@ __all__ = [
     "DistributedOptimizerConfig",
     "ParameterPartitioner",
     "ParameterRange",
+    # Gradient buffer classes
+    "GradientBuffer",
+    "Bucket",
+    "CoalescedGradientBuffer",
+    "CoalescedBucket",
     # Range-based buffer mapping
     "RangeBufferConfig",
     "RangeBufferMapper",

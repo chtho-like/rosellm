@@ -458,6 +458,11 @@ class TestRangeBufferMapperEdgeCases:
         """Get test device."""
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    @pytest.fixture
+    def simple_model(self):
+        """Create a simple test model."""
+        return SimpleTestModel([64, 32, 16, 8])
+
     def test_very_small_parameters(self, device):
         """Test handling of very small parameters."""
         # Create parameters smaller than minimum range size
