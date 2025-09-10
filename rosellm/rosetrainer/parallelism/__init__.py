@@ -12,6 +12,20 @@ This module provides various parallelism strategies for distributed training:
 - Parameter Gathering Overlap with Computation
 """
 
+from .async_config import (
+    AsyncAllreduceConfig,
+    AsyncAllreduceStrategy,
+    GradientBucketingStrategy,
+)
+from .async_linear import (
+    AsyncGradientAllreduce,
+    async_allreduce_step,
+    destroy_async_allreduce,
+    get_async_allreduce_manager,
+    initialize_async_allreduce,
+    register_parameter_for_async_allreduce,
+    sync_async_allreduce,
+)
 from .data_parallel import DataParallelTrainer
 from .microbatch_calculator import (
     AdaptiveMicrobatchCalculator,
@@ -83,6 +97,17 @@ from .sequence_parallel import (
 from .zero import ZeROOptimizer
 
 __all__ = [
+    # Async Gradient Allreduce
+    "AsyncAllreduceConfig",
+    "AsyncAllreduceStrategy",
+    "GradientBucketingStrategy",
+    "AsyncGradientAllreduce",
+    "initialize_async_allreduce",
+    "destroy_async_allreduce",
+    "get_async_allreduce_manager",
+    "register_parameter_for_async_allreduce",
+    "async_allreduce_step",
+    "sync_async_allreduce",
     # Data Parallel
     "DataParallelTrainer",
     # Model Parallel
