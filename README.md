@@ -26,6 +26,7 @@ A comprehensive RLHF (Reinforcement Learning from Human Feedback) framework with
 - `gradient/strategies.py`: **NEW** Advanced gradient synchronization strategies for multi-dimensional parallelism
 - `gradient/decoupled_grad.py`: **NEW** Decoupled gradient storage for memory optimization
 - `gradient/param_grad_mapping.py`: **NEW** Range-based parameter-gradient buffer mapping with advanced bucketing
+- `gradient/shared_weight_reducer.py`: **NEW** Shared weight gradient reduction for tied embeddings with pipeline parallelism support
 - `optimizer/param_grad_mapping.py`: **NEW** Advanced parameter-gradient mapping with multi-tensor operations and type-aware bucketing
 - `communication/gradient_buckets.py`: **NEW** Intelligent gradient communication bucketing for distributed training
 - `communication/bucket_groups.py`: **NEW** Hierarchical bucket organization and advanced communication patterns
@@ -431,6 +432,15 @@ RoseLLM includes state-of-the-art memory optimization features:
 - **Distributed Ready**: Built-in support for multi-GPU and multi-node training
 - **Memory Efficiency**: ~50% memory reduction with minimal computational overhead
 
+#### 🔗 Shared Weight Gradient Reduction
+- **Tied Embeddings Support**: Automatic gradient synchronization for shared input/output embeddings
+- **Pipeline Parallelism Integration**: Seamless gradient reduction across pipeline stages
+- **Memory Optimization**: Save 10-20% model parameters through weight tying
+- **Process Group Management**: Efficient embedding group creation connecting first and last stages
+- **Safety Features**: NaN/Inf detection, gradient clipping, and overflow prevention
+- **Performance Monitoring**: Detailed metrics tracking for optimization and debugging
+- **Megatron-LM Compatible**: Follows established patterns with additional safety and monitoring
+
 #### Key Benefits:
 - **Scale Larger Models**: Train 20-40% larger models on the same hardware
 - **Faster Training**: Reduced memory fragmentation leads to better cache locality
@@ -672,6 +682,110 @@ mapping = ParamGradMapping(params=base_model.parameters())
 - **Communication Overlap**: Intelligent overlap of computation and communication
 - **Error Recovery**: Robust handling of communication failures and NaN gradients
 - **Performance Monitoring**: Comprehensive statistics and profiling
+
+### Shared Weight Gradient Reduction
+
+RoseLLM provides automatic gradient synchronization for models with tied embeddings (shared weights between input and output layers):
+
+```python
+from rosellm.rosetrainer.gradient import (
+    SharedWeightConfig,
+    SharedWeightGradientReducer,
+    GradientFinalizer,
+    GradientFinalizationConfig
+)
+
+# Create a model with tied embeddings
+class TiedEmbeddingModel(nn.Module):
+    def __init__(self, vocab_size, hidden_size):
+        super().__init__()
+        self.word_embeddings = nn.Embedding(vocab_size, hidden_size)
+        self.transformer = nn.TransformerEncoder(...)
+        self.share_embeddings_and_output_weights = True
+        
+    def forward(self, input_ids):
+        hidden = self.word_embeddings(input_ids)
+        hidden = self.transformer(hidden)
+        # Use same weights for output projection
+        logits = F.linear(hidden, self.word_embeddings.weight)
+        return logits
+        
+    def shared_embedding_or_output_weight(self):
+        """Megatron-LM compatible method for weight extraction."""
+        if self.share_embeddings_and_output_weights:
+            return self.word_embeddings.weight
+        return None
+
+# Configure shared weight reduction
+shared_config = SharedWeightConfig(
+    share_embeddings_and_output_weights=True,
+    share_position_embeddings=False,
+    max_gradient_norm=1.0,
+    check_for_nan=True,
+    enable_metrics=True,
+    coalesce_gradients=True,  # Optimize communication
+)
+
+# Create gradient finalizer with shared weight support
+finalization_config = GradientFinalizationConfig(
+    sync_strategy="simple",
+    sync_grad_before_clip=True,
+    enable_gradient_stats=True,
+    share_embeddings_and_output_weights=True,
+)
+
+finalizer = GradientFinalizer(
+    model=model,
+    config=finalization_config,
+)
+
+# Training loop with automatic gradient synchronization
+for batch in dataloader:
+    optimizer.zero_grad()
+    
+    # Forward pass
+    logits = model(batch["input_ids"])
+    loss = F.cross_entropy(logits.view(-1, vocab_size), labels.view(-1))
+    
+    # Backward pass
+    loss.backward()
+    
+    # Finalize gradients with shared weight reduction
+    stats = finalizer.finalize_gradients(
+        clip_gradients=True,
+        check_finite=True,
+        collect_stats=True,
+    )
+    
+    # Optimizer step
+    optimizer.step()
+    
+    # Monitor reduction metrics
+    if finalizer.shared_weight_reducer:
+        metrics = finalizer.shared_weight_reducer.get_reduction_metrics()
+        if metrics.num_parameters_reduced > 0:
+            print(f"Reduced {metrics.num_parameters_reduced} shared parameters")
+            print(f"Communication: {metrics.reduction_time_ms:.2f}ms")
+            print(f"Data volume: {metrics.total_bytes_reduced / 1024:.1f}KB")
+
+# Pipeline parallelism integration
+from rosellm.rosetrainer.parallelism import parallel_state
+
+# Initialize with pipeline parallelism
+parallel_state.initialize_model_parallel(
+    tensor_model_parallel_size=1,
+    pipeline_model_parallel_size=4,  # 4 pipeline stages
+)
+
+# Shared weights are automatically synchronized between:
+# - Stage 0 (has input embeddings)
+# - Stage 3 (has output projection using same weights)
+
+# The reducer creates an embedding group connecting these stages
+# and performs all-reduce on gradients to keep weights synchronized
+```
+
+For comprehensive technical details and interview preparation, see [`docs/shared-weight-gradient-reduction-deep-dive.md`](/data/projects/rosellm/docs/shared-weight-gradient-reduction-deep-dive.md).
 
 ### Gradient Communication Bucketing
 

@@ -193,7 +193,7 @@ def create_model_and_optimizer(
 
 def validate_shared_gradients(
     model: nn.Module,
-    reducer: SharedWeightGradientReducer,
+    reducer: Optional[SharedWeightGradientReducer],
     args: argparse.Namespace,
 ) -> Dict[str, float]:
     """Validate that shared weight gradients are properly synchronized.
@@ -207,6 +207,10 @@ def validate_shared_gradients(
         Dictionary with validation metrics
     """
     metrics: Dict[str, float] = {}
+
+    if reducer is None:
+        logger.info("No shared weight reducer available")
+        return metrics
 
     # Get the actual model (unwrap DDP if needed)
     actual_model = model.module if hasattr(model, "module") else model
@@ -464,8 +468,22 @@ def main():
             )
 
             if "gradients_synchronized" in metrics:
-                sync_status = "✓" if metrics["gradients_synchronized"] else "✗"
+                sync_status = "PASS" if metrics["gradients_synchronized"] else "FAIL"
                 logger.info(f"  Gradient Synchronization: {sync_status}")
+
+            # Log reduction metrics if available
+            if finalizer.shared_weight_reducer is not None:
+                reduction_metrics = (
+                    finalizer.shared_weight_reducer.get_reduction_metrics()
+                )
+                if reduction_metrics.num_parameters_reduced > 0:
+                    logger.info(
+                        f"  Reduction Stats: {reduction_metrics.num_parameters_reduced} params, "
+                        f"{reduction_metrics.total_bytes_reduced / 1024:.1f} KB, "
+                        f"{reduction_metrics.reduction_time_ms:.2f} ms"
+                    )
+                if reduction_metrics.overflow_detected:
+                    logger.warning("  WARNING: Gradient overflow detected!")
 
     logger.info("Training completed successfully!")
 

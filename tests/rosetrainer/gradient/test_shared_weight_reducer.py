@@ -40,7 +40,10 @@ class TestSharedWeightGradientReducer:
 
     def test_initialization(self):
         """Test reducer initialization."""
-        config = MagicMock()
+        config = MagicMock(spec=["max_gradient_norm", "check_for_nan", "timers"])
+        config.max_gradient_norm = 1e10
+        config.check_for_nan = True
+        config.timers = None
         reducer = SharedWeightGradientReducer(config)
 
         assert reducer.config == config
@@ -50,7 +53,10 @@ class TestSharedWeightGradientReducer:
 
     def test_get_main_grad_attr(self):
         """Test gradient attribute detection."""
-        config = MagicMock()
+        config = MagicMock(spec=["max_gradient_norm", "check_for_nan", "timers"])
+        config.max_gradient_norm = 1e10
+        config.check_for_nan = True
+        config.timers = None
         reducer = SharedWeightGradientReducer(config)
 
         # Test with regular gradient
@@ -64,7 +70,10 @@ class TestSharedWeightGradientReducer:
 
     def test_default_get_word_embedding_weight(self):
         """Test default word embedding weight extraction."""
-        config = MagicMock()
+        config = MagicMock(spec=["max_gradient_norm", "check_for_nan", "timers"])
+        config.max_gradient_norm = 1e10
+        config.check_for_nan = True
+        config.timers = None
         reducer = SharedWeightGradientReducer(config)
 
         # Test with model having shared_embedding_or_output_weight method
@@ -79,7 +88,10 @@ class TestSharedWeightGradientReducer:
 
     def test_default_get_position_embedding_weight(self):
         """Test default position embedding weight extraction."""
-        config = MagicMock()
+        config = MagicMock(spec=["max_gradient_norm", "check_for_nan", "timers"])
+        config.max_gradient_norm = 1e10
+        config.check_for_nan = True
+        config.timers = None
         reducer = SharedWeightGradientReducer(config)
 
         model = MockModelWithSharedWeights()
@@ -99,7 +111,10 @@ class TestSharedWeightGradientReducer:
         mock_get_rank.return_value = 0
         mock_get_ranks.return_value = [0, 1]
 
-        config = MagicMock()
+        config = MagicMock(spec=["max_gradient_norm", "check_for_nan", "timers"])
+        config.max_gradient_norm = 1e10
+        config.check_for_nan = True
+        config.timers = None
         reducer = SharedWeightGradientReducer(config)
 
         # Mock pipeline stage detection
@@ -136,7 +151,10 @@ class TestSharedWeightGradientReducer:
 
     def test_allreduce_word_embedding_grads_no_group(self):
         """Test word embedding gradient reduction with no process group."""
-        config = MagicMock()
+        config = MagicMock(spec=["max_gradient_norm", "check_for_nan", "timers"])
+        config.max_gradient_norm = 1e10
+        config.check_for_nan = True
+        config.timers = None
         reducer = SharedWeightGradientReducer(config)
 
         model = MockModelWithSharedWeights()
@@ -150,7 +168,10 @@ class TestSharedWeightGradientReducer:
     @patch("torch.distributed.all_reduce")
     def test_allreduce_shared_params(self, mock_all_reduce):
         """Test all-reduce for arbitrary shared parameters."""
-        config = MagicMock()
+        config = MagicMock(spec=["max_gradient_norm", "check_for_nan", "timers"])
+        config.max_gradient_norm = 1e10
+        config.check_for_nan = True
+        config.timers = None
         reducer = SharedWeightGradientReducer(config)
 
         # Create shared parameters with gradients
@@ -184,16 +205,44 @@ class TestSharedWeightGradientReducer:
             share_position_embeddings=True,
             embedding_reduce_group_size=2,
             position_embedding_reduce_group_size=2,
+            max_gradient_norm=100.0,
+            check_for_nan=True,
+            reduction_strategy="all_reduce",
         )
 
         assert config.share_embeddings_and_output_weights is True
         assert config.share_position_embeddings is True
         assert config.embedding_reduce_group_size == 2
         assert config.position_embedding_reduce_group_size == 2
+        assert config.max_gradient_norm == 100.0
+        assert config.check_for_nan is True
+
+    def test_shared_weight_config_validation(self):
+        """Test SharedWeightConfig validation."""
+        # Test invalid max_gradient_norm
+        with pytest.raises(ValueError, match="max_gradient_norm must be positive"):
+            SharedWeightConfig(max_gradient_norm=-1.0)
+
+        # Test invalid reduction strategy
+        with pytest.raises(ValueError, match="Invalid reduction strategy"):
+            SharedWeightConfig(reduction_strategy="invalid")
+
+        # Test invalid gradient scaling
+        with pytest.raises(
+            ValueError, match="Gradient scaling factors must be positive"
+        ):
+            SharedWeightConfig(gradient_predivide_factor=0.0)
+
+        # Test invalid bucket size
+        with pytest.raises(ValueError, match="bucket_size_mb must be positive"):
+            SharedWeightConfig(bucket_size_mb=-10)
 
     def test_process_group_caching(self):
         """Test that process groups are cached properly."""
-        config = MagicMock()
+        config = MagicMock(spec=["max_gradient_norm", "check_for_nan", "timers"])
+        config.max_gradient_norm = 1e10
+        config.check_for_nan = True
+        config.timers = None
         reducer = SharedWeightGradientReducer(config)
 
         # Create mock process groups
@@ -213,7 +262,10 @@ class TestSharedWeightGradientReducer:
 
     def test_gradient_reduction_with_mixed_precision(self):
         """Test gradient reduction with mixed precision training."""
-        config = MagicMock()
+        config = MagicMock(spec=["max_gradient_norm", "check_for_nan", "timers"])
+        config.max_gradient_norm = 1e10
+        config.check_for_nan = True
+        config.timers = None
         reducer = SharedWeightGradientReducer(config)
 
         model = MockModelWithSharedWeights()
@@ -229,6 +281,83 @@ class TestSharedWeightGradientReducer:
 
         grad = getattr(embedding_weight, grad_attr)
         assert grad is getattr(embedding_weight, "main_grad")
+
+    def test_reduction_metrics(self):
+        """Test reduction metrics tracking."""
+        config = SharedWeightConfig(enable_metrics=True)
+        reducer = SharedWeightGradientReducer(config)
+
+        # Get initial metrics
+        metrics = reducer.get_reduction_metrics()
+        assert metrics.total_bytes_reduced == 0
+        assert metrics.num_parameters_reduced == 0
+        assert metrics.overflow_detected is False
+
+        # Reset metrics
+        reducer.reset_metrics()
+        metrics = reducer.get_reduction_metrics()
+        assert metrics.total_bytes_reduced == 0
+
+    def test_nan_detection(self):
+        """Test NaN detection in gradients."""
+        config = SharedWeightConfig(check_for_nan=True)
+        reducer = SharedWeightGradientReducer(config)
+
+        model = MockModelWithSharedWeights()
+        # Create gradient with NaN
+        grad_with_nan = torch.randn(100, 32)
+        grad_with_nan[0, 0] = float("nan")
+        model.word_embeddings.weight.grad = grad_with_nan
+
+        # Should handle NaN gracefully
+        with patch.object(reducer, "_is_first_stage", return_value=True):
+            with patch.object(reducer, "_get_process_group_size", return_value=1):
+                # This should not raise an error but should set overflow_detected
+                reducer._allreduce_embedding_grad(
+                    model=[model],
+                    weight_getter=reducer._default_get_word_embedding_weight,
+                    embd_group=None,
+                    skip_if_none=True,
+                )
+
+                metrics = reducer.get_reduction_metrics()
+                assert metrics.overflow_detected is True
+
+    def test_model_unwrapping(self):
+        """Test robust model unwrapping."""
+        config = MagicMock(spec=["max_gradient_norm", "check_for_nan", "timers"])
+        config.max_gradient_norm = 1e10
+        config.check_for_nan = True
+        config.timers = None
+        reducer = SharedWeightGradientReducer(config)
+
+        # Test single level unwrapping
+        model = MockModelWithSharedWeights()
+        wrapped_once = MagicMock(module=model)
+        unwrapped = reducer._unwrap_model(wrapped_once)
+        assert unwrapped is model
+
+        # Test multi-level unwrapping
+        model2 = MockModelWithSharedWeights()
+
+        # Create a simple wrapper class that acts like DDP
+        class SimpleWrapper(nn.Module):
+            def __init__(self, module):
+                super().__init__()
+                self.module = module
+
+        wrapped_once2 = SimpleWrapper(model2)
+        wrapped_twice = SimpleWrapper(wrapped_once2)
+        unwrapped = reducer._unwrap_model(wrapped_twice)
+        assert unwrapped is model2
+
+        # Test max depth limit
+        deeply_wrapped = model
+        for _ in range(5):
+            deeply_wrapped = MagicMock(module=deeply_wrapped)
+        unwrapped = reducer._unwrap_model(deeply_wrapped, max_depth=3)
+        # Should only unwrap 3 levels
+        assert hasattr(unwrapped, "module")
 
 
 class TestIntegrationWithGradientFinalizer:
@@ -259,6 +388,53 @@ class TestIntegrationWithGradientFinalizer:
         # Verify shared weight reducer was created
         assert finalizer.shared_weight_reducer is not None
         assert isinstance(finalizer.shared_weight_reducer, SharedWeightGradientReducer)
+
+
+class TestErrorHandling:
+    """Test error handling and edge cases."""
+
+    def test_uninitialized_distributed(self):
+        """Test behavior when distributed is not initialized."""
+        config = SharedWeightConfig()
+        reducer = SharedWeightGradientReducer(config)
+
+        with patch("torch.distributed.is_initialized", return_value=False):
+            # Should handle gracefully
+            assert reducer._get_current_rank_safe() == 0
+            assert reducer._get_process_group_size(None) == 1
+            assert reducer._is_in_embedding_group() is False
+
+    def test_gradient_clipping(self):
+        """Test gradient clipping for large gradients."""
+        config = SharedWeightConfig(max_gradient_norm=1.0)
+        reducer = SharedWeightGradientReducer(config)
+
+        model = MockModelWithSharedWeights()
+        # Create large gradient
+        large_grad = torch.randn(100, 32) * 1000
+        model.word_embeddings.weight.grad = large_grad
+
+        with patch.object(reducer, "_is_first_stage", return_value=True):
+            # The gradient should be clipped during reduction
+            reducer._allreduce_embedding_grad(
+                model=[model],
+                weight_getter=reducer._default_get_word_embedding_weight,
+                embd_group=None,
+                skip_if_none=True,
+            )
+
+    def test_empty_shared_params(self):
+        """Test all-reduce with empty shared parameters."""
+        config = SharedWeightConfig()
+        reducer = SharedWeightGradientReducer(config)
+
+        # Should handle empty list gracefully
+        reducer.allreduce_shared_params(
+            model=[MagicMock()],
+            shared_params=[],
+            reduce_group=None,
+        )
+        # No error should occur
 
 
 if __name__ == "__main__":
