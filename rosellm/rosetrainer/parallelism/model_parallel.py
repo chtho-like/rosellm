@@ -3,6 +3,9 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
+from ..memory.global_memory_buffer import BufferType, allocate_tensor, release_tensor
+from .parallel_state import get_global_memory_buffer as get_buffer_from_state
+
 # References:
 # [1] Shoeybi, M. et al. "Megatron-LM: Training Multi-Billion Parameter
 #     Language Models Using Model Parallelism." arXiv:1909.08053 (2019)
@@ -130,17 +133,43 @@ class TensorParallelism:
 
         # All-gather tensors
         tensors = []
-        for size in sizes_int:
-            # Create shape dynamically
-            shape = list(tensor.shape)
-            shape[dim] = size
-            # Create tensor with correct shape
-            tensors.append(torch.zeros(shape, dtype=tensor.dtype, device=tensor.device))
+        buffer_manager = get_buffer_from_state()
+
+        # Use global buffers if available
+        if buffer_manager is not None:
+            for size in sizes_int:
+                # Create shape dynamically
+                shape = list(tensor.shape)
+                shape[dim] = size
+                # Allocate from global buffer
+                buf_tensor = allocate_tensor(
+                    tuple(shape),  # Convert list to tuple
+                    dtype=tensor.dtype,
+                    device=tensor.device,
+                    buffer_type=BufferType.COMMUNICATION,
+                    caller_info="TensorParallelism.all_gather_tensor",
+                )
+                tensors.append(buf_tensor)
+        else:
+            # Fallback to regular allocation
+            for size in sizes_int:
+                shape = list(tensor.shape)
+                shape[dim] = size
+                tensors.append(
+                    torch.zeros(shape, dtype=tensor.dtype, device=tensor.device)
+                )
 
         dist.all_gather(tensors, tensor, group=self.tp_group)
 
         # Concatenate along specified dimension
-        return torch.cat(tensors, dim=dim)
+        result = torch.cat(tensors, dim=dim)
+
+        # Release buffers if we used them
+        if buffer_manager is not None:
+            for t in tensors:
+                release_tensor(t)
+
+        return result
 
     def parallelize_layer(
         self, layer: torch.nn.Module, tp_type: str
@@ -372,7 +401,24 @@ class RowParallelLinear(torch.nn.Module):
 
         # All-reduce across processes
         if not self.skip_all_reduce and self.tp_size > 1:
-            dist.all_reduce(output_parallel, group=self.tp_group)
+            buffer_manager = get_buffer_from_state()
+
+            # Use global buffer for all-reduce if available
+            if buffer_manager is not None:
+                # Allocate buffer for all-reduce operation
+                comm_buffer = allocate_tensor(
+                    tuple(output_parallel.shape),  # Convert to tuple
+                    dtype=output_parallel.dtype,
+                    device=output_parallel.device,
+                    buffer_type=BufferType.COMMUNICATION,
+                    caller_info="RowParallelLinear.forward",
+                )
+                comm_buffer.copy_(output_parallel)
+                dist.all_reduce(comm_buffer, group=self.tp_group)
+                output_parallel.copy_(comm_buffer)
+                release_tensor(comm_buffer)
+            else:
+                dist.all_reduce(output_parallel, group=self.tp_group)
 
         # Add bias
         if self.bias is not None:
