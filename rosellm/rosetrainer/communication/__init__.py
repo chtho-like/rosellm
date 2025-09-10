@@ -8,6 +8,7 @@ Provides optimized communication patterns for distributed training:
 - Communication overlap strategies
 - Gradient bucketing for efficient communication
 - Multi-bucket coordination and grouping
+- Gradient bucket coalescing for optimized kernel launches
 """
 
 from typing import Optional
@@ -21,6 +22,14 @@ from .bucket_groups import (
     BucketGroupManager,
     GroupStrategy,
     PriorityLevel,
+)
+
+# Import coalescing components
+from .coalescing import (
+    CoalescingConfig,
+    CoalescingError,
+    CoalescingManager,
+    CoalescingMetrics,
 )
 
 # Import gradient bucketing components
@@ -85,4 +94,9 @@ __all__ = [
     "BucketGroupManager",
     "GroupStrategy",
     "PriorityLevel",
+    # Coalescing
+    "CoalescingConfig",
+    "CoalescingError",
+    "CoalescingManager",
+    "CoalescingMetrics",
 ]
