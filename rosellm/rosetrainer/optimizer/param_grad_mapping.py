@@ -851,7 +851,7 @@ class ParamGradMappingBuilder:
         ```
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the builder."""
         self._params: Optional[Union[List[Parameter], List[Dict[str, Any]]]] = None
         self._config = MappingConfig()

@@ -12,6 +12,14 @@ from .config import DistributedOptimizerConfig, PartitioningStrategy
 from .distributed_optimizer import DistributedOptimizer
 from .factory import OptimizerFactory
 from .memory_profiler import MemoryProfiler, MemoryStats
+from .multi_tensor_adam import (
+    MultiTensorAdam,
+    MultiTensorAdamConfig,
+    OverflowAction,
+    WeightDecayMode,
+    create_multi_tensor_adam,
+    create_multi_tensor_adamw,
+)
 from .param_grad_mapping import (
     MappingConfig,
     MultiTensorOperator,
@@ -29,6 +37,13 @@ __all__ = [
     "DistributedOptimizerConfig",
     "ParameterPartitioner",
     "ParameterRange",
+    # Multi-Tensor Adam Optimizer
+    "MultiTensorAdam",
+    "MultiTensorAdamConfig",
+    "WeightDecayMode",
+    "OverflowAction",
+    "create_multi_tensor_adam",
+    "create_multi_tensor_adamw",
     # Parameter-gradient mapping
     "ParamGradMapping",
     "ParamGradMappingBuilder",
