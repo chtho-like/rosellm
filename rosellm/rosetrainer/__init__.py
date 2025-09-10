@@ -110,6 +110,12 @@ from .random import (  # Multi-Parallel RNG State Management
     set_parallel_rng_state,
     synchronize_parallel_rng_states,
 )
+from .tensor_parallel import (  # Tensor parallel components
+    VocabParallelCrossEntropy,
+    VocabParallelCrossEntropyLoss,
+    VocabUtility,
+    vocab_parallel_cross_entropy,
+)
 from .utils import (  # Gradient utilities
     GradientClipConfig,
     apply_gradient_clipping,
@@ -231,4 +237,9 @@ __all__ = [
     "IntegrationConfig",
     "ParallelismType",
     "ParallelismInfo",
+    # Tensor Parallel Components
+    "VocabParallelCrossEntropy",
+    "VocabParallelCrossEntropyLoss",
+    "VocabUtility",
+    "vocab_parallel_cross_entropy",
 ]
