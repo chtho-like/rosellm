@@ -44,6 +44,7 @@ from ..utils.gradient_utils import (
 )
 from ..utils.multi_tensor_ops import MultiTensorOperator, multi_tensor_clip_grad_norm
 from .config import GradientFinalizationConfig
+from .shared_weight_reducer import SharedWeightGradientReducer
 from .strategies import (
     BucketedGradientSync,
     GradientSyncStrategy,
@@ -321,6 +322,14 @@ class GradientFinalizer:
             ),
         )
 
+        # Initialize shared weight gradient reducer if needed
+        self.shared_weight_reducer: Optional[SharedWeightGradientReducer] = None
+        if hasattr(config, "shared_weight_config"):
+            self.shared_weight_reducer = SharedWeightGradientReducer(config)
+        elif config.share_embeddings_and_output_weights:
+            # Create shared weight reducer when embeddings are tied
+            self.shared_weight_reducer = SharedWeightGradientReducer(config)
+
         if config.verbose:
             logger.info(
                 f"Initialized GradientFinalizer with strategy: "
@@ -335,20 +344,20 @@ class GradientFinalizer:
         # Get process groups from parallel state
         if parallel_state.is_initialized():
             self.process_groups["tp"] = parallel_state.get_tensor_model_parallel_group()
-            self.process_groups["pp"] = (
-                parallel_state.get_pipeline_model_parallel_group()
-            )
+            self.process_groups[
+                "pp"
+            ] = parallel_state.get_pipeline_model_parallel_group()
             self.process_groups["dp"] = parallel_state.get_data_parallel_group()
             self.process_groups["cp"] = parallel_state.get_context_parallel_group()
             self.process_groups["ep"] = parallel_state.get_expert_model_parallel_group()
 
             # Combined groups for optimized communication
-            self.process_groups["tp_dp"] = (
-                parallel_state.get_tensor_and_data_parallel_group()
-            )
-            self.process_groups["tp_dp_cp"] = (
-                parallel_state.get_tensor_and_data_parallel_group_with_cp()
-            )
+            self.process_groups[
+                "tp_dp"
+            ] = parallel_state.get_tensor_and_data_parallel_group()
+            self.process_groups[
+                "tp_dp_cp"
+            ] = parallel_state.get_tensor_and_data_parallel_group_with_cp()
             self.process_groups["model"] = parallel_state.get_model_parallel_group()
         else:
             # Fallback to default world group
@@ -711,6 +720,25 @@ class GradientFinalizer:
             sync_stats = self.sync_strategy.sync_gradients(
                 self.model, self.process_groups
             )
+
+            # Handle shared weight gradient reduction if configured
+            if self.shared_weight_reducer is not None:
+                with self._measure_time("shared_weight_sync"):
+                    # Convert model to list format expected by reducer
+                    model_list = [self.model]
+
+                    # Reduce word embedding gradients
+                    self.shared_weight_reducer.allreduce_word_embedding_grads(
+                        model_list
+                    )
+
+                    # Reduce position embedding gradients if configured
+                    if self.config.share_position_embeddings:
+                        self.shared_weight_reducer.allreduce_position_embedding_grads(
+                            model_list
+                        )
+
+                    sync_stats["shared_weight_sync"] = True
 
             # Track performance metrics
             sync_time = time.perf_counter() - sync_start

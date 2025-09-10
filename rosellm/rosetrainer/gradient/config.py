@@ -65,6 +65,10 @@ class GradientFinalizationConfig:
         enable_gradient_stats: Whether to collect gradient statistics
         gradient_norm_type: Type of norm to use for gradient norm calculation
         verbose: Whether to enable verbose logging
+        share_embeddings_and_output_weights: Whether input/output weights are tied
+        share_position_embeddings: Whether position embeddings are shared
+        embedding_reduce_group_size: Size of embedding reduction group
+        position_embedding_reduce_group_size: Size of position embedding group
     """
 
     # Basic configuration
@@ -119,6 +123,12 @@ class GradientFinalizationConfig:
     # Performance optimization
     max_stats_history: int = 100
     enable_profiling: bool = False
+
+    # Shared weight configuration (for tied embeddings)
+    share_embeddings_and_output_weights: bool = False
+    share_position_embeddings: bool = False
+    embedding_reduce_group_size: Optional[int] = None
+    position_embedding_reduce_group_size: Optional[int] = None
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -255,6 +265,14 @@ class GradientFinalizationConfig:
             "verbose": self.verbose,
             "sync_timeout_seconds": self.sync_timeout_seconds,
             "enable_timing_stats": self.enable_timing_stats,
+            "share_embeddings_and_output_weights": (
+                self.share_embeddings_and_output_weights
+            ),
+            "share_position_embeddings": self.share_position_embeddings,
+            "embedding_reduce_group_size": self.embedding_reduce_group_size,
+            "position_embedding_reduce_group_size": (
+                self.position_embedding_reduce_group_size
+            ),
         }
 
     @classmethod

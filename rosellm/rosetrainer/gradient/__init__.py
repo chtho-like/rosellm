@@ -37,6 +37,7 @@ from .finalization import (
     finalize_gradients_advanced,
 )
 from .finalizer import GradientFinalizer
+from .shared_weight_reducer import SharedWeightConfig, SharedWeightGradientReducer
 from .strategies import (
     BucketedGradientSync,
     GradientSyncStrategy,
@@ -84,4 +85,7 @@ __all__ = [
     "DecoupledGradientConfig",
     "DecoupledGradientManager",
     "StorageMode",
+    # Shared Weight Gradient Reduction
+    "SharedWeightConfig",
+    "SharedWeightGradientReducer",
 ]
