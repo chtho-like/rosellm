@@ -136,7 +136,7 @@ class LanguageModel(nn.Module):
 
         # Output projection
         x = self.ln_f(x)
-        logits = self.lm_head(x)
+        logits: torch.Tensor = self.lm_head(x)
 
         return logits
 

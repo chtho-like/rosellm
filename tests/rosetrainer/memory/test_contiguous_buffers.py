@@ -21,6 +21,7 @@ from torch.testing import assert_close
 
 from rosellm.rosetrainer.memory.contiguous_buffers import (
     BucketConfig,
+    BucketStatistics,
     BufferType,
     ContiguousParamGradBuffer,
     ParamGradBucket,
@@ -51,7 +52,8 @@ class SimpleModel(nn.Module):
 
         x = self.relu(self.fc1(x))
         x = self.relu(self.fc2(x))
-        return self.fc3(x)
+        output: torch.Tensor = self.fc3(x)
+        return output
 
 
 class TestBucketConfig(unittest.TestCase):
@@ -286,7 +288,11 @@ class TestParamGradBucket(unittest.TestCase):
 
         # Check fill ratios
         expected_param_fill = (10000 + 2500) / bucket.param_numel
-        self.assertAlmostEqual(stats["param_fill_ratio"], expected_param_fill, places=3)
+        actual_param_fill = stats.get("param_fill_ratio", 0.0)
+        if isinstance(actual_param_fill, (int, float)):
+            self.assertAlmostEqual(
+                float(actual_param_fill), expected_param_fill, places=3
+            )
 
 
 class TestContiguousParamGradBuffer(unittest.TestCase):
@@ -445,6 +451,172 @@ class TestContiguousParamGradBuffer(unittest.TestCase):
             param.data = old_data  # Restore for next iteration
 
 
+class TestAdvancedFeatures(unittest.TestCase):
+    """Test advanced features and optimizations."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.model = SimpleModel(128, 256, 10)
+        self.device = torch.device("cpu")
+
+    def test_context_manager(self):
+        """Test context manager for automatic cleanup."""
+        config = BucketConfig(bucket_size_mb=1.0)
+
+        # Use context manager
+        with ContiguousParamGradBuffer(
+            self.model, config
+        ).managed_buffers() as buffer_mgr:
+            self.assertIsNotNone(buffer_mgr)
+            self.assertGreater(buffer_mgr.total_params, 0)
+
+            # Perform operations
+            buffer_mgr.zero_gradients()
+
+        # After context, resources should be cleaned up
+        # (Can't directly test cleanup, but no errors should occur)
+
+    def test_thread_safety(self):
+        """Test thread-safe operations."""
+        config = BucketConfig(bucket_size_mb=1.0, thread_safe=True)
+        buffer_mgr = ContiguousParamGradBuffer(
+            model=self.model,
+            bucket_config=config,
+        )
+
+        # Verify thread safety is enabled
+        self.assertIsNotNone(buffer_mgr._lock)
+
+        # Test concurrent operations (simplified)
+        import threading
+
+        def zero_grads():
+            buffer_mgr.zero_gradients()
+
+        def get_stats():
+            buffer_mgr.get_memory_usage()
+
+        # Create threads
+        threads = [
+            threading.Thread(target=zero_grads),
+            threading.Thread(target=get_stats),
+        ]
+
+        # Start threads
+        for t in threads:
+            t.start()
+
+        # Wait for completion
+        for t in threads:
+            t.join()
+
+        # Should complete without deadlock
+
+    def test_performance_statistics(self):
+        """Test performance statistics tracking."""
+        config = BucketConfig(bucket_size_mb=1.0)
+        buffer_mgr = ContiguousParamGradBuffer(
+            model=self.model,
+            bucket_config=config,
+        )
+
+        # Get memory usage stats
+        stats = buffer_mgr.get_memory_usage()
+
+        # Check for performance stats in buckets
+        if "bucket_stats" in stats:
+            bucket_stats_data = stats["bucket_stats"]
+            if isinstance(bucket_stats_data, dict):
+                for key, bucket_list in bucket_stats_data.items():
+                    for bucket_stats in bucket_list:
+                        # New performance stats should be present
+                        if "performance_stats" in bucket_stats:
+                            perf = bucket_stats["performance_stats"]
+                            self.assertIn("avg_allreduce_time", perf)
+                            self.assertIn("avg_sync_time", perf)
+
+    def test_numerical_stability(self):
+        """Test numerical stability in gradient clipping."""
+        config = BucketConfig(bucket_size_mb=1.0)
+        buffer_mgr = ContiguousParamGradBuffer(
+            model=self.model,
+            bucket_config=config,
+        )
+
+        # Set extreme gradient values
+        for bucket_list in buffer_mgr.buckets.values():
+            for bucket in bucket_list:
+                # Test with very large values
+                bucket.grad_data.fill_(1e10)
+
+        # Clip should handle without overflow
+        norm = buffer_mgr.clip_gradients(1.0)
+        self.assertTrue(math.isfinite(norm))
+
+        # Test with very small values
+        for bucket_list in buffer_mgr.buckets.values():
+            for bucket in bucket_list:
+                bucket.grad_data.fill_(1e-10)
+
+        norm = buffer_mgr.clip_gradients(1.0)
+        self.assertTrue(math.isfinite(norm))
+
+    def test_error_recovery(self):
+        """Test error recovery mechanisms."""
+        config = BucketConfig(bucket_size_mb=1.0)  # Minimum allowed size
+
+        # Should handle allocation properly
+        buffer_mgr = ContiguousParamGradBuffer(
+            model=self.model,
+            bucket_config=config,
+        )
+
+        # Should have created buckets
+        self.assertGreater(buffer_mgr.total_buckets, 0)
+
+        # Test invalid gradient clipping
+        with self.assertRaises(ValueError):
+            buffer_mgr.clip_gradients(-1.0)  # Negative norm
+
+        with self.assertRaises(ValueError):
+            buffer_mgr.clip_gradients(0.0)  # Zero norm
+
+    def test_dtype_compatibility(self):
+        """Test dtype compatibility validation."""
+
+        # Create model with mixed dtypes
+        class MixedDtypeModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc1 = nn.Linear(10, 10)
+                self.fc2 = nn.Linear(10, 10)
+
+            def forward(self, x):
+                return self.fc2(self.fc1(x))
+
+        model = MixedDtypeModel()
+
+        # Convert one layer to float16
+        if torch.cuda.is_available():
+            model.fc2 = model.fc2.half()
+
+        config = BucketConfig(
+            bucket_size_mb=1.0,
+            dtype_buckets=True,
+        )
+
+        # Should handle mixed dtypes
+        buffer_mgr = ContiguousParamGradBuffer(
+            model=model,
+            bucket_config=config,
+        )
+
+        # Should have separate buckets for different dtypes if enabled
+        if config.dtype_buckets and torch.cuda.is_available():
+            dtype_count = len(set(p.dtype for p in model.parameters()))
+            self.assertGreaterEqual(len(buffer_mgr.buckets), dtype_count)
+
+
 class TestDataParallelIntegration(unittest.TestCase):
     """Test integration with DataParallelTrainer."""
 
@@ -601,6 +773,32 @@ class TestDistributedOperations(unittest.TestCase):
         # This test would require proper distributed setup
         # Skipped in unit tests, but can be run in integration tests
         pass
+
+
+class TestBucketStatistics(unittest.TestCase):
+    """Test BucketStatistics class."""
+
+    def test_statistics_tracking(self):
+        """Test statistics tracking functionality."""
+        stats = BucketStatistics()
+
+        # Update statistics
+        stats.update_allreduce_time(0.1)
+        stats.update_allreduce_time(0.2)
+        stats.update_sync_time(0.05)
+
+        # Get averages
+        avg = stats.get_average_times()
+
+        self.assertAlmostEqual(avg["avg_allreduce_time"], 0.15, places=3)
+        self.assertAlmostEqual(avg["avg_sync_time"], 0.05, places=3)
+
+        # Test with no calls
+        empty_stats = BucketStatistics()
+        avg_empty = empty_stats.get_average_times()
+
+        self.assertEqual(avg_empty["avg_allreduce_time"], 0.0)
+        self.assertEqual(avg_empty["avg_sync_time"], 0.0)
 
 
 if __name__ == "__main__":

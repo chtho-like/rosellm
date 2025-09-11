@@ -17,17 +17,11 @@ from .dynamic_scaler import (
     get_recommended_config,
     is_apex_available,
 )
-from .gradient_scaler import (
-    AbstractGradScaler,
-    ConstantGradScaler,
-)
+from .gradient_scaler import AbstractGradScaler, ConstantGradScaler
 from .gradient_scaler import (
     DynamicGradScaler as LegacyDynamicGradScaler,  # Legacy version
 )
-from .gradient_scaler import (
-    GradScalerConfig,
-    check_for_inf_and_nan,
-)
+from .gradient_scaler import GradScalerConfig, check_for_inf_and_nan
 from .mixed_precision import (
     MixedPrecisionConfig,
     MixedPrecisionManager,
