@@ -9,6 +9,10 @@ This package provides a comprehensive distributed optimizer implementation with:
 - Gradient bucket coalescing for optimized communication
 """
 
+# Import standard PyTorch optimizers for convenience
+from torch.optim import SGD, Adagrad, Adam, AdamW, RMSprop
+
+from .chained_optimizer import ChainedOptimizer
 from .coalesced_gradient_buffer import CoalescedBucket, CoalescedGradientBuffer
 from .config import DistributedOptimizerConfig, PartitioningStrategy
 from .distributed_optimizer import DistributedOptimizer
@@ -23,6 +27,7 @@ from .multi_tensor_adam import (
     create_multi_tensor_adam,
     create_multi_tensor_adamw,
 )
+from .optimizer_factory import OptimFactory
 from .param_grad_mapping import (
     MappingConfig,
     MultiTensorOperator,
@@ -93,7 +98,16 @@ __all__ = [
     "MultiTensorOperator",
     # Factory and utilities
     "OptimizerFactory",
+    "OptimFactory",
     "MemoryProfiler",
     # Enums
     "PartitioningStrategy",
+    # ChainedOptimizer
+    "ChainedOptimizer",
+    # Standard PyTorch optimizers
+    "Adam",
+    "AdamW",
+    "SGD",
+    "RMSprop",
+    "Adagrad",
 ]
