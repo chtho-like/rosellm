@@ -177,7 +177,9 @@ class MixedPrecisionConfig(BaseModel):
     use_multi_tensor: bool = Field(
         True, description="Use multi-tensor operations when available"
     )
-    chunk_size: int = Field(2**20, gt=0, description="Chunk size for multi-tensor ops")
+    chunk_size: int = Field(
+        2**20, gt=0, description="Chunk size for multi-tensor ops"
+    )
 
     # Overflow detection
     enable_inf_nan_check: bool = Field(
@@ -249,9 +251,9 @@ class PositionEmbeddingConfig(BaseModel):
     rope_scaling: Optional[Dict[str, Any]] = Field(
         None, description="RoPE scaling configuration for context extension"
     )
-    rope_interpolation_type: Literal["none", "linear", "ntk", "dynamic_ntk", "yarn"] = (
-        Field("none", description="RoPE interpolation method")
-    )
+    rope_interpolation_type: Literal[
+        "none", "linear", "ntk", "dynamic_ntk", "yarn"
+    ] = Field("none", description="RoPE interpolation method")
     rope_scaling_factor: float = Field(
         1.0, gt=0, description="Scaling factor for RoPE positions"
     )
@@ -435,9 +437,9 @@ class BucketingConfig(BaseModel):
 
     # Group management
     enable_groups: bool = Field(False, description="Enable bucket grouping")
-    group_strategy: Literal["parallel", "sequential", "hierarchical", "adaptive"] = (
-        Field("adaptive", description="Group communication strategy")
-    )
+    group_strategy: Literal[
+        "parallel", "sequential", "hierarchical", "adaptive"
+    ] = Field("adaptive", description="Group communication strategy")
     max_groups: int = Field(8, ge=1, le=32, description="Maximum number of groups")
 
     # Performance tuning

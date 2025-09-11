@@ -228,12 +228,12 @@ class GradientDataTypeManager:
 
         # Gradient storage for type conversions (using WeakKeyDictionary for
         # automatic cleanup)
-        self._master_gradients: WeakKeyDictionary[nn.Parameter, torch.Tensor] = (
-            WeakKeyDictionary()
-        )
-        self._gradient_refs: Dict[str, torch.Tensor] = (
-            {}
-        )  # Name-based references for restoration
+        self._master_gradients: WeakKeyDictionary[
+            nn.Parameter, torch.Tensor
+        ] = WeakKeyDictionary()
+        self._gradient_refs: Dict[
+            str, torch.Tensor
+        ] = {}  # Name-based references for restoration
         self._conversion_stats = {
             "total_conversions": 0,
             "compression_ratio": 0.0,
@@ -651,45 +651,45 @@ class AdvancedGradientFinalizer:
 
             for dim in parallel_dims:
                 if dim == "tp":
-                    self._parallel_groups[dim] = (
-                        parallel_state.get_tensor_model_parallel_group()
-                    )
-                    self._parallel_ranks[dim] = (
-                        parallel_state.get_tensor_model_parallel_rank()
-                    )
+                    self._parallel_groups[
+                        dim
+                    ] = parallel_state.get_tensor_model_parallel_group()
+                    self._parallel_ranks[
+                        dim
+                    ] = parallel_state.get_tensor_model_parallel_rank()
                     self._parallel_sizes[dim] = getattr(
                         parallel_state,
                         "get_tensor_model_parallel_world_size",
                         lambda: 1,
                     )()
                 elif dim == "pp":
-                    self._parallel_groups[dim] = (
-                        parallel_state.get_pipeline_model_parallel_group()
-                    )
-                    self._parallel_ranks[dim] = (
-                        parallel_state.get_pipeline_model_parallel_rank()
-                    )
+                    self._parallel_groups[
+                        dim
+                    ] = parallel_state.get_pipeline_model_parallel_group()
+                    self._parallel_ranks[
+                        dim
+                    ] = parallel_state.get_pipeline_model_parallel_rank()
                     self._parallel_sizes[dim] = getattr(
                         parallel_state,
                         "get_pipeline_model_parallel_world_size",
                         lambda: 1,
                     )()
                 elif dim == "dp":
-                    self._parallel_groups[dim] = (
-                        parallel_state.get_data_parallel_group()
-                    )
+                    self._parallel_groups[
+                        dim
+                    ] = parallel_state.get_data_parallel_group()
                     self._parallel_ranks[dim] = parallel_state.get_data_parallel_rank()
                     self._parallel_sizes[dim] = getattr(
                         parallel_state, "get_data_parallel_world_size", lambda: 1
                     )()
                 elif dim == "cp":
-                    self._parallel_groups[dim] = (
-                        parallel_state.get_context_parallel_group()
-                    )
+                    self._parallel_groups[
+                        dim
+                    ] = parallel_state.get_context_parallel_group()
                     if hasattr(parallel_state, "get_context_parallel_rank"):
-                        self._parallel_ranks[dim] = (
-                            parallel_state.get_context_parallel_rank()
-                        )
+                        self._parallel_ranks[
+                            dim
+                        ] = parallel_state.get_context_parallel_rank()
                         self._parallel_sizes[dim] = getattr(
                             parallel_state, "get_context_parallel_world_size", lambda: 1
                         )()
@@ -697,13 +697,13 @@ class AdvancedGradientFinalizer:
                         self._parallel_ranks[dim] = 0
                         self._parallel_sizes[dim] = 1
                 elif dim == "ep":
-                    self._parallel_groups[dim] = (
-                        parallel_state.get_expert_model_parallel_group()
-                    )
+                    self._parallel_groups[
+                        dim
+                    ] = parallel_state.get_expert_model_parallel_group()
                     if hasattr(parallel_state, "get_expert_model_parallel_rank"):
-                        self._parallel_ranks[dim] = (
-                            parallel_state.get_expert_model_parallel_rank()
-                        )
+                        self._parallel_ranks[
+                            dim
+                        ] = parallel_state.get_expert_model_parallel_rank()
                         self._parallel_sizes[dim] = getattr(
                             parallel_state,
                             "get_expert_model_parallel_world_size",

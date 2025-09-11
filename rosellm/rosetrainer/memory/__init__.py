@@ -12,6 +12,8 @@ Provides memory optimization techniques:
 """
 
 from .activation_checkpoint import ActivationCheckpointing, MemoryProfiler
+from .contiguous_buffers import BucketConfig as ContiguousBucketConfig
+from .contiguous_buffers import BufferType, ContiguousParamGradBuffer, ParamGradBucket
 from .cpu_offload import CPUOffloadOptimizer, ParameterOffloader
 from .param_grad_buffer import (
     BucketConfig,
@@ -125,6 +127,11 @@ __all__ = [
     "GradientBucket",
     "BufferManager",
     "BucketConfig",
+    # Contiguous Parameter-Gradient Buffers
+    "ContiguousParamGradBuffer",
+    "ParamGradBucket",
+    "ContiguousBucketConfig",
+    "BufferType",
     # Parameter Overlap
     "AsyncParameterGatherer",
     "GatherRequest",

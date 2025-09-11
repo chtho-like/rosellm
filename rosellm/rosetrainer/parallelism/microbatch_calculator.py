@@ -987,7 +987,9 @@ def calculate_optimal_microbatch_size(
         )
 
         # Convert to GB with overflow protection
-        if total_activation_elements > (2**50 // bytes_per_element):  # Prevent overflow
+        if total_activation_elements > (
+            2**50 // bytes_per_element
+        ):  # Prevent overflow
             logger.warning(
                 f"Activation memory calculation would overflow, using fallback"
             )
