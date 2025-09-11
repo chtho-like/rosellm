@@ -8,7 +8,7 @@ This module extends the optimizer creation capabilities with support for:
 """
 
 import logging
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Type, Union, cast
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,7 @@ class OptimFactory:
     """Extended factory for creating optimizers with advanced configurations."""
 
     # Registry of available optimizer classes
-    OPTIMIZER_REGISTRY: Dict[str, type] = {
+    OPTIMIZER_REGISTRY: Dict[str, Type[Optimizer]] = {
         "adam": Adam,
         "adamw": AdamW,
         "sgd": SGD,
@@ -124,7 +124,7 @@ class OptimFactory:
             # Pass through any additional kwargs
             opt_kwargs.update(kwargs)
 
-        return optimizer_class(params, **opt_kwargs)
+        return cast(Optimizer, optimizer_class(params, **opt_kwargs))
 
     @classmethod
     def create_chained_optimizer(

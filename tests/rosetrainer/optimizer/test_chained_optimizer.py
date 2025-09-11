@@ -36,7 +36,8 @@ class SimpleModel(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.relu(self.fc1(x))
-        return self.fc2(x)
+        output = self.fc2(x)
+        return output  # type: ignore[no-any-return]
 
 
 class MoELayer(nn.Module):
@@ -52,7 +53,7 @@ class MoELayer(nn.Module):
         # Mark expert parameters
         for expert in self.experts:
             for param in expert.parameters():
-                param.allreduce = False  # Mark as expert
+                setattr(param, "allreduce", False)  # Mark as expert
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_scores = self.gate(x)
@@ -80,7 +81,8 @@ class MoEModel(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.embedding(x)
         x = self.moe_layer(x)
-        return self.output(x)
+        output = self.output(x)
+        return output  # type: ignore[no-any-return]
 
 
 class TestChainedOptimizer(unittest.TestCase):
@@ -300,13 +302,19 @@ class TestChainedOptimizer(unittest.TestCase):
 
         # Check fc1 parameters map to opt1
         for param in fc1_params:
-            opt, idx = chained.get_optimizer_for_param(param)
+            result = chained.get_optimizer_for_param(param)
+            self.assertIsNotNone(result)
+            assert result is not None  # Type hint for pyright
+            opt, idx = result
             self.assertEqual(opt, opt1)
             self.assertEqual(idx, 0)
 
         # Check fc2 parameters map to opt2
         for param in fc2_params:
-            opt, idx = chained.get_optimizer_for_param(param)
+            result = chained.get_optimizer_for_param(param)
+            self.assertIsNotNone(result)
+            assert result is not None  # Type hint for pyright
+            opt, idx = result
             self.assertEqual(opt, opt2)
             self.assertEqual(idx, 0)
 
@@ -354,6 +362,7 @@ class TestChainedOptimizer(unittest.TestCase):
         # Get metrics
         metrics = chained.get_metrics()
         self.assertIsNotNone(metrics)
+        assert metrics is not None  # Type hint for pyright
         self.assertIn("total_steps", metrics)
         self.assertEqual(metrics["total_steps"], 5)
 
@@ -476,6 +485,150 @@ class TestChainedOptimizer(unittest.TestCase):
         loss_value = chained.step(closure)
         self.assertIsNotNone(loss_value)
         self.assertIsInstance(loss_value, float)
+
+    def test_gradient_clipping(self):
+        """Test gradient clipping functionality."""
+        model = SimpleModel()
+
+        fc1_params = list(model.fc1.parameters())
+        fc2_params = list(model.fc2.parameters())
+
+        opt1 = Adam(fc1_params, lr=1e-3)
+        opt2 = SGD(fc2_params, lr=1e-2)
+
+        # Test with global gradient clipping
+        chained = ChainedOptimizer(
+            [opt1, opt2],
+            grad_clip_norm=1.0,
+            grad_clip_value=0.5,
+        )
+
+        x = torch.randn(4, 10)
+        y = model(x)
+        loss = y.mean()
+        loss.backward()
+
+        # Amplify gradients to ensure clipping is triggered
+        for param in model.parameters():
+            if param.grad is not None:
+                param.grad *= 100
+
+        chained.step()
+        chained.zero_grad()
+
+        # Test with per-optimizer gradient clipping
+        chained2 = ChainedOptimizer(
+            [opt1, opt2],
+            grad_clip_norm=[0.5, 1.0],
+            grad_clip_value=[None, 0.1],
+        )
+
+        x = torch.randn(4, 10)
+        y = model(x)
+        loss = y.mean()
+        loss.backward()
+
+        chained2.step()
+        chained2.zero_grad()
+
+    def test_freeze_unfreeze_optimizer(self):
+        """Test freezing and unfreezing optimizer parameters."""
+        model = SimpleModel()
+
+        fc1_params = list(model.fc1.parameters())
+        fc2_params = list(model.fc2.parameters())
+
+        opt1 = Adam(fc1_params, lr=1e-3)
+        opt2 = SGD(fc2_params, lr=1e-2)
+
+        chained = ChainedOptimizer([opt1, opt2])
+
+        # Freeze first optimizer's parameters
+        chained.freeze_optimizer(0)
+
+        for param in fc1_params:
+            self.assertFalse(param.requires_grad)
+        for param in fc2_params:
+            self.assertTrue(param.requires_grad)
+
+        # Unfreeze first optimizer's parameters
+        chained.unfreeze_optimizer(0)
+
+        for param in fc1_params:
+            self.assertTrue(param.requires_grad)
+
+    def test_optimizer_statistics(self):
+        """Test getting optimizer statistics."""
+        model = SimpleModel()
+
+        fc1_params = list(model.fc1.parameters())
+        fc2_params = list(model.fc2.parameters())
+
+        opt1 = Adam(fc1_params, lr=1e-3)
+        opt2 = AdamW(fc2_params, lr=1e-2)
+
+        chained = ChainedOptimizer([opt1, opt2])
+
+        stats = chained.get_optimizer_statistics()
+
+        self.assertEqual(len(stats), 2)
+        self.assertIn("type", stats[0])
+        self.assertIn("total_params", stats[0])
+        self.assertIn("trainable_params", stats[0])
+        self.assertIn("learning_rates", stats[0])
+
+        self.assertEqual(stats[0]["type"], "Adam")
+        self.assertEqual(stats[1]["type"], "AdamW")
+        self.assertGreater(stats[0]["total_params"], 0)
+        self.assertGreater(stats[1]["total_params"], 0)
+
+    def test_thread_safety(self):
+        """Test thread-safe operations."""
+        model = SimpleModel()
+        optimizer = Adam(model.parameters(), lr=1e-3)
+
+        # Create thread-safe chained optimizer
+        chained = ChainedOptimizer([optimizer], thread_safe=True)
+
+        # This should not raise any errors
+        x = torch.randn(4, 10)
+        y = model(x)
+        loss = y.mean()
+        loss.backward()
+
+        chained.step()
+        chained.zero_grad()
+
+        # Test state dict operations with thread safety
+        state_dict = chained.state_dict()
+        chained.load_state_dict(state_dict)
+
+    def test_pickle_support(self):
+        """Test pickling and unpickling support."""
+        import pickle
+
+        model = SimpleModel()
+        optimizer = Adam(model.parameters(), lr=1e-3)
+        chained = ChainedOptimizer([optimizer], thread_safe=True)
+
+        # Run a few steps
+        for _ in range(3):
+            x = torch.randn(4, 10)
+            y = model(x)
+            loss = y.mean()
+            loss.backward()
+            chained.step()
+            chained.zero_grad()
+
+        # Pickle and unpickle
+        pickled = pickle.dumps(chained)
+        unpickled = pickle.loads(pickled)
+
+        # Verify unpickled optimizer works
+        self.assertEqual(unpickled._step_count, chained._step_count)
+        self.assertEqual(
+            len(unpickled.chained_optimizers), len(chained.chained_optimizers)
+        )
 
 
 class TestOptimFactory(unittest.TestCase):

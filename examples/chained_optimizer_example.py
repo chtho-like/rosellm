@@ -13,7 +13,7 @@ This example demonstrates:
 import argparse
 import logging
 import os
-from typing import Tuple
+from typing import List, Tuple
 
 import torch
 import torch.distributed as dist
@@ -41,7 +41,7 @@ class ExpertLayer(nn.Module):
         # Mark expert parameters
         for expert in self.experts:
             for param in expert.parameters():
-                param.allreduce = False  # Mark as expert parallel
+                setattr(param, "allreduce", False)  # Mark as expert parallel
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Simple top-1 gating
@@ -91,7 +91,8 @@ class MoEModel(nn.Module):
         for layer in self.layers:
             x = layer(x) + x  # Residual connection
 
-        return self.output(x)
+        output = self.output(x)
+        return output  # type: ignore[no-any-return]
 
 
 def create_chained_optimizer_for_moe(
@@ -144,7 +145,7 @@ def create_chained_optimizer_for_moe(
                 }
             )
 
-    optimizers = []
+    optimizers: List[torch.optim.Optimizer] = []
 
     # Dense optimizer (for non-expert parameters)
     if dense_params:
@@ -269,7 +270,7 @@ def main():
 
         # Initialize model parallel groups
         initialize_model_parallel(
-            expert_parallel_size=args.expert_parallel_size,
+            expert_model_parallel_size=args.expert_parallel_size,
         )
 
     # Create model
