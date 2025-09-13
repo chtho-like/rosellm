@@ -1,0 +1,27 @@
+site_name: RoseLLM
+site_description: RLHF, training, and inference toolkit for LLMs
+repo_url: https://github.com/chtho-like/rosellm
+docs_dir: docs
+theme:
+  name: material
+  language: en
+plugins:
+  - search
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - tables
+  - codehilite
+nav:
+  - Home: index.md
+  - Guides:
+      - Mixed Precision: dynamic-loss-scaling-deep-dive.md
+      - Gradient Bucketing (Guide): gradient-bucketing-implementation-guide.md
+      - Gradient Communication: gradient-communication-bucketing-deep-dive.md
+      - Range Buffer Mapping: range-based-parameter-buffer-mapping-interview-guide.md
+      - Timers System: timers-system-deep-dive.md
+      - ROPE: rope-position-embeddings-deep-dive.md
+      - Shared Weight Reduction: shared-weight-gradient-reduction-deep-dive.md
+      - Indexed Dataset: memory-mapped-indexed-dataset-deep-dive.md
+      - Energy Monitoring: energy-monitoring-system-deep-dive.md

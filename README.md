@@ -163,7 +163,7 @@ position_embedding = PositionEmbeddingFactory.create(
 - **Thread-Safe**: Multi-threaded inference support with synchronized caching
 - **Partial RoPE**: Apply to subset of dimensions for improved performance
 
-For comprehensive technical details and interview preparation, see [`docs/rope-position-embeddings-deep-dive.md`](/data/projects/rosellm/docs/rope-position-embeddings-deep-dive.md).
+For comprehensive technical details and interview preparation, see [`docs/rope-position-embeddings-deep-dive.md`](docs/rope-position-embeddings-deep-dive.md).
 
 ### Data Parallelism
 
@@ -785,7 +785,7 @@ parallel_state.initialize_model_parallel(
 # and performs all-reduce on gradients to keep weights synchronized
 ```
 
-For comprehensive technical details and interview preparation, see [`docs/shared-weight-gradient-reduction-deep-dive.md`](/data/projects/rosellm/docs/shared-weight-gradient-reduction-deep-dive.md).
+For comprehensive technical details and interview preparation, see [`docs/shared-weight-gradient-reduction-deep-dive.md`](docs/shared-weight-gradient-reduction-deep-dive.md).
 
 ### Gradient Communication Bucketing
 
@@ -1015,12 +1015,12 @@ if torch.cuda.is_available():
 - **vs Megatron-LM timers**: Enhanced with thread safety, memory bounds, and optimized aggregation
 
 For comprehensive technical details, implementation guides, and interview preparation materials, see:
-- [`docs/range-based-parameter-buffer-mapping-interview-guide.md`](/data/projects/rosellm/docs/range-based-parameter-buffer-mapping-interview-guide.md) - **NEW** Complete technical deep dive on Range-Based Parameter Buffer Mapping with advanced bucketing, multi-tensor operations, and interview-ready questions for distributed training optimization
-- [`docs/timers-system-deep-dive.md`](/data/projects/rosellm/docs/timers-system-deep-dive.md) - **NEW** Complete technical deep dive on the performance timing system with distributed aggregation, interview questions, and comparison with Megatron-LM
-- [`docs/rope-position-embeddings-deep-dive.md`](/data/projects/rosellm/docs/rope-position-embeddings-deep-dive.md) - **NEW** Complete technical deep dive on Rotary Position Embeddings with interview-ready questions, mathematical foundations, and production optimizations
-- [`docs/dynamic-loss-scaling-deep-dive.md`](/data/projects/rosellm/docs/dynamic-loss-scaling-deep-dive.md) - Complete technical deep dive on Dynamic Loss Scaling with interview-ready questions, architectural analysis, and production best practices
-- [`docs/gradient-communication-bucketing-deep-dive.md`](/data/projects/rosellm/docs/gradient-communication-bucketing-deep-dive.md) - Technical deep dive with architecture details and interview questions
-- [`docs/gradient-bucketing-implementation-guide.md`](/data/projects/rosellm/docs/gradient-bucketing-implementation-guide.md) - Practical implementation patterns and code examples
+- [`docs/range-based-parameter-buffer-mapping-interview-guide.md`](docs/range-based-parameter-buffer-mapping-interview-guide.md) - **NEW** Complete technical deep dive on Range-Based Parameter Buffer Mapping with advanced bucketing, multi-tensor operations, and interview-ready questions for distributed training optimization
+- [`docs/timers-system-deep-dive.md`](docs/timers-system-deep-dive.md) - **NEW** Complete technical deep dive on the performance timing system with distributed aggregation, interview questions, and comparison with Megatron-LM
+- [`docs/rope-position-embeddings-deep-dive.md`](docs/rope-position-embeddings-deep-dive.md) - **NEW** Complete technical deep dive on Rotary Position Embeddings with interview-ready questions, mathematical foundations, and production optimizations
+- [`docs/dynamic-loss-scaling-deep-dive.md`](docs/dynamic-loss-scaling-deep-dive.md) - Complete technical deep dive on Dynamic Loss Scaling with interview-ready questions, architectural analysis, and production best practices
+- [`docs/gradient-communication-bucketing-deep-dive.md`](docs/gradient-communication-bucketing-deep-dive.md) - Technical deep dive with architecture details and interview questions
+- [`docs/gradient-bucketing-implementation-guide.md`](docs/gradient-bucketing-implementation-guide.md) - Practical implementation patterns and code examples
 
 ## Testing
 
