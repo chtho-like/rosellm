@@ -84,9 +84,13 @@ clean:
 build: clean
 	python -m build
 
-# Generate documentation
+## Generate documentation
 docs:
-	cd docs && make html
+	mkdocs build --strict
+
+## Serve documentation locally
+docs-serve:
+	mkdocs serve -a 0.0.0.0:8000
 
 # Run continuous integration tests (what CI/CD would run)
 ci: lint test
