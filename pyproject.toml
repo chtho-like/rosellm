@@ -2,7 +2,7 @@
 requires = [
     "setuptools>=68.0",
     "wheel",
-    "torch>=2.0.0",  # Needed for CUDAExtension if CUDA files exist
+    "torch>=2.0.0",     # Needed for CUDAExtension if CUDA files exist
 ]
 build-backend = "setuptools.build_meta"
 
@@ -10,12 +10,10 @@ build-backend = "setuptools.build_meta"
 name = "rosellm"
 version = "0.1.0"
 description = "A comprehensive RLHF framework for Large Language Models"
-authors = [
-    {name = "wineandchord", email = "guoqizhou19@gmail.com"},
-]
+authors = [{ name = "wineandchord", email = "guoqizhou19@gmail.com" }]
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "MIT"}
+license = { text = "MIT" }
 keywords = ["llm", "rlhf", "distributed", "training", "inference"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -39,10 +37,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = [
-    "pytest>=7.4.0",
-    "pytest-cov>=4.1.0",
-]
+test = ["pytest>=7.4.0", "pytest-cov>=4.1.0"]
 dev = [
     "black>=23.0.0",
     "isort>=5.12.0",
@@ -53,9 +48,7 @@ dev = [
     "mkdocs>=1.5.0",
     "mkdocs-material>=9.5.0",
 ]
-all = [
-    "rosellm[test,dev]",
-]
+all = ["rosellm[test,dev]"]
 
 [project.urls]
 Homepage = "https://github.com/chtho-like/rosellm"
@@ -77,37 +70,3 @@ markers = [
     "gpu: marks tests as requiring GPU (deselect with '-m \"not gpu\"')",
     "distributed: marks tests as requiring distributed setup",
 ]
-
-# Code formatting
-[tool.black]
-line-length = 88
-target-version = ["py38", "py39", "py310", "py311"]
-include = '\.pyi?$'
-exclude = '''
-/(
-    \.git
-  | \.venv
-  | build
-  | dist
-  | __pycache__
-)/
-'''
-
-# Import sorting
-[tool.isort]
-profile = "black"
-line_length = 88
-multi_line_output = 3
-include_trailing_comma = true
-force_grid_wrap = 0
-use_parentheses = true
-ensure_newline_before_comments = true
-
-# Type checking
-[tool.mypy]
-python_version = "3.8"
-ignore_missing_imports = true
-strict_optional = true
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false
