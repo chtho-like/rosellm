@@ -102,7 +102,7 @@ class GPTModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor,  # [B, T]
         attention_mask: Optional[torch.Tensor] = None,
     ):
         bsz, seq_len = input_ids.size()
