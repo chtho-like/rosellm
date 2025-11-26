@@ -23,9 +23,14 @@ def main():
         dtype=torch.long,
     )
     attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long)
-    logits = model(input_ids, attention_mask=attention_mask)
+    logits, loss = model(
+        input_ids, 
+        attention_mask=attention_mask,
+        labels=input_ids, # For tmp test
+    )
     print("input_ids shape:", input_ids.shape)  # [B, T]
     print("logits shape:", logits.shape)  # [B, T, V]
+    print("loss:", loss.item())
 
 
 if __name__ == "__main__":
