@@ -104,6 +104,7 @@ class GPTModel(nn.Module):
         self,
         input_ids: torch.Tensor,  # [B, T]
         attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
     ):
         bsz, seq_len = input_ids.size()
         device = input_ids.device
@@ -117,4 +118,12 @@ class GPTModel(nn.Module):
             x = block(x, attention_mask=attention_mask)
         x = self.ln_f(x)
         logits = self.lm_head(x)
-        return logits
+        loss = None
+        if labels is not None:
+            shift_logits = logits[:, :-1, :].contiguous()  # [B, T-1, V]
+            shift_labels = labels[:, 1:].contiguous()  # [B, T-1]
+            loss = F.cross_entropy(
+                shift_logits.view(-1, self.config.vocab_size),  # [B*(T-1), V]
+                shift_labels.view(-1),  # [B*(T-1)]
+            )
+        return logits, loss  # [B, T, V], []
