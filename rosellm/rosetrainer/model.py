@@ -5,7 +5,11 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from config import GPTConfig
-from tensor_parallel import ColumnParallelLinear, init_tensor_parallel
+from tensor_parallel import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+    init_tensor_parallel,
+)
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -76,11 +80,17 @@ class FeedForward(nn.Module):
                 in_features=config.d_model,
                 out_features=config.d_ff,
                 bias=True,
-                gather_output=True,
+                gather_output=False,
+            )
+            self.fc2 = RowParallelLinear(
+                in_features=config.d_ff,
+                out_features=config.d_model,
+                bias=True,
+                input_is_parallel=True,
             )
         else:
             self.fc1 = nn.Linear(config.d_model, config.d_ff)
-        self.fc2 = nn.Linear(config.d_ff, config.d_model)
+            self.fc2 = nn.Linear(config.d_ff, config.d_model)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor):
