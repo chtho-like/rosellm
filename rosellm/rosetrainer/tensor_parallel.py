@@ -71,3 +71,55 @@ class ColumnParallelLinear(nn.Module):
         dist.all_gather(out_list, y_local, group=self.tp_group)
         y = torch.cat(out_list, dim=-1)
         return y
+
+
+class RowParallelLinear(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        input_is_parallel: bool = True,
+    ) -> None:
+        super().__init__()
+        if not dist.is_initialized():
+            raise RuntimeError("dist is not initialized")
+        tp_group = get_tensor_parallel_group()
+        tp_world_size = dist.get_world_size(tp_group)
+        if in_features % tp_world_size != 0:
+            raise ValueError("in_features must be divisible by tp_world_size")
+        self.in_features = in_features
+        self.out_features = out_features
+        self.input_is_parallel = input_is_parallel
+        self.tp_group = tp_group
+        self.tp_world_size = tp_world_size
+        self.in_per_rank = in_features // tp_world_size
+        self.rank = dist.get_rank(tp_group)
+        self.weight = nn.Parameter(torch.empty(out_features, self.in_per_rank))
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features))
+        else:
+            self.bias = None
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.weight, a=5**0.5)
+        if self.bias is not None:
+            fan_in = self.in_features
+            bound = 1 / fan_in**0.5
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.input_is_parallel:
+            x_local = x
+        else:
+            if x.size(-1) != self.in_features:
+                raise ValueError("x.size(-1) must be equal to in_features")
+            start = self.rank * self.in_per_rank
+            end = start + self.in_per_rank
+            x_local = x[..., start:end]
+        y_local = torch.matmul(x_local, self.weight.t())
+        dist.all_reduce(y_local, op=dist.ReduceOp.SUM, group=self.tp_group)
+        if self.bias is not None:
+            y_local = y_local + self.bias
+        return y_local
