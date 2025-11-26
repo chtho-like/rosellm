@@ -1,9 +1,11 @@
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from config import GPTConfig
+from tensor_parallel import ColumnParallelLinear, init_tensor_parallel
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -13,7 +15,17 @@ class MultiHeadSelfAttention(nn.Module):
         self.d_model = config.d_model
         self.n_heads = config.n_heads
         self.d_head = config.d_model // config.n_heads
-        self.qkv_proj = nn.Linear(config.d_model, 3 * config.d_model)
+        use_tp = getattr(config, "use_tensor_parallel", False)
+        if use_tp and dist.is_available() and dist.is_initialized():
+            init_tensor_parallel()
+            self.qkv_proj = ColumnParallelLinear(
+                in_features=config.d_model,
+                out_features=3 * config.d_model,
+                bias=True,
+                gather_output=True,
+            )
+        else:
+            self.qkv_proj = nn.Linear(config.d_model, 3 * config.d_model)
         self.out_proj = nn.Linear(config.d_model, config.d_model)
         self.dropout = nn.Dropout(config.dropout)
         self.register_buffer(
@@ -57,7 +69,17 @@ class MultiHeadSelfAttention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
-        self.fc1 = nn.Linear(config.d_model, config.d_ff)
+        use_tp = getattr(config, "use_tensor_parallel", False)
+        if use_tp and dist.is_available() and dist.is_initialized():
+            init_tensor_parallel()
+            self.fc1 = ColumnParallelLinear(
+                in_features=config.d_model,
+                out_features=config.d_ff,
+                bias=True,
+                gather_output=True,
+            )
+        else:
+            self.fc1 = nn.Linear(config.d_model, config.d_ff)
         self.fc2 = nn.Linear(config.d_ff, config.d_model)
         self.dropout = nn.Dropout(config.dropout)
 
