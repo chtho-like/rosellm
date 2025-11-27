@@ -1,4 +1,7 @@
+import os
+
 import torch
+from checkpoint import load_checkpoint, save_checkpoint
 from config import GPTConfig
 from model import GPTModel
 from torch.amp import GradScaler, autocast
@@ -33,6 +36,8 @@ class ToyRandomDataset(Dataset):
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
+    checkpoint_path = "checkpoints/minigpt_single.pt"
+    resume = False
     config = GPTConfig(
         vocab_size=10000,
         max_position_embeddings=128,
@@ -59,6 +64,14 @@ def main():
     model.train()
     num_steps = 50
     step = 0
+    if resume and os.path.exists(checkpoint_path):
+        print(f"Resuming from checkpoint {checkpoint_path}")
+        step, extra = load_checkpoint(checkpoint_path, model, optimizer, scaler)
+        print(f"Resumed from step {step}")
+    elif resume:
+        print("Resume flag is set, but checkpoint not found. Starting from scratch.")
+    else:
+        print("Starting from scratch")
     for batch in dataloader:
         step += 1
         if step > num_steps:
@@ -85,6 +98,15 @@ def main():
             )
             loss.backward()
             optimizer.step()
+        if step % 20 == 0:
+            save_checkpoint(
+                checkpoint_path,
+                model=model,
+                optimizer=optimizer,
+                step=step,
+                scaler=scaler if use_amp else None,
+                extra={"note": "single_gpt_minimal"},
+            )
         if step % 10 == 0:
             print(
                 f"step {step} / {num_steps} ",

@@ -2,6 +2,7 @@ import os
 
 import torch
 import torch.distributed as dist
+from checkpoint import load_checkpoint, save_checkpoint
 from config import GPTConfig
 from model import GPTModel
 from torch.amp import GradScaler, autocast
@@ -52,8 +53,11 @@ def is_main_process(local_rank: int) -> bool:
 
 def main():
     device, local_rank = setup_distributed()
+    checkpoint_path = "checkpoints/minigpt_ddp.pt"
+    resume = False
     if is_main_process(local_rank):
         print(f"[rank {local_rank}] Using device: {device}")
+        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     config = GPTConfig(
         vocab_size=10000,
         max_position_embeddings=128,
@@ -92,6 +96,22 @@ def main():
     ddp_model.train()
     num_steps = 50
     step = 0
+    if resume and os.path.exists(checkpoint_path):
+        print(f"[rank {local_rank}] Resuming from checkpoint {checkpoint_path}")
+        step, extra = load_checkpoint(
+            checkpoint_path,
+            ddp_model.module,
+            optimizer,
+            scaler,
+            map_location=device.type,
+        )
+        print(f"[rank {local_rank}] Resumed from step {step}")
+    elif resume and is_main_process(local_rank):
+        print(
+            f"[rank {local_rank}] Resume flag is set, but checkpoint not found. Starting from scratch."
+        )
+    elif is_main_process(local_rank):
+        print(f"[rank {local_rank}] Starting from scratch")
     for epoch in range(1, 1000):
         sampler.set_epoch(epoch)
         for batch in dataloader:
@@ -120,6 +140,15 @@ def main():
                 )
                 loss.backward()
                 optimizer.step()
+            if is_main_process(local_rank) and step % 20 == 0:
+                save_checkpoint(
+                    checkpoint_path,
+                    model=ddp_model.module,
+                    optimizer=optimizer,
+                    step=step,
+                    scaler=scaler if use_amp else None,
+                    extra={"note": "minigpt_ddp"},
+                )
             if is_main_process(local_rank) and step % 10 == 0:
                 print(
                     f"[step {step} / {num_steps}] ",
