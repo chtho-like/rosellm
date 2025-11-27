@@ -1,3 +1,4 @@
+import argparse
 import os
 
 import torch
@@ -33,36 +34,36 @@ class ToyRandomDataset(Dataset):
         }
 
 
-def main():
+def main(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
-    checkpoint_path = "checkpoints/minigpt_single.pt"
-    resume = False
+    checkpoint_path = args.checkpoint_path
+    resume = args.resume
     config = GPTConfig(
-        vocab_size=10000,
-        max_position_embeddings=128,
-        n_layers=2,
-        n_heads=4,
-        d_model=128,
-        d_ff=512,
-        dropout=0.1,
+        vocab_size=args.vocab_size,
+        max_position_embeddings=args.max_position_embeddings,
+        n_layers=args.n_layers,
+        n_heads=args.n_heads,
+        d_model=args.d_model,
+        d_ff=args.d_ff,
+        dropout=args.dropout,
     )
     model = GPTModel(config).to(device)
     dataset = ToyRandomDataset(
         vocab_size=config.vocab_size,
-        seq_len=32,
+        seq_len=args.seq_len,
         num_samples=1000,
     )
     dataloader = DataLoader(
         dataset,
-        batch_size=8,
+        batch_size=args.batch_size,
         shuffle=True,
     )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-    use_amp = device.type == "cuda"
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    use_amp = device.type == "cuda" and not args.no_amp
     scaler = GradScaler(enabled=use_amp)
     model.train()
-    num_steps = 50
+    num_steps = args.num_steps
     step = 0
     if resume and os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint {checkpoint_path}")
@@ -115,5 +116,98 @@ def main():
             )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train minimal GPT model.")
+    parser.add_argument(
+        "--vocab-size",
+        type=int,
+        default=10000,
+        help="Vocabulary size.",
+    )
+    parser.add_argument(
+        "--max-position-embeddings",
+        type=int,
+        default=128,
+        help="Max sequence length.",
+    )
+    parser.add_argument(
+        "--n-layers",
+        type=int,
+        default=2,
+        help="Number of Transformer layers.",
+    )
+    parser.add_argument(
+        "--n-heads",
+        type=int,
+        default=4,
+        help="Number of attention heads.",
+    )
+    parser.add_argument(
+        "--d-model",
+        type=int,
+        default=128,
+        help="Model hidden size.",
+    )
+    parser.add_argument(
+        "--d-ff",
+        type=int,
+        default=512,
+        help="FFN hidden size.",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=0.1,
+        help="Dropout probability.",
+    )
+    parser.add_argument(
+        "--use-tensor-parallel",
+        action="store_true",
+        help="Enable tensor parallel blocks.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="Batch size per step.",
+    )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=32,
+        help="Sequence length.",
+    )
+    parser.add_argument(
+        "--num-steps",
+        type=int,
+        default=50,
+        help="Number of training steps.",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=3e-4,
+        help="Learning rate.",
+    )
+    parser.add_argument(
+        "--no-amp",
+        action="store_true",
+        help="Disable AMP even on CUDA.",
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        type=str,
+        default="checkpoints/minigpt_single.pt",
+        help="Path to checkpoint file.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume training from checkpoint.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(args)
