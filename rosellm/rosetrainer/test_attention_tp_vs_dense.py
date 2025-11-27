@@ -55,13 +55,41 @@ def copy_qkv_from_dense_to_tp(
     with torch.no_grad():
         linear_dense: nn.Linear = attn_dense.qkv_proj
         col_tp = attn_tp.qkv_proj
-        out_features = linear_dense.out_features
-        out_per_rank = out_features // world_size
-        start = rank * out_per_rank
-        end = start + out_per_rank
-        col_tp.weight.copy_(linear_dense.weight[start:end, :])
+
+        d_model = attn_dense.d_model
+        n_heads = attn_dense.n_heads
+        d_head = attn_dense.d_head
+        assert d_model == n_heads * d_head
+
+        local_heads = n_heads // world_size
+        local_dim = local_heads * d_head
+        head_start = rank * local_heads
+        head_end = head_start + local_heads
+
+        q_offset = 0
+        k_offset = d_model
+        v_offset = 2 * d_model
+
+        q_start = q_offset + head_start * d_head
+        q_end = q_offset + head_end * d_head
+        k_start = k_offset + head_start * d_head
+        k_end = k_offset + head_end * d_head
+        v_start = v_offset + head_start * d_head
+        v_end = v_offset + head_end * d_head
+
+        q_weight = linear_dense.weight[q_start:q_end, :]
+        k_weight = linear_dense.weight[k_start:k_end, :]
+        v_weight = linear_dense.weight[v_start:v_end, :]
+
+        col_tp.weight[:local_dim, :].copy_(q_weight)
+        col_tp.weight[local_dim : 2 * local_dim, :].copy_(k_weight)
+        col_tp.weight[2 * local_dim : 3 * local_dim, :].copy_(v_weight)
+
         if col_tp.bias is not None:
-            col_tp.bias.copy_(linear_dense.bias[start:end])
+            q_bias = linear_dense.bias[q_start:q_end]
+            k_bias = linear_dense.bias[k_start:k_end]
+            v_bias = linear_dense.bias[v_start:v_end]
+            col_tp.bias.copy_(torch.cat([q_bias, k_bias, v_bias], dim=0))
 
 
 def copy_out_proj_from_dense_to_tp(
