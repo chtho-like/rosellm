@@ -4,6 +4,7 @@ import torch
 import torch.distributed as dist
 from config import GPTConfig
 from model import GPTModel
+from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
@@ -86,6 +87,8 @@ def main():
         sampler=sampler,
     )
     optimizer = torch.optim.AdamW(ddp_model.parameters(), lr=3e-4)
+    use_amp = device.type == "cuda"
+    scaler = GradScaler(enabled=use_amp)
     ddp_model.train()
     num_steps = 50
     step = 0
@@ -99,15 +102,30 @@ def main():
             labels = batch["labels"].to(device)  # [B, T]
             attention_mask = batch["attention_mask"].to(device)  # [B, T]
             optimizer.zero_grad()
-            logits, loss = ddp_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-            )
-            loss.backward()
-            optimizer.step()
+            if use_amp:
+                with autocast(device_type=device.type):
+                    logits, loss = ddp_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                logits, loss = ddp_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
+                loss.backward()
+                optimizer.step()
             if is_main_process(local_rank) and step % 10 == 0:
-                print(f"[step {step} / {num_steps}] loss = {loss.item():.4f}")
+                print(
+                    f"[step {step} / {num_steps}] ",
+                    f"loss = {loss.item():.4f} ",
+                    f"amp = {use_amp}",
+                )
         if step > num_steps:
             break
     if is_main_process(local_rank):

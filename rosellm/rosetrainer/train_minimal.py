@@ -1,6 +1,7 @@
 import torch
 from config import GPTConfig
 from model import GPTModel
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -53,6 +54,8 @@ def main():
         shuffle=True,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    use_amp = device.type == "cuda"
+    scaler = GradScaler(enabled=use_amp)
     model.train()
     num_steps = 50
     step = 0
@@ -64,15 +67,30 @@ def main():
         labels = batch["labels"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         optimizer.zero_grad()
-        logits, loss = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-        )
-        loss.backward()
-        optimizer.step()
+        if use_amp:
+            with autocast(device_type=device.type):
+                logits, loss = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            logits, loss = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+            loss.backward()
+            optimizer.step()
         if step % 10 == 0:
-            print(f"step {step} / {num_steps} | loss: {loss.item():.4f}")
+            print(
+                f"step {step} / {num_steps} ",
+                f"loss: {loss.item():.4f} ",
+                f"amp: {use_amp}",
+            )
 
 
 if __name__ == "__main__":
