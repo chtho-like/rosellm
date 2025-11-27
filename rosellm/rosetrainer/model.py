@@ -28,9 +28,15 @@ class MultiHeadSelfAttention(nn.Module):
                 bias=True,
                 gather_output=True,
             )
+            self.out_proj = RowParallelLinear(
+                in_features=config.d_model,
+                out_features=config.d_model,
+                bias=True,
+                input_is_parallel=False,
+            )
         else:
             self.qkv_proj = nn.Linear(config.d_model, 3 * config.d_model)
-        self.out_proj = nn.Linear(config.d_model, config.d_model)
+            self.out_proj = nn.Linear(config.d_model, config.d_model)
         self.dropout = nn.Dropout(config.dropout)
         self.register_buffer(
             "mask",
