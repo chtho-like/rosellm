@@ -19,22 +19,30 @@ class MultiHeadSelfAttention(nn.Module):
         self.d_model = config.d_model
         self.n_heads = config.n_heads
         self.d_head = config.d_model // config.n_heads
-        use_tp = getattr(config, "use_tensor_parallel", False)
-        if use_tp and dist.is_available() and dist.is_initialized():
+        use_tp_cfg = getattr(config, "use_tensor_parallel", False)
+        self.use_tp = use_tp_cfg and dist.is_available() and dist.is_initialized()
+        if self.use_tp:
             init_tensor_parallel()
+            tp_world_size = dist.get_world_size()
+            if self.n_heads % tp_world_size != 0:
+                raise ValueError("n_heads must be divisible by tp_world_size")
+            self.tp_world_size = tp_world_size
+            self.local_heads = self.n_heads // tp_world_size
             self.qkv_proj = ColumnParallelLinear(
                 in_features=config.d_model,
                 out_features=3 * config.d_model,
                 bias=True,
-                gather_output=True,
+                gather_output=False,
             )
             self.out_proj = RowParallelLinear(
                 in_features=config.d_model,
                 out_features=config.d_model,
                 bias=True,
-                input_is_parallel=False,
+                input_is_parallel=True,
             )
         else:
+            self.tp_world_size = 1
+            self.local_heads = self.n_heads
             self.qkv_proj = nn.Linear(config.d_model, 3 * config.d_model)
             self.out_proj = nn.Linear(config.d_model, config.d_model)
         self.dropout = nn.Dropout(config.dropout)
@@ -57,7 +65,7 @@ class MultiHeadSelfAttention(nn.Module):
     ):
         bsz, seq_len, _ = x.size()
         qkv = self.qkv_proj(x)
-        qkv = qkv.view(bsz, seq_len, 3, self.n_heads, self.d_head)
+        qkv = qkv.view(bsz, seq_len, 3, self.local_heads, self.d_head)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
         attn_scores = q @ k.transpose(-2, -1) * self.d_head**-0.5
@@ -70,7 +78,7 @@ class MultiHeadSelfAttention(nn.Module):
         attn_weights = self.dropout(attn_weights)
         attn_output = attn_weights @ v
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, seq_len, self.d_model)
+        attn_output = attn_output.view(bsz, seq_len, self.local_heads * self.d_head)
         out = self.out_proj(attn_output)
         out = self.dropout(out)
         return out
