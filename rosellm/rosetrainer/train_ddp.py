@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 from checkpoint import load_checkpoint, save_checkpoint
 from config import GPTConfig
+from dataset import TextDatasetForCausalLM, build_tokenizer
 from model import GPTModel
 from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -42,6 +43,7 @@ def log_line(path: str, text: str | tuple[str, ...]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(str(text) + "\n")
+    print(text)
 
 
 def evaluate_ddp(
@@ -116,8 +118,20 @@ def main(args: argparse.Namespace) -> None:
         log_line(log_path, f"[rank {local_rank}] Using device: {device}")
         log_line(log_path, f"Arguments: {args}")
         os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+
+    if args.use_toy_data:
+        effective_vocab_size = args.vocab_size
+    else:
+        if not args.train_data:
+            raise ValueError("--train-data is not provided")
+        tokenizer = build_tokenizer(args.tokenizer_name)
+        tokenizer_vocab_size = getattr(tokenizer, "vocab_size", None)
+        if tokenizer_vocab_size is None:
+            tokenizer_vocab_size = len(tokenizer)
+        effective_vocab_size = tokenizer_vocab_size
+
     config = GPTConfig(
-        vocab_size=args.vocab_size,
+        vocab_size=effective_vocab_size,
         max_position_embeddings=args.max_position_embeddings,
         n_layers=args.n_layers,
         n_heads=args.n_heads,
@@ -132,17 +146,37 @@ def main(args: argparse.Namespace) -> None:
         output_device=device.index,
         find_unused_parameters=False,
     )
-    full_dataset = ToyRandomDataset(
-        vocab_size=config.vocab_size,
-        seq_len=args.seq_len,
-        num_samples=1000,
-    )
-    val_size = max(int(0.2 * len(full_dataset)), 1)
-    train_size = len(full_dataset) - val_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        full_dataset,
-        [train_size, val_size],
-    )
+    if args.use_toy_data:
+        full_dataset = ToyRandomDataset(
+            vocab_size=config.vocab_size,
+            seq_len=args.seq_len,
+            num_samples=1000,
+        )
+        val_size = max(int(0.2 * len(full_dataset)), 1)
+        train_size = len(full_dataset) - val_size
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset,
+            [train_size, val_size],
+        )
+    else:
+        train_dataset = TextDatasetForCausalLM(
+            file_paths=args.train_data,
+            tokenizer=tokenizer,
+            seq_len=args.seq_len,
+        )
+        if args.val_data:
+            val_dataset = TextDatasetForCausalLM(
+                file_paths=args.val_data,
+                tokenizer=tokenizer,
+                seq_len=args.seq_len,
+            )
+        else:
+            val_size = max(int(0.1 * len(train_dataset)), 1)
+            train_size = len(train_dataset) - val_size
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                train_dataset,
+                [train_size, val_size],
+            )
     train_sampler = DistributedSampler(
         train_dataset,
         num_replicas=dist.get_world_size(),
@@ -173,7 +207,9 @@ def main(args: argparse.Namespace) -> None:
     num_steps = args.num_steps
     step = 0
     if resume and os.path.exists(checkpoint_path):
-        print(f"[rank {local_rank}] Resuming from checkpoint {checkpoint_path}")
+        log_line(
+            log_path, f"[rank {local_rank}] Resuming from checkpoint {checkpoint_path}"
+        )
         step, extra = load_checkpoint(
             checkpoint_path,
             ddp_model.module,
@@ -181,13 +217,14 @@ def main(args: argparse.Namespace) -> None:
             scaler,
             map_location=device.type,
         )
-        print(f"[rank {local_rank}] Resumed from step {step}")
+        log_line(log_path, f"[rank {local_rank}] Resumed from step {step}")
     elif resume and is_main_process(local_rank):
-        print(
-            f"[rank {local_rank}] Resume flag is set, but checkpoint not found. Starting from scratch."
+        log_line(
+            log_path,
+            f"[rank {local_rank}] Resume flag is set, but checkpoint not found. Starting from scratch.",
         )
     elif is_main_process(local_rank):
-        print(f"[rank {local_rank}] Starting from scratch")
+        log_line(log_path, f"[rank {local_rank}] Starting from scratch")
     for epoch in range(1, 1000):
         train_sampler.set_epoch(epoch)
         for batch in train_dataloader:
@@ -241,12 +278,11 @@ def main(args: argparse.Namespace) -> None:
                         f"val ppl: {val_ppl:.4f} ",
                         f"amp: {use_amp}",
                     )
-                    print(msg)
                     log_line(log_path, msg)
         if step > num_steps:
             break
     if is_main_process(local_rank):
-        print("Training finished.")
+        log_line(log_path, "Training finished.")
     cleanup_distributed()
 
 
@@ -261,7 +297,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-position-embeddings",
         type=int,
-        default=128,
+        default=10000,
         help="Max sequence length.",
     )
     parser.add_argument(
@@ -338,6 +374,32 @@ def parse_args() -> argparse.Namespace:
         "--resume",
         action="store_true",
         help="Resume training from checkpoint.",
+    )
+    # data and tokenizer
+    parser.add_argument(
+        "--train-data",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Path to training data",
+    )
+    parser.add_argument(
+        "--val-data",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Path to val data",
+    )
+    parser.add_argument(
+        "--tokenizer-name",
+        type=str,
+        default="gpt2",
+        help="tokenizer name",
+    )
+    parser.add_argument(
+        "--use-toy-data",
+        action="store_true",
+        help="use toy data",
     )
     return parser.parse_args()
 

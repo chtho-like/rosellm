@@ -6,6 +6,7 @@ from datetime import datetime
 import torch
 from checkpoint import load_checkpoint, save_checkpoint
 from config import GPTConfig
+from dataset import TextDatasetForCausalLM, build_tokenizer
 from model import GPTModel
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, Dataset
@@ -40,6 +41,7 @@ def log_line(path: str, text: str | tuple[str, ...]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(str(text) + "\n")
+    print(text)
 
 
 def evaluate(
@@ -88,8 +90,20 @@ def main(args: argparse.Namespace) -> None:
     log_line(log_path, f"Arguments: {args}")
     checkpoint_path = args.checkpoint_path
     resume = args.resume
+
+    if args.use_toy_data:
+        effective_vocab_size = args.vocab_size
+    else:
+        if not args.train_data:
+            raise ValueError("--train-data is not provided")
+        tokenizer = build_tokenizer(args.tokenizer_name)
+        tokenizer_vocab_size = getattr(tokenizer, "vocab_size", None)
+        if tokenizer_vocab_size is None:
+            tokenizer_vocab_size = len(tokenizer)
+        effective_vocab_size = tokenizer_vocab_size
+
     config = GPTConfig(
-        vocab_size=args.vocab_size,
+        vocab_size=effective_vocab_size,
         max_position_embeddings=args.max_position_embeddings,
         n_layers=args.n_layers,
         n_heads=args.n_heads,
@@ -98,17 +112,40 @@ def main(args: argparse.Namespace) -> None:
         dropout=args.dropout,
     )
     model = GPTModel(config).to(device)
-    full_dataset = ToyRandomDataset(
-        vocab_size=config.vocab_size,
-        seq_len=args.seq_len,
-        num_samples=1000,
-    )
-    val_size = max(int(0.2 * len(full_dataset)), 1)
-    train_size = len(full_dataset) - val_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        full_dataset,
-        [train_size, val_size],
-    )
+
+    if args.use_toy_data:
+        full_dataset = ToyRandomDataset(
+            vocab_size=config.vocab_size,
+            seq_len=args.seq_len,
+            num_samples=1000,
+        )
+        val_size = max(int(0.2 * len(full_dataset)), 1)
+        train_size = len(full_dataset) - val_size
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset,
+            [train_size, val_size],
+        )
+    else:
+        train_dataset = TextDatasetForCausalLM(
+            file_paths=args.train_data,
+            tokenizer=tokenizer,
+            seq_len=args.seq_len,
+        )
+        if args.val_data:
+            val_dataset = TextDatasetForCausalLM(
+                file_paths=args.val_data,
+                tokenizer=tokenizer,
+                seq_len=args.seq_len,
+            )
+        else:
+            val_size = max(int(0.1 * len(train_dataset)), 1)
+            train_size = len(train_dataset) - val_size
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                train_dataset,
+                [train_size, val_size],
+            )
+    log_line(log_path, f"train dataset size: {len(train_dataset)}")
+    log_line(log_path, f"val dataset size: {len(val_dataset)}")
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -126,65 +163,68 @@ def main(args: argparse.Namespace) -> None:
     num_steps = args.num_steps
     step = 0
     if resume and os.path.exists(checkpoint_path):
-        print(f"Resuming from checkpoint {checkpoint_path}")
+        log_line(log_path, f"Resuming from checkpoint {checkpoint_path}")
         step, extra = load_checkpoint(checkpoint_path, model, optimizer, scaler)
-        print(f"Resumed from step {step}")
+        log_line(log_path, f"Resumed from step {step}")
     elif resume:
-        print("Resume flag is set, but checkpoint not found. Starting from scratch.")
+        log_line(
+            log_path,
+            "Resume flag is set, but checkpoint not found. Starting from scratch.",
+        )
     else:
-        print("Starting from scratch")
-    for batch in train_dataloader:
-        step += 1
-        if step > num_steps:
-            break
-        input_ids = batch["input_ids"].to(device)
-        labels = batch["labels"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        optimizer.zero_grad()
-        if use_amp:
-            with autocast(device_type=device.type):
+        log_line(log_path, "Starting from scratch")
+    while step < num_steps:
+        for batch in train_dataloader:
+            step += 1
+            if step > num_steps:
+                break
+            input_ids = batch["input_ids"].to(device)
+            labels = batch["labels"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            optimizer.zero_grad()
+            if use_amp:
+                with autocast(device_type=device.type):
+                    logits, loss = model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
                 logits, loss = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     labels=labels,
                 )
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            logits, loss = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-            )
-            loss.backward()
-            optimizer.step()
-        if step % 20 == 0:
-            save_checkpoint(
-                checkpoint_path,
-                model=model,
-                optimizer=optimizer,
-                step=step,
-                scaler=scaler if use_amp else None,
-                extra={"note": "single_gpt_minimal"},
-            )
-        if step % 10 == 0:
-            val_loss = evaluate(
-                model,
-                val_dataloader,
-                device=device,
-                use_amp=use_amp,
-            )
-            val_ppl = math.exp(val_loss)
-            msg = (
-                f"step {step} / {num_steps} ",
-                f"train loss: {loss.item():.4f} ",
-                f"val loss: {val_loss:.4f} ",
-                f"val ppl: {val_ppl:.4f} ",
-                f"amp: {use_amp}",
-            )
-            print(msg)
-            log_line(log_path, msg)
+                loss.backward()
+                optimizer.step()
+            if step % 20 == 0:
+                save_checkpoint(
+                    checkpoint_path,
+                    model=model,
+                    optimizer=optimizer,
+                    step=step,
+                    scaler=scaler if use_amp else None,
+                    extra={"note": "single_gpt_minimal"},
+                )
+            if step % 10 == 0:
+                val_loss = evaluate(
+                    model,
+                    val_dataloader,
+                    device=device,
+                    use_amp=use_amp,
+                )
+                val_ppl = math.exp(val_loss)
+                msg = (
+                    f"step {step} / {num_steps} ",
+                    f"train loss: {loss.item():.4f} ",
+                    f"val loss: {val_loss:.4f} ",
+                    f"val ppl: {val_ppl:.4f} ",
+                    f"amp: {use_amp}",
+                )
+                log_line(log_path, msg)
 
 
 def parse_args() -> argparse.Namespace:
@@ -198,7 +238,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-position-embeddings",
         type=int,
-        default=128,
+        default=10000,
         help="Max sequence length.",
     )
     parser.add_argument(
@@ -275,6 +315,32 @@ def parse_args() -> argparse.Namespace:
         "--resume",
         action="store_true",
         help="Resume training from checkpoint.",
+    )
+    # data and tokenizer
+    parser.add_argument(
+        "--train-data",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Path to training data",
+    )
+    parser.add_argument(
+        "--val-data",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Path to val data (optional, can be auto-split from train)",
+    )
+    parser.add_argument(
+        "--tokenizer-name",
+        type=str,
+        default="gpt2",
+        help="tokenizer name",
+    )
+    parser.add_argument(
+        "--use-toy-data",
+        action="store_true",
+        help="use random toy data rather than real data",
     )
     return parser.parse_args()
 
