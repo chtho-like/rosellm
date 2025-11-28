@@ -1,5 +1,7 @@
 import argparse
+import math
 import os
+from datetime import datetime
 
 import torch
 import torch.distributed as dist
@@ -36,6 +38,57 @@ class ToyRandomDataset(Dataset):
         }
 
 
+def log_line(path: str, text: str | tuple[str, ...]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(str(text) + "\n")
+
+
+def evaluate_ddp(
+    ddp_model: DDP,
+    dataloader: DataLoader,
+    device: torch.device,
+    use_amp: bool,
+) -> float:
+    model_was_training = ddp_model.module.training
+    ddp_model.eval()
+    total_loss = 0.0
+    total_tokens = 0
+    with torch.no_grad():
+        for batch in dataloader:
+            input_ids = batch["input_ids"].to(device)
+            labels = batch["labels"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            if use_amp:
+                with autocast(device_type=device.type):
+                    _, loss = ddp_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
+            else:
+                _, loss = ddp_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
+            batch_tokens = labels.numel()
+            total_loss += float(loss.item()) * batch_tokens
+            total_tokens += batch_tokens
+    loss_tensor = torch.tensor(
+        [total_loss, total_tokens],
+        dtype=torch.float64,
+        device=device,
+    )
+    dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+    total_loss_all = float(loss_tensor[0].item())
+    total_tokens_all = float(loss_tensor[1].item())
+    avg_loss = total_loss_all / max(total_tokens_all, 1.0)
+    if model_was_training:
+        ddp_model.module.train()
+    return avg_loss
+
+
 def setup_distributed():
     dist.init_process_group(backend="nccl")
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -56,8 +109,12 @@ def main(args: argparse.Namespace) -> None:
     device, local_rank = setup_distributed()
     checkpoint_path = args.checkpoint_path
     resume = args.resume
+    log_path = "logs/train_ddp.log"
     if is_main_process(local_rank):
-        print(f"[rank {local_rank}] Using device: {device}")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_line(log_path, f"Training started at {timestamp}")
+        log_line(log_path, f"[rank {local_rank}] Using device: {device}")
+        log_line(log_path, f"Arguments: {args}")
         os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     config = GPTConfig(
         vocab_size=args.vocab_size,
@@ -75,21 +132,39 @@ def main(args: argparse.Namespace) -> None:
         output_device=device.index,
         find_unused_parameters=False,
     )
-    dataset = ToyRandomDataset(
+    full_dataset = ToyRandomDataset(
         vocab_size=config.vocab_size,
         seq_len=args.seq_len,
         num_samples=1000,
     )
-    sampler = DistributedSampler(
-        dataset,
+    val_size = max(int(0.2 * len(full_dataset)), 1)
+    train_size = len(full_dataset) - val_size
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        full_dataset,
+        [train_size, val_size],
+    )
+    train_sampler = DistributedSampler(
+        train_dataset,
         num_replicas=dist.get_world_size(),
         rank=dist.get_rank(),
         shuffle=True,
     )
-    dataloader = DataLoader(
-        dataset,
+    val_sampler = DistributedSampler(
+        val_dataset,
+        num_replicas=dist.get_world_size(),
+        rank=dist.get_rank(),
+        shuffle=False,
+    )
+    train_dataloader = DataLoader(
+        train_dataset,
         batch_size=args.batch_size,
-        sampler=sampler,
+        sampler=train_sampler,
+    )
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        sampler=val_sampler,
+        shuffle=False,
     )
     optimizer = torch.optim.AdamW(ddp_model.parameters(), lr=args.lr)
     use_amp = device.type == "cuda"
@@ -114,8 +189,8 @@ def main(args: argparse.Namespace) -> None:
     elif is_main_process(local_rank):
         print(f"[rank {local_rank}] Starting from scratch")
     for epoch in range(1, 1000):
-        sampler.set_epoch(epoch)
-        for batch in dataloader:
+        train_sampler.set_epoch(epoch)
+        for batch in train_dataloader:
             step += 1
             if step > num_steps:
                 break
@@ -150,12 +225,24 @@ def main(args: argparse.Namespace) -> None:
                     scaler=scaler if use_amp else None,
                     extra={"note": "minigpt_ddp"},
                 )
-            if is_main_process(local_rank) and step % 10 == 0:
-                print(
-                    f"[step {step} / {num_steps}] ",
-                    f"loss = {loss.item():.4f} ",
-                    f"amp = {use_amp}",
+            if step % 10 == 0:
+                val_loss = evaluate_ddp(
+                    ddp_model,
+                    val_dataloader,
+                    device=device,
+                    use_amp=use_amp,
                 )
+                val_ppl = math.exp(val_loss)
+                if is_main_process(local_rank):
+                    msg = (
+                        f"step {step} / {num_steps} ",
+                        f"train loss: {loss.item():.4f} ",
+                        f"val loss: {val_loss:.4f} ",
+                        f"val ppl: {val_ppl:.4f} ",
+                        f"amp: {use_amp}",
+                    )
+                    print(msg)
+                    log_line(log_path, msg)
         if step > num_steps:
             break
     if is_main_process(local_rank):
