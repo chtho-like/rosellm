@@ -9,8 +9,10 @@ torchrun --nproc_per_node=2 train_ddp.py \
   --seq-len 1024 \
   --batch-size 2 \
   --num-steps 6000 \
-  --lr 1e-4 \
-  --train-data data/train.txt \
+  --lr 3e-4 \
+  --train-data data/gutenberg/*.txt \
   --tokenizer-name gpt2 \
+  --max-tokens 10000000 \
+  --data-seed 42 \
   --checkpoint-path checkpoints/gpt2_small_ddp.pt
 

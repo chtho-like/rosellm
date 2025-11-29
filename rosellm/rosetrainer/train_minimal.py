@@ -130,12 +130,18 @@ def main(args: argparse.Namespace) -> None:
             file_paths=args.train_data,
             tokenizer=tokenizer,
             seq_len=args.seq_len,
+            add_eos=True,
+            max_tokens=args.max_tokens,
+            seed=args.data_seed,
         )
         if args.val_data:
             val_dataset = TextDatasetForCausalLM(
                 file_paths=args.val_data,
                 tokenizer=tokenizer,
                 seq_len=args.seq_len,
+                add_eos=True,
+                max_tokens=args.max_tokens,
+                seed=args.data_seed + 1,
             )
         else:
             val_size = max(int(0.1 * len(train_dataset)), 1)
@@ -341,6 +347,18 @@ def parse_args() -> argparse.Namespace:
         "--use-toy-data",
         action="store_true",
         help="use random toy data rather than real data",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="max tokens to sample from the dataset",
+    )
+    parser.add_argument(
+        "--data-seed",
+        type=int,
+        default=None,
+        help="seed for the data sampler",
     )
     return parser.parse_args()
 
