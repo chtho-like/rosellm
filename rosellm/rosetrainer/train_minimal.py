@@ -213,6 +213,7 @@ def main(args: argparse.Namespace) -> None:
                     optimizer=optimizer,
                     step=step,
                     scaler=scaler if use_amp else None,
+                    config=config,
                     extra={"note": "single_gpt_minimal"},
                 )
             if step % 10 == 0:

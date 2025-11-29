@@ -21,6 +21,7 @@ def save_checkpoint(
     optimizer: optim.Optimizer,
     step: int,
     scaler: Optional["torch.amp.GradScaler"] = None,
+    config: Any = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
     ckpt: Dict[str, Any] = {
@@ -30,6 +31,8 @@ def save_checkpoint(
     }
     if scaler is not None:
         ckpt["scaler"] = scaler.state_dict()
+    if config is not None:
+        ckpt["config"] = _maybe_serialize_config(config)
     if extra is not None:
         ckpt["extra"] = extra
     os.makedirs(os.path.dirname(path), exist_ok=True)

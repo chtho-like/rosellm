@@ -106,16 +106,23 @@ def main(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
     print(f"Using device: {device}")
     tokenizer = build_tokenizer(args.tokenizer_name)
-    config = GPTConfig(
-        vocab_size=args.vocab_size,
-        max_position_embeddings=args.max_position_embeddings,
-        n_layers=args.n_layers,
-        n_heads=args.n_heads,
-        d_model=args.d_model,
-        d_ff=args.d_ff,
-        dropout=args.dropout,
-        use_tensor_parallel=args.use_tensor_parallel,
-    )
+    ckpt = torch.load(args.checkpoint_path, map_location=device.type)
+    cfg_dict = ckpt.get("config")
+    if cfg_dict is not None:
+        print("Found config in checkpoint, ignore cli configs")
+        config = GPTConfig(**cfg_dict)
+    else:
+        print("No config found in checkpoint, use cli configs")
+        config = GPTConfig(
+            vocab_size=args.vocab_size,
+            max_position_embeddings=args.max_position_embeddings,
+            n_layers=args.n_layers,
+            n_heads=args.n_heads,
+            d_model=args.d_model,
+            d_ff=args.d_ff,
+            dropout=args.dropout,
+            use_tensor_parallel=args.use_tensor_parallel,
+        )
     model = GPTModel(config).to(device)
     print(f"Loading checkpoint from {args.checkpoint_path}...")
     load_checkpoint(

@@ -276,6 +276,7 @@ def main(args: argparse.Namespace) -> None:
                     optimizer=optimizer,
                     step=step,
                     scaler=scaler if use_amp else None,
+                    config=config,
                     extra={"note": "minigpt_ddp"},
                 )
             if step % 10 == 0:
