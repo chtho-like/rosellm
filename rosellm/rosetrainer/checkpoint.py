@@ -22,6 +22,7 @@ def save_checkpoint(
     step: int,
     scaler: Optional["torch.amp.GradScaler"] = None,
     config: Any = None,
+    scheduler: Optional["torch.optim.lr_scheduler._LRScheduler"] = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
     ckpt: Dict[str, Any] = {
@@ -33,6 +34,8 @@ def save_checkpoint(
         ckpt["scaler"] = scaler.state_dict()
     if config is not None:
         ckpt["config"] = _maybe_serialize_config(config)
+    if scheduler is not None:
+        ckpt["scheduler"] = scheduler.state_dict()
     if extra is not None:
         ckpt["extra"] = extra
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -44,6 +47,7 @@ def load_checkpoint(
     model: nn.Module,
     optimizer: Optional[optim.Optimizer] = None,
     scaler: Optional["torch.amp.GradScaler"] = None,
+    scheduler: Optional["torch.optim.lr_scheduler._LRScheduler"] = None,
     map_location: Optional[str] = None,
 ) -> Tuple[int, Optional[Dict[str, Any]]]:
     if map_location is None:
@@ -55,6 +59,8 @@ def load_checkpoint(
         optimizer.load_state_dict(ckpt["optimizer"])
     if scaler is not None and "scaler" in ckpt:
         scaler.load_state_dict(ckpt["scaler"])
+    if scheduler is not None and "scheduler" in ckpt:
+        scheduler.load_state_dict(ckpt["scheduler"])
     step = int(ckpt.get("step", 0))
     extra = ckpt.get("extra")
     return step, extra

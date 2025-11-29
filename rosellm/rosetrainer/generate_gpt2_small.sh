@@ -9,10 +9,10 @@ python generate.py \
   --d-model 768 \
   --d-ff 3072 \
   --dropout 0.0 \
-  --prompt "Hello, " \
-  --max-new-tokens 500 \
+  --prompt "You have said" \
+  --max-new-tokens 100 \
   --temperature 0.99 \
   --top-p 0.99 \
   --do-sample \
-  --device cuda
+  --device cpu
 

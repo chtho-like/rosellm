@@ -9,6 +9,7 @@ from config import GPTConfig
 from dataset import TextDatasetForCausalLM, build_tokenizer
 from model import GPTModel
 from torch.amp import GradScaler, autocast
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -39,9 +40,11 @@ class ToyRandomDataset(Dataset):
 
 def log_line(path: str, text: str | tuple[str, ...]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{now}] {text}"
     with open(path, "a", encoding="utf-8") as f:
-        f.write(str(text) + "\n")
-    print(text)
+        f.write(str(line) + "\n")
+    print(line)
 
 
 def evaluate(
@@ -79,6 +82,20 @@ def evaluate(
     if model_was_training:
         model.train()
     return avg_loss
+
+
+def build_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    num_steps: int,
+    warmup_steps: int,
+):
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return float(step + 1) / float(max(1, warmup_steps))
+        progress = float(step - warmup_steps) / float(max(1, num_steps - warmup_steps))
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
 def main(args: argparse.Namespace) -> None:
@@ -163,6 +180,14 @@ def main(args: argparse.Namespace) -> None:
         shuffle=False,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    if args.lr_scheduler == "cosine":
+        scheduler = build_lr_scheduler(
+            optimizer,
+            num_steps=args.num_steps,
+            warmup_steps=args.warmup_steps,
+        )
+    else:
+        scheduler = None
     use_amp = device.type == "cuda" and not args.no_amp
     scaler = GradScaler(enabled=use_amp)
     model.train()
@@ -170,7 +195,14 @@ def main(args: argparse.Namespace) -> None:
     step = 0
     if resume and os.path.exists(checkpoint_path):
         log_line(log_path, f"Resuming from checkpoint {checkpoint_path}")
-        step, extra = load_checkpoint(checkpoint_path, model, optimizer, scaler)
+        step, extra = load_checkpoint(
+            checkpoint_path,
+            model,
+            optimizer,
+            scaler,
+            scheduler,
+            map_location=device.type,
+        )
         log_line(log_path, f"Resumed from step {step}")
     elif resume:
         log_line(
@@ -206,6 +238,8 @@ def main(args: argparse.Namespace) -> None:
                 )
                 loss.backward()
                 optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             if step % 20 == 0:
                 save_checkpoint(
                     checkpoint_path,
@@ -214,9 +248,13 @@ def main(args: argparse.Namespace) -> None:
                     step=step,
                     scaler=scaler if use_amp else None,
                     config=config,
+                    scheduler=scheduler,
                     extra={"note": "single_gpt_minimal"},
                 )
             if step % 10 == 0:
+                current_lr = (
+                    scheduler.get_last_lr()[0] if scheduler is not None else args.lr
+                )
                 val_loss = evaluate(
                     model,
                     val_dataloader,
@@ -226,6 +264,7 @@ def main(args: argparse.Namespace) -> None:
                 val_ppl = math.exp(val_loss)
                 msg = (
                     f"step {step} / {num_steps} ",
+                    f"lr: {current_lr:.6f} ",
                     f"train loss: {loss.item():.4f} ",
                     f"val loss: {val_loss:.4f} ",
                     f"val ppl: {val_ppl:.4f} ",
@@ -322,6 +361,19 @@ def parse_args() -> argparse.Namespace:
         "--resume",
         action="store_true",
         help="Resume training from checkpoint.",
+    )
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="cosine",
+        choices=["none", "cosine"],
+        help="Learning rate scheduler",
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=100,
+        help="Warmup steps",
     )
     # data and tokenizer
     parser.add_argument(

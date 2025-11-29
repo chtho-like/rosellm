@@ -1,6 +1,7 @@
 import argparse
 import math
 import os
+import time
 from datetime import datetime
 
 import torch
@@ -11,6 +12,7 @@ from dataset import TextDatasetForCausalLM, build_tokenizer
 from model import GPTModel
 from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 
@@ -41,9 +43,11 @@ class ToyRandomDataset(Dataset):
 
 def log_line(path: str, text: str | tuple[str, ...]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{now}] {text}"
     with open(path, "a", encoding="utf-8") as f:
-        f.write(str(text) + "\n")
-    print(text)
+        f.write(str(line) + "\n")
+    print(line)
 
 
 def evaluate_ddp(
@@ -89,6 +93,20 @@ def evaluate_ddp(
     if model_was_training:
         ddp_model.module.train()
     return avg_loss
+
+
+def build_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    num_steps: int,
+    warmup_steps: int,
+):
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return float(step + 1) / float(max(1, warmup_steps))
+        progress = float(step - warmup_steps) / float(max(1, num_steps - warmup_steps))
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
 def setup_distributed():
@@ -177,7 +195,7 @@ def main(args: argparse.Namespace) -> None:
                 seed=args.data_seed + 1,
             )
         else:
-            val_size = max(int(0.1 * len(train_dataset)), 1)
+            val_size = max(int(args.val_ratio * len(train_dataset)), 1)
             train_size = len(train_dataset) - val_size
             train_dataset, val_dataset = torch.utils.data.random_split(
                 train_dataset,
@@ -203,6 +221,8 @@ def main(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
         sampler=train_sampler,
     )
+    if is_main_process(local_rank):
+        log_line(log_path, f"steps per epoch: {len(train_dataloader)}")
     val_dataloader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
@@ -210,11 +230,21 @@ def main(args: argparse.Namespace) -> None:
         shuffle=False,
     )
     optimizer = torch.optim.AdamW(ddp_model.parameters(), lr=args.lr)
+    if args.lr_scheduler == "cosine":
+        scheduler = build_lr_scheduler(
+            optimizer,
+            num_steps=args.num_steps,
+            warmup_steps=args.warmup_steps,
+        )
+    else:
+        scheduler = None
     use_amp = device.type == "cuda"
     scaler = GradScaler(enabled=use_amp)
     ddp_model.train()
     num_steps = args.num_steps
     step = 0
+    start_time = None
+    last_log_time = None
     if resume and os.path.exists(checkpoint_path):
         log_line(
             log_path,
@@ -223,13 +253,12 @@ def main(args: argparse.Namespace) -> None:
         step, extra = load_checkpoint(
             checkpoint_path,
             ddp_model.module,
-            optimizer,
-            scaler,
+            optimizer=optimizer,
+            scaler=scaler,
+            scheduler=scheduler,
             map_location=device.type,
         )
         log_line(log_path, f"[rank {local_rank}] Resumed from step {step}")
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = args.lr
         log_line(
             log_path,
             f"[rank {local_rank}] Reset optimizer lr to {args.lr}",
@@ -241,6 +270,9 @@ def main(args: argparse.Namespace) -> None:
         )
     elif is_main_process(local_rank):
         log_line(log_path, f"[rank {local_rank}] Starting from scratch")
+    start_time = time.time()
+    last_log_time = start_time
+    start_step = step
     for epoch in range(1, 1000):
         train_sampler.set_epoch(epoch)
         for batch in train_dataloader:
@@ -269,6 +301,8 @@ def main(args: argparse.Namespace) -> None:
                 )
                 loss.backward()
                 optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             if is_main_process(local_rank) and step % 20 == 0:
                 save_checkpoint(
                     checkpoint_path,
@@ -277,6 +311,7 @@ def main(args: argparse.Namespace) -> None:
                     step=step,
                     scaler=scaler if use_amp else None,
                     config=config,
+                    scheduler=scheduler,
                     extra={"note": "minigpt_ddp"},
                 )
             if step % 10 == 0:
@@ -288,11 +323,25 @@ def main(args: argparse.Namespace) -> None:
                 )
                 val_ppl = math.exp(val_loss)
                 if is_main_process(local_rank):
+                    now = time.time()
+                    steps_done = max(step - start_step, 1)
+                    elapsed = now - start_time
+                    time_since_last = now - last_log_time
+                    avg_step_time = elapsed / steps_done
+                    remaining_steps = max(num_steps - step, 0)
+                    eta_seconds = remaining_steps * avg_step_time
+                    last_log_time = now
+                    current_lr = (
+                        scheduler.get_last_lr()[0] if scheduler is not None else args.lr
+                    )
                     msg = (
                         f"epoch {epoch} step {step} / {num_steps} ",
+                        f"lr: {current_lr:.6f} ",
                         f"train loss: {loss.item():.4f} ",
                         f"val loss: {val_loss:.4f} ",
                         f"val ppl: {val_ppl:.4f} ",
+                        f"dt: {time_since_last:.2f}s ",
+                        f"eta: {eta_seconds/3600:.2f}h ",
                         f"amp: {use_amp}",
                     )
                     log_line(log_path, msg)
@@ -392,6 +441,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Resume training from checkpoint.",
     )
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="cosine",
+        choices=["none", "cosine"],
+        help="Learning rate scheduler",
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=100,
+        help="Warmup steps",
+    )
     # data and tokenizer
     parser.add_argument(
         "--train-data",
@@ -406,6 +468,12 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         default=[],
         help="Path to val data",
+    )
+    parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=0.1,  # 10%
+        help="Ratio of validation data",
     )
     parser.add_argument(
         "--tokenizer-name",
