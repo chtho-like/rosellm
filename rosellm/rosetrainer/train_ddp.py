@@ -177,6 +177,9 @@ def main(args: argparse.Namespace) -> None:
                 train_dataset,
                 [train_size, val_size],
             )
+    if is_main_process(local_rank):
+        log_line(log_path, f"train dataset size: {len(train_dataset)}")
+        log_line(log_path, f"val dataset size: {len(val_dataset)}")
     train_sampler = DistributedSampler(
         train_dataset,
         num_replicas=dist.get_world_size(),
@@ -208,7 +211,8 @@ def main(args: argparse.Namespace) -> None:
     step = 0
     if resume and os.path.exists(checkpoint_path):
         log_line(
-            log_path, f"[rank {local_rank}] Resuming from checkpoint {checkpoint_path}"
+            log_path,
+            f"[rank {local_rank}] Resuming from checkpoint {checkpoint_path}",
         )
         step, extra = load_checkpoint(
             checkpoint_path,
@@ -218,6 +222,12 @@ def main(args: argparse.Namespace) -> None:
             map_location=device.type,
         )
         log_line(log_path, f"[rank {local_rank}] Resumed from step {step}")
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = args.lr
+        log_line(
+            log_path,
+            f"[rank {local_rank}] Reset optimizer lr to {args.lr}",
+        )
     elif resume and is_main_process(local_rank):
         log_line(
             log_path,
@@ -272,7 +282,7 @@ def main(args: argparse.Namespace) -> None:
                 val_ppl = math.exp(val_loss)
                 if is_main_process(local_rank):
                     msg = (
-                        f"step {step} / {num_steps} ",
+                        f"epoch {epoch} step {step} / {num_steps} ",
                         f"train loss: {loss.item():.4f} ",
                         f"val loss: {val_loss:.4f} ",
                         f"val ppl: {val_ppl:.4f} ",
@@ -303,25 +313,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-layers",
         type=int,
-        default=2,
+        default=2,  # GPT2 small: 12
         help="Number of Transformer layers.",
     )
     parser.add_argument(
         "--n-heads",
         type=int,
-        default=4,
+        default=4,  # GPT2 small: 12
         help="Number of attention heads.",
     )
     parser.add_argument(
         "--d-model",
         type=int,
-        default=128,
+        default=128,  # GPT2 small: 768
         help="Model hidden size.",
     )
     parser.add_argument(
         "--d-ff",
         type=int,
-        default=512,
+        default=512,  # GPT2 small: 3072
         help="FFN hidden size.",
     )
     parser.add_argument(
