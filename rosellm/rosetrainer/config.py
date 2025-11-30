@@ -11,3 +11,4 @@ class GPTConfig:
     d_ff: int = 3072
     dropout: float = 0.1
     use_tensor_parallel: bool = False
+    use_activation_checkpoint: bool = False

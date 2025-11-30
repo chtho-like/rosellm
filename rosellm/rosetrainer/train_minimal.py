@@ -1,6 +1,7 @@
 import argparse
 import math
 import os
+import time
 from datetime import datetime
 
 import torch
@@ -127,6 +128,8 @@ def main(args: argparse.Namespace) -> None:
         d_model=args.d_model,
         d_ff=args.d_ff,
         dropout=args.dropout,
+        use_tensor_parallel=args.use_tensor_parallel,
+        use_activation_checkpoint=args.use_activation_checkpoint,
     )
     model = GPTModel(config).to(device)
 
@@ -179,6 +182,7 @@ def main(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
         shuffle=False,
     )
+    log_line(log_path, f"steps per epoch: {len(train_dataloader)}")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     if args.lr_scheduler == "cosine":
         scheduler = build_lr_scheduler(
@@ -193,6 +197,8 @@ def main(args: argparse.Namespace) -> None:
     model.train()
     num_steps = args.num_steps
     step = 0
+    start_time = None
+    last_log_time = None
     if resume and os.path.exists(checkpoint_path):
         log_line(log_path, f"Resuming from checkpoint {checkpoint_path}")
         step, extra = load_checkpoint(
@@ -211,7 +217,10 @@ def main(args: argparse.Namespace) -> None:
         )
     else:
         log_line(log_path, "Starting from scratch")
-    while step < num_steps:
+    start_time = time.time()
+    last_log_time = start_time
+    start_step = step
+    for epoch in range(1, 1000):
         for batch in train_dataloader:
             step += 1
             if step > num_steps:
@@ -262,15 +271,28 @@ def main(args: argparse.Namespace) -> None:
                     use_amp=use_amp,
                 )
                 val_ppl = math.exp(val_loss)
+                now = time.time()
+                steps_done = max(step - start_step, 1)
+                elapsed = now - start_time
+                time_since_last = now - last_log_time
+                avg_step_time = elapsed / steps_done
+                remaining_steps = max(num_steps - step, 0)
+                eta_seconds = remaining_steps * avg_step_time
+                last_log_time = now
                 msg = (
-                    f"step {step} / {num_steps} ",
+                    f"epoch {epoch} step {step} / {num_steps} ",
                     f"lr: {current_lr:.6f} ",
                     f"train loss: {loss.item():.4f} ",
                     f"val loss: {val_loss:.4f} ",
                     f"val ppl: {val_ppl:.4f} ",
+                    f"dt: {time_since_last:.2f}s ",
+                    f"eta: {eta_seconds/3600:.2f}h ",
                     f"amp: {use_amp}",
                 )
                 log_line(log_path, msg)
+        if step > num_steps:
+            break
+    log_line(log_path, "Training finished.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -321,6 +343,11 @@ def parse_args() -> argparse.Namespace:
         "--use-tensor-parallel",
         action="store_true",
         help="Enable tensor parallel blocks.",
+    )
+    parser.add_argument(
+        "--use-activation-checkpoint",
+        action="store_true",
+        help="Use activation checkpointing.",
     )
     parser.add_argument(
         "--batch-size",

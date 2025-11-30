@@ -156,6 +156,8 @@ def main(args: argparse.Namespace) -> None:
         d_model=args.d_model,
         d_ff=args.d_ff,
         dropout=args.dropout,
+        use_tensor_parallel=args.use_tensor_parallel,
+        use_activation_checkpoint=args.use_activation_checkpoint,
     )
     model = GPTModel(config).to(device)
     ddp_model = DDP(
@@ -400,6 +402,11 @@ def parse_args() -> argparse.Namespace:
         "--use-tensor-parallel",
         action="store_true",
         help="Enable tensor parallel blocks.",
+    )
+    parser.add_argument(
+        "--use-activation-checkpoint",
+        action="store_true",
+        help="Use activation checkpointing.",
     )
     parser.add_argument(
         "--batch-size",

@@ -10,6 +10,7 @@ from tensor_parallel import (
     RowParallelLinear,
     init_tensor_parallel,
 )
+from torch.utils.checkpoint import checkpoint as ckpt
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -160,8 +161,27 @@ class GPTModel(nn.Module):
         pos_emb = pos_emb.expand(bsz, seq_len, -1)  # [B, T, D]
         x = token_emb + pos_emb
         x = self.dropout(x)
-        for block in self.blocks:
-            x = block(x, attention_mask=attention_mask)
+        use_ckpt = (
+            getattr(
+                self.config,
+                "use_activation_checkpoint",
+                False,
+            )
+            and self.training
+        )
+        if use_ckpt:
+            for block in self.blocks:
+
+                def block_forward(
+                    *inputs,
+                    _block=block,
+                ):
+                    return _block(*inputs)
+
+                x = ckpt(block_forward, x, attention_mask, use_reentrant=False)
+        else:
+            for block in self.blocks:
+                x = block(x, attention_mask=attention_mask)
         x = self.ln_f(x)
         logits = self.lm_head(x)
         loss = None

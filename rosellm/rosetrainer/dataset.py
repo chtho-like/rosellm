@@ -50,7 +50,11 @@ class TextDatasetForCausalLM(Dataset):
                 text = f.read()
             if not text.strip():
                 continue
-            ids = tokenizer.encode(text, add_special_tokens=False)
+            ids = tokenizer.encode(
+                text,
+                add_special_tokens=False,
+                verbose=False,
+            )
             if not ids:
                 continue
             all_ids.extend(ids)
