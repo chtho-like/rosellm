@@ -9,7 +9,7 @@ import torch.cuda.nvtx as nvtx
 import torch.distributed as dist
 from checkpoint import load_checkpoint, save_checkpoint
 from config import GPTConfig
-from dataset import TextDatasetForCausalLM, build_tokenizer
+from dataset import FineWebNPYDataset, TextDatasetForCausalLM, build_tokenizer
 from model import GPTModel
 from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -192,6 +192,8 @@ def main(args: argparse.Namespace) -> None:
     checkpoint_path = args.checkpoint_path
     resume = args.resume
     log_path = "logs/train_ddp.log"
+    train_seed = args.data_seed
+    val_seed = None if args.data_seed is None else args.data_seed + 1
     if is_main_process(local_rank):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_line(log_path, f"Training started at {timestamp}")
@@ -202,8 +204,6 @@ def main(args: argparse.Namespace) -> None:
     if args.use_toy_data:
         effective_vocab_size = args.vocab_size
     else:
-        if not args.train_data:
-            raise ValueError("--train-data is not provided")
         tokenizer = build_tokenizer(args.tokenizer_name)
         tokenizer_vocab_size = getattr(tokenizer, "vocab_size", None)
         if tokenizer_vocab_size is None:
@@ -240,14 +240,14 @@ def main(args: argparse.Namespace) -> None:
             full_dataset,
             [train_size, val_size],
         )
-    else:
+    elif args.data_mode == "text":
         train_dataset = TextDatasetForCausalLM(
             file_paths=args.train_data,
             tokenizer=tokenizer,
             seq_len=args.seq_len,
             add_eos=True,
             max_tokens=args.max_tokens,
-            seed=args.data_seed,
+            seed=train_seed,
         )
         if args.val_data:
             val_dataset = TextDatasetForCausalLM(
@@ -256,7 +256,7 @@ def main(args: argparse.Namespace) -> None:
                 seq_len=args.seq_len,
                 add_eos=True,
                 max_tokens=args.max_tokens,
-                seed=args.data_seed + 1,
+                seed=val_seed,
             )
         else:
             val_size = max(int(args.val_ratio * len(train_dataset)), 1)
@@ -265,6 +265,31 @@ def main(args: argparse.Namespace) -> None:
                 train_dataset,
                 [train_size, val_size],
             )
+    elif args.data_mode == "fineweb_npy":
+        if not args.train_npy:
+            raise ValueError("--train-npy is not provided")
+        train_dataset = FineWebNPYDataset(
+            file_paths=args.train_npy,
+            seq_len=args.seq_len,
+            max_tokens=args.max_tokens,
+            seed=train_seed,
+        )
+        if args.val_npy:
+            val_dataset = FineWebNPYDataset(
+                file_paths=args.val_npy,
+                seq_len=args.seq_len,
+                max_tokens=args.max_tokens,
+                seed=val_seed,
+            )
+        else:
+            val_size = min(128, max(int(0.1 * len(train_dataset)), 1))
+            train_size = len(train_dataset) - val_size
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                train_dataset,
+                [train_size, val_size],
+            )
+    else:
+        raise ValueError(f"invalid data mode: {args.data_mode}")
     if is_main_process(local_rank):
         log_line(log_path, f"train dataset size: {len(train_dataset)}")
         log_line(log_path, f"val dataset size: {len(val_dataset)}")
@@ -477,7 +502,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--vocab-size",
         type=int,
-        default=10000,
+        default=50257,
         help="Vocabulary size.",
     )
     parser.add_argument(
@@ -604,6 +629,27 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.1,  # 10%
         help="Ratio of validation data",
+    )
+    parser.add_argument(
+        "--data-mode",
+        type=str,
+        default="text",
+        choices=["text", "fineweb_npy"],
+        help="data mode: text or fineweb_npy",
+    )
+    parser.add_argument(
+        "--train-npy",
+        type=str,
+        nargs="*",
+        default=[],
+        help="path to training fineweb npy files",
+    )
+    parser.add_argument(
+        "--val-npy",
+        type=str,
+        nargs="*",
+        default=[],
+        help="path to val fineweb npy files",
     )
     parser.add_argument(
         "--tokenizer-name",

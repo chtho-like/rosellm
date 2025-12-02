@@ -1,6 +1,7 @@
 import random
 from typing import List, Optional
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
@@ -97,6 +98,79 @@ class TextDatasetForCausalLM(Dataset):
         end = start + self.seq_len
         ids = self.all_ids[start:end]
         input_ids = torch.tensor(ids, dtype=torch.long)
+        attention_mask = torch.ones(self.seq_len, dtype=torch.long)
+        labels = input_ids.clone()
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attention_mask,
+        }
+
+
+class FineWebNPYDataset(Dataset):
+    def __init__(
+        self,
+        file_paths: List[str],
+        seq_len: int,
+        max_tokens: Optional[int] = None,
+        seed: Optional[int] = None,
+        random_start: bool = True,
+    ) -> None:
+        super().__init__()
+        if not file_paths:
+            raise ValueError("file_paths is empty")
+        self.seq_len = seq_len
+        arrays: List[np.ndarray] = []
+        total = 0
+        for path in file_paths:
+            arr = np.load(path, mmap_mode="r")
+            if arr.ndim != 1:
+                raise ValueError(f"array {path} is not 1D")
+            arr = arr.astype(np.int64, copy=False)
+            if max_tokens is not None:
+                remaining = max_tokens - total
+                if remaining <= 0:
+                    break
+                if arr.shape[0] > remaining:
+                    arr = arr[:remaining]
+            arrays.append(arr)
+            total += arr.shape[0]
+        if not arrays:
+            raise ValueError("no arrays loaded")
+        self.tokens = np.concatenate(arrays, axis=0)
+        self.total_tokens = int(self.tokens.shape[0])
+        if self.total_tokens < seq_len:
+            raise ValueError("the total number of tokens is less than seq_len")
+        max_id = int(self.tokens.max())
+        self.vocab_size = max_id + 1
+        max_start = self.total_tokens - seq_len
+        num_samples = self.total_tokens // seq_len
+        if num_samples > max_start + 1:
+            num_samples = max_start + 1
+        if seed is None:
+            rng = random.Random()
+        else:
+            rng = random.Random(seed)
+        if random_start:
+            candidates = list(range(max_start + 1))
+            if num_samples < len(candidates):
+                start_indices = rng.sample(candidates, num_samples)
+            else:
+                rng.shuffle(candidates)
+                start_indices = candidates
+        else:
+            start_indices = [i * seq_len for i in range(num_samples)]
+        self.start_indices = np.array(start_indices, dtype=np.int64)
+        self.num_samples = int(self.start_indices.shape[0])
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __getitem__(self, idx: int):
+        start = int(self.start_indices[idx])
+        end = start + self.seq_len
+        ids = self.tokens[start:end]
+        input_ids = torch.from_numpy(ids).long()
         attention_mask = torch.ones(self.seq_len, dtype=torch.long)
         labels = input_ids.clone()
         return {

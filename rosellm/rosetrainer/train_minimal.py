@@ -8,7 +8,7 @@ import torch
 import torch.cuda.nvtx as nvtx
 from checkpoint import load_checkpoint, save_checkpoint
 from config import GPTConfig
-from dataset import TextDatasetForCausalLM, build_tokenizer
+from dataset import FineWebNPYDataset, TextDatasetForCausalLM, build_tokenizer
 from model import GPTModel
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import LambdaLR
@@ -153,9 +153,13 @@ def main(args: argparse.Namespace) -> None:
     checkpoint_path = args.checkpoint_path
     resume = args.resume
 
+    # seeds for data sampling
+    train_seed = args.data_seed
+    val_seed = None if args.data_seed is None else args.data_seed + 1
+
     if args.use_toy_data:
         effective_vocab_size = args.vocab_size
-    else:
+    elif args.data_mode == "text":
         if not args.train_data:
             raise ValueError("--train-data is not provided")
         tokenizer = build_tokenizer(args.tokenizer_name)
@@ -163,6 +167,13 @@ def main(args: argparse.Namespace) -> None:
         if tokenizer_vocab_size is None:
             tokenizer_vocab_size = len(tokenizer)
         effective_vocab_size = tokenizer_vocab_size
+    elif args.data_mode == "fineweb_npy":
+        if not args.train_npy:
+            raise ValueError("--train-npy is not provided")
+        # for pre-tokenized data, rely on the provided vocab size
+        effective_vocab_size = args.vocab_size
+    else:
+        raise ValueError(f"invalid data mode: {args.data_mode}")
 
     config = GPTConfig(
         vocab_size=effective_vocab_size,
@@ -189,14 +200,14 @@ def main(args: argparse.Namespace) -> None:
             full_dataset,
             [train_size, val_size],
         )
-    else:
+    elif args.data_mode == "text":
         train_dataset = TextDatasetForCausalLM(
             file_paths=args.train_data,
             tokenizer=tokenizer,
             seq_len=args.seq_len,
             add_eos=True,
             max_tokens=args.max_tokens,
-            seed=args.data_seed,
+            seed=train_seed,
         )
         if args.val_data:
             val_dataset = TextDatasetForCausalLM(
@@ -205,7 +216,7 @@ def main(args: argparse.Namespace) -> None:
                 seq_len=args.seq_len,
                 add_eos=True,
                 max_tokens=args.max_tokens,
-                seed=args.data_seed + 1,
+                seed=val_seed,
             )
         else:
             val_size = max(int(0.1 * len(train_dataset)), 1)
@@ -214,6 +225,31 @@ def main(args: argparse.Namespace) -> None:
                 train_dataset,
                 [train_size, val_size],
             )
+    elif args.data_mode == "fineweb_npy":
+        train_dataset = FineWebNPYDataset(
+            file_paths=args.train_npy,
+            seq_len=args.seq_len,
+            max_tokens=args.max_tokens,
+            seed=train_seed,
+            random_start=True,
+        )
+        if args.val_npy:
+            val_dataset = FineWebNPYDataset(
+                file_paths=args.val_npy,
+                seq_len=args.seq_len,
+                max_tokens=args.max_tokens,
+                seed=val_seed,
+                random_start=True,
+            )
+        else:
+            val_size = min(128, max(int(0.1 * len(train_dataset)), 1))
+            train_size = len(train_dataset) - val_size
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                train_dataset,
+                [train_size, val_size],
+            )
+    else:
+        raise ValueError(f"invalid data mode: {args.data_mode}")
     log_line(log_path, f"train dataset size: {len(train_dataset)}")
     log_line(log_path, f"val dataset size: {len(val_dataset)}")
     train_dataloader = DataLoader(
@@ -420,7 +456,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--vocab-size",
         type=int,
-        default=10000,
+        default=50257,
         help="Vocabulary size.",
     )
     parser.add_argument(
@@ -564,6 +600,27 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="seed for the data sampler",
+    )
+    parser.add_argument(
+        "--data-mode",
+        type=str,
+        default="text",
+        choices=["text", "fineweb_npy"],
+        help="data mode: text or fineweb_npy",
+    )
+    parser.add_argument(
+        "--train-npy",
+        type=str,
+        nargs="*",
+        default=[],
+        help="path to training fineweb npy files",
+    )
+    parser.add_argument(
+        "--val-npy",
+        type=str,
+        nargs="*",
+        default=[],
+        help="path to val fineweb npy files",
     )
     # wandb
     parser.add_argument(
