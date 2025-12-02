@@ -17,6 +17,11 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.profiler import ProfilerActivity, profile, record_function
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
 
 class ToyRandomDataset(Dataset):
     def __init__(self, vocab_size: int, seq_len: int, num_samples: int):
@@ -129,6 +134,45 @@ def is_main_process(local_rank: int) -> bool:
 
 def main(args: argparse.Namespace) -> None:
     device, local_rank = setup_distributed()
+    if args.use_wandb and is_main_process(local_rank):
+        if wandb is None:
+            raise ImportError("wandb is not installed")
+        world_size = dist.get_world_size()
+        wandb_config = {
+            "world_size": world_size,
+            "vocab_size": args.vocab_size,
+            "max_position_embeddings": args.max_position_embeddings,
+            "n_layers": args.n_layers,
+            "n_heads": args.n_heads,
+            "d_model": args.d_model,
+            "d_ff": args.d_ff,
+            "dropout": args.dropout,
+            "use_tensor_parallel": args.use_tensor_parallel,
+            "use_activation_checkpoint": args.use_activation_checkpoint,
+            "batch_size": args.batch_size,
+            "seq_len": args.seq_len,
+            "num_steps": args.num_steps,
+            "lr": args.lr,
+            "no_amp": args.no_amp,
+            "checkpoint_path": args.checkpoint_path,
+            "resume": args.resume,
+            "lr_scheduler": args.lr_scheduler,
+            "warmup_steps": args.warmup_steps,
+            "use_profiler": args.use_profiler,
+            "train_data": args.train_data,
+            "val_data": args.val_data,
+            "tokenizer_name": args.tokenizer_name,
+            "use_toy_data": args.use_toy_data,
+            "max_tokens": args.max_tokens,
+            "data_seed": args.data_seed,
+        }
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config=wandb_config,
+        )
+    else:
+        wandb_config = None
     if args.use_profiler:
         prof = profile(
             activities=[
@@ -402,12 +446,29 @@ def main(args: argparse.Namespace) -> None:
                         f"amp: {use_amp}",
                     )
                     log_line(log_path, msg)
+                    if args.use_wandb and wandb is not None:
+                        world_size = dist.get_world_size()
+                        global_toks_per_sec = tokens_per_sec * world_size
+                        wandb.log(
+                            {
+                                "train/loss": loss.item(),
+                                "val/loss": val_loss,
+                                "val/ppl": val_ppl,
+                                "tokens_per_sec_per_rank": tokens_per_sec,
+                                "global_tokens_per_sec": global_toks_per_sec,
+                                "lr": current_lr,
+                                "amp": float(use_amp),
+                            },
+                            step=step,
+                        )
         if step > num_steps:
             break
     if prof is not None:
         prof.__exit__(None, None, None)
     if is_main_process(local_rank):
         log_line(log_path, "Training finished.")
+        if args.use_wandb and wandb is not None:
+            wandb.finish()
     cleanup_distributed()
 
 
@@ -566,6 +627,24 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="seed for the data sampler",
+    )
+    # wandb
+    parser.add_argument(
+        "--use-wandb",
+        action="store_true",
+        help="use wandb for logging",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="rosetrainer",
+        help="wandb project name",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="wandb run name",
     )
     return parser.parse_args()
 

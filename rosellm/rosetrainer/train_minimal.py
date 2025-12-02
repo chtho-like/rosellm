@@ -15,6 +15,11 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.profiler import ProfilerActivity, profile, record_function
 from torch.utils.data import DataLoader, Dataset
 
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
 
 class ToyRandomDataset(Dataset):
     def __init__(self, vocab_size: int, seq_len: int, num_samples: int):
@@ -102,6 +107,43 @@ def build_lr_scheduler(
 
 
 def main(args: argparse.Namespace) -> None:
+    if args.use_wandb:
+        if wandb is None:
+            raise ImportError("wandb is not installed")
+        wandb_config = {
+            "vocab_size": args.vocab_size,
+            "max_position_embeddings": args.max_position_embeddings,
+            "n_layers": args.n_layers,
+            "n_heads": args.n_heads,
+            "d_model": args.d_model,
+            "d_ff": args.d_ff,
+            "dropout": args.dropout,
+            "use_tensor_parallel": args.use_tensor_parallel,
+            "use_activation_checkpoint": args.use_activation_checkpoint,
+            "batch_size": args.batch_size,
+            "seq_len": args.seq_len,
+            "num_steps": args.num_steps,
+            "lr": args.lr,
+            "no_amp": args.no_amp,
+            "checkpoint_path": args.checkpoint_path,
+            "resume": args.resume,
+            "lr_scheduler": args.lr_scheduler,
+            "warmup_steps": args.warmup_steps,
+            "use_profiler": args.use_profiler,
+            "train_data": args.train_data,
+            "val_data": args.val_data,
+            "tokenizer_name": args.tokenizer_name,
+            "use_toy_data": args.use_toy_data,
+            "max_tokens": args.max_tokens,
+            "data_seed": args.data_seed,
+        }
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config=wandb_config,
+        )
+    else:
+        wandb_config = None
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log_path = "logs/train_minimal.log"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -351,11 +393,26 @@ def main(args: argparse.Namespace) -> None:
                     f"amp: {use_amp}",
                 )
                 log_line(log_path, msg)
+                if args.use_wandb and wandb is not None:
+                    wandb.log(
+                        {
+                            "train/loss": loss.item(),
+                            "val/loss": val_loss,
+                            "val/ppl": val_ppl,
+                            "step_time": step_time,
+                            "tokens_per_sec": tokens_per_sec,
+                            "lr": current_lr,
+                            "amp": float(use_amp),
+                        },
+                        step=step,
+                    )
         if step > num_steps:
             break
     log_line(log_path, "Training finished.")
     if prof is not None:
         prof.__exit__(None, None, None)
+    if args.use_wandb and wandb is not None:
+        wandb.finish()
 
 
 def parse_args() -> argparse.Namespace:
@@ -507,6 +564,24 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="seed for the data sampler",
+    )
+    # wandb
+    parser.add_argument(
+        "--use-wandb",
+        action="store_true",
+        help="use wandb for logging",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="rosetrainer",
+        help="wandb project name",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="wandb run name",
     )
     return parser.parse_args()
 
