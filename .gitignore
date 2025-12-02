@@ -182,4 +182,5 @@ AGENTS.md
 **/checkpoints/
 **/logs/
 **/data/
+**/logdir/
 datasets

@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 
 import torch
+import torch.cuda.nvtx as nvtx
 import torch.distributed as dist
 from checkpoint import load_checkpoint, save_checkpoint
 from config import GPTConfig
@@ -13,6 +14,7 @@ from model import GPTModel
 from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import LambdaLR
+from torch.profiler import ProfilerActivity, profile, record_function
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 
@@ -127,6 +129,22 @@ def is_main_process(local_rank: int) -> bool:
 
 def main(args: argparse.Namespace) -> None:
     device, local_rank = setup_distributed()
+    if args.use_profiler:
+        prof = profile(
+            activities=[
+                ProfilerActivity.CPU,
+                ProfilerActivity.CUDA,
+            ],
+            record_shapes=True,
+            with_stack=False,
+            profile_memory=True,
+            on_trace_ready=torch.profiler.tensorboard_trace_handler("./logdir"),
+        )
+        prof.__enter__()
+        if is_main_process(local_rank):
+            print("Profiler enabled. Trace will be saved after training")
+    else:
+        prof = None
     checkpoint_path = args.checkpoint_path
     resume = args.resume
     log_path = "logs/train_ddp.log"
@@ -281,30 +299,65 @@ def main(args: argparse.Namespace) -> None:
             step += 1
             if step > num_steps:
                 break
-            input_ids = batch["input_ids"].to(device)  # [B, T]
-            labels = batch["labels"].to(device)  # [B, T]
-            attention_mask = batch["attention_mask"].to(device)  # [B, T]
+            t0 = time.time()
+
+            # data to device
+            with record_function("data_to_device"):
+                nvtx.range_push("data_to_device")
+                input_ids = batch["input_ids"].to(device)  # [B, T]
+                labels = batch["labels"].to(device)  # [B, T]
+                attention_mask = batch["attention_mask"].to(device)  # [B, T]
+                nvtx.range_pop()
+
             optimizer.zero_grad()
-            if use_amp:
-                with autocast(device_type=device.type):
+
+            # forward
+            with record_function("forward"):
+                nvtx.range_push("forward")
+                if use_amp:
+                    with autocast(device_type=device.type):
+                        logits, loss = ddp_model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=labels,
+                        )
+                else:
                     logits, loss = ddp_model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
                         labels=labels,
                     )
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                logits, loss = ddp_model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                )
-                loss.backward()
-                optimizer.step()
+                nvtx.range_pop()
+
+            # backward
+            with record_function("backward"):
+                nvtx.range_push("backward")
+                if use_amp:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+                nvtx.range_pop()
+
+            # optimizer step
+            with record_function("optimizer_step"):
+                nvtx.range_push("optimizer_step")
+                if use_amp:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                nvtx.range_pop()
+
             if scheduler is not None:
                 scheduler.step()
+
+            step_time = time.time() - t0
+            tokens_per_step = input_ids.numel()
+            tokens_per_sec = tokens_per_step / max(step_time, 1e-8)
+
+            if prof is not None:
+                prof.step()
+
             if is_main_process(local_rank) and step % 20 == 0:
                 save_checkpoint(
                     checkpoint_path,
@@ -339,6 +392,8 @@ def main(args: argparse.Namespace) -> None:
                     msg = (
                         f"epoch {epoch} step {step} / {num_steps} ",
                         f"lr: {current_lr:.6f} ",
+                        f"step time: {step_time:.2f}",
+                        f"toks/s (per rank): {tokens_per_sec:.2f}",
                         f"train loss: {loss.item():.4f} ",
                         f"val loss: {val_loss:.4f} ",
                         f"val ppl: {val_ppl:.4f} ",
@@ -349,6 +404,8 @@ def main(args: argparse.Namespace) -> None:
                     log_line(log_path, msg)
         if step > num_steps:
             break
+    if prof is not None:
+        prof.__exit__(None, None, None)
     if is_main_process(local_rank):
         log_line(log_path, "Training finished.")
     cleanup_distributed()
@@ -460,6 +517,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=100,
         help="Warmup steps",
+    )
+    parser.add_argument(
+        "--use-profiler",
+        action="store_true",
+        help="Use profiler",
     )
     # data and tokenizer
     parser.add_argument(
