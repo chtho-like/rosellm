@@ -1,9 +1,11 @@
 import argparse
 import math
 import os
+import random
 import time
 from datetime import datetime
 
+import numpy as np
 import torch
 import torch.cuda.nvtx as nvtx
 import torch.distributed as dist
@@ -13,6 +15,7 @@ from dataset import FineWebNPYDataset, TextDatasetForCausalLM, build_tokenizer
 from model import GPTModel
 from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import LambdaLR
 from torch.profiler import ProfilerActivity, profile, record_function
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
@@ -46,6 +49,13 @@ class ToyRandomDataset(Dataset):
             "labels": labels,
             "attention_mask": attention_mask,
         }
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def log_line(path: str, text: str | tuple[str, ...]) -> None:
@@ -133,6 +143,7 @@ def is_main_process(local_rank: int) -> bool:
 
 
 def main(args: argparse.Namespace) -> None:
+    set_seed(args.seed)
     device, local_rank = setup_distributed()
     if args.use_wandb and is_main_process(local_rank):
         if wandb is None:
@@ -327,7 +338,7 @@ def main(args: argparse.Namespace) -> None:
         )
     else:
         scheduler = None
-    use_amp = device.type == "cuda"
+    use_amp = device.type == "cuda" and not args.no_amp
     scaler = GradScaler(enabled=use_amp)
     ddp_model.train()
     num_steps = args.num_steps
@@ -362,13 +373,19 @@ def main(args: argparse.Namespace) -> None:
     start_time = time.time()
     last_log_time = start_time
     start_step = step
+    grad_accum_steps = max(1, args.grad_accum_steps)
+    micro_step = 0
     for epoch in range(1, 1000):
         train_sampler.set_epoch(epoch)
         for batch in train_dataloader:
-            step += 1
-            if step > num_steps:
+            if step >= num_steps:
                 break
-            t0 = time.time()
+            micro_step += 1
+            first_micro_step = (micro_step - 1) % grad_accum_steps == 0
+            last_micro_step = micro_step % grad_accum_steps == 0
+            if first_micro_step:
+                t0 = time.time()
+                optimizer.zero_grad()
 
             # data to device
             with record_function("data_to_device"):
@@ -377,8 +394,6 @@ def main(args: argparse.Namespace) -> None:
                 labels = batch["labels"].to(device)  # [B, T]
                 attention_mask = batch["attention_mask"].to(device)  # [B, T]
                 nvtx.range_pop()
-
-            optimizer.zero_grad()
 
             # forward
             with record_function("forward"):
@@ -398,6 +413,8 @@ def main(args: argparse.Namespace) -> None:
                     )
                 nvtx.range_pop()
 
+            loss = loss / float(grad_accum_steps)
+
             # backward
             with record_function("backward"):
                 nvtx.range_push("backward")
@@ -407,85 +424,113 @@ def main(args: argparse.Namespace) -> None:
                     loss.backward()
                 nvtx.range_pop()
 
-            # optimizer step
-            with record_function("optimizer_step"):
-                nvtx.range_push("optimizer_step")
-                if use_amp:
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    optimizer.step()
-                nvtx.range_pop()
-
-            if scheduler is not None:
-                scheduler.step()
-
-            step_time = time.time() - t0
-            tokens_per_step = input_ids.numel()
-            tokens_per_sec = tokens_per_step / max(step_time, 1e-8)
-
-            if prof is not None:
-                prof.step()
-
-            if is_main_process(local_rank) and step % 20 == 0:
-                save_checkpoint(
-                    checkpoint_path,
-                    model=ddp_model.module,
-                    optimizer=optimizer,
-                    step=step,
-                    scaler=scaler if use_amp else None,
-                    config=config,
-                    scheduler=scheduler,
-                    extra={"note": "minigpt_ddp"},
-                )
-            if step % 10 == 0:
-                val_loss = evaluate_ddp(
-                    ddp_model,
-                    val_dataloader,
-                    device=device,
-                    use_amp=use_amp,
-                )
-                val_ppl = math.exp(val_loss)
-                if is_main_process(local_rank):
-                    now = time.time()
-                    steps_done = max(step - start_step, 1)
-                    elapsed = now - start_time
-                    time_since_last = now - last_log_time
-                    avg_step_time = elapsed / steps_done
-                    remaining_steps = max(num_steps - step, 0)
-                    eta_seconds = remaining_steps * avg_step_time
-                    last_log_time = now
-                    current_lr = (
-                        scheduler.get_last_lr()[0] if scheduler is not None else args.lr
-                    )
-                    msg = (
-                        f"epoch {epoch} step {step} / {num_steps} ",
-                        f"lr: {current_lr:.6f} ",
-                        f"step time: {step_time:.2f}",
-                        f"toks/s (per rank): {tokens_per_sec:.2f}",
-                        f"train loss: {loss.item():.4f} ",
-                        f"val loss: {val_loss:.4f} ",
-                        f"val ppl: {val_ppl:.4f} ",
-                        f"dt: {time_since_last:.2f}s ",
-                        f"eta: {eta_seconds/3600:.2f}h ",
-                        f"amp: {use_amp}",
-                    )
-                    log_line(log_path, msg)
-                    if args.use_wandb and wandb is not None:
-                        world_size = dist.get_world_size()
-                        global_toks_per_sec = tokens_per_sec * world_size
-                        wandb.log(
-                            {
-                                "train/loss": loss.item(),
-                                "val/loss": val_loss,
-                                "val/ppl": val_ppl,
-                                "tokens_per_sec_per_rank": tokens_per_sec,
-                                "global_tokens_per_sec": global_toks_per_sec,
-                                "lr": current_lr,
-                                "amp": float(use_amp),
-                            },
-                            step=step,
+            if last_micro_step:
+                grad_norm = None
+                with record_function("grad_clip_step"):
+                    nvtx.range_push("grad_clip_step")
+                    if args.grad_clip_norm > 0.0:
+                        if use_amp:
+                            scaler.unscale_(optimizer)
+                        grad_norm = clip_grad_norm_(
+                            ddp_model.parameters(),
+                            args.grad_clip_norm,
                         )
+                        grad_norm = float(grad_norm.item())
+                    else:
+                        total_norm = 0.0
+                        for p in ddp_model.parameters():
+                            if p.grad is None:
+                                continue
+                            param_norm = p.grad.data.norm(2)
+                            total_norm += param_norm.item() ** 2
+                        grad_norm = total_norm**0.5
+                    nvtx.range_pop()
+
+                # optimizer step
+                with record_function("optimizer_step"):
+                    nvtx.range_push("optimizer_step")
+                    if use_amp:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    nvtx.range_pop()
+
+                if scheduler is not None:
+                    scheduler.step()
+
+                step += 1
+
+                step_time = time.time() - t0
+                tokens_per_step = input_ids.numel() * grad_accum_steps
+                tokens_per_sec = tokens_per_step / max(step_time, 1e-8)
+
+                if prof is not None:
+                    prof.step()
+
+                if is_main_process(local_rank) and step % 20 == 0:
+                    save_checkpoint(
+                        checkpoint_path,
+                        model=ddp_model.module,
+                        optimizer=optimizer,
+                        step=step,
+                        scaler=scaler if use_amp else None,
+                        config=config,
+                        scheduler=scheduler,
+                        extra={"note": "minigpt_ddp"},
+                    )
+                if step % 10 == 0:
+                    val_loss = evaluate_ddp(
+                        ddp_model,
+                        val_dataloader,
+                        device=device,
+                        use_amp=use_amp,
+                    )
+                    val_ppl = math.exp(val_loss)
+                    if is_main_process(local_rank):
+                        now = time.time()
+                        steps_done = max(step - start_step, 1)
+                        elapsed = now - start_time
+                        time_since_last = now - last_log_time
+                        avg_step_time = elapsed / steps_done
+                        remaining_steps = max(num_steps - step, 0)
+                        eta_seconds = remaining_steps * avg_step_time
+                        last_log_time = now
+                        current_lr = (
+                            scheduler.get_last_lr()[0]
+                            if scheduler is not None
+                            else args.lr
+                        )
+                        msg = (
+                            f"epoch {epoch} step {step} / {num_steps} ",
+                            f"lr: {current_lr:.6f} ",
+                            f"step time: {step_time:.2f}",
+                            f"toks/s (per rank): {tokens_per_sec:.2f}",
+                            f"grad norm: {grad_norm:.4f} ",
+                            f"train loss: {loss.item():.4f} ",
+                            f"val loss: {val_loss:.4f} ",
+                            f"val ppl: {val_ppl:.4f} ",
+                            f"dt: {time_since_last:.2f}s ",
+                            f"eta: {eta_seconds/3600:.2f}h ",
+                            f"amp: {use_amp}",
+                        )
+                        log_line(log_path, msg)
+                        if args.use_wandb and wandb is not None:
+                            world_size = dist.get_world_size()
+                            global_toks_per_sec = tokens_per_sec * world_size
+                            wandb.log(
+                                {
+                                    "train/loss": loss.item(),
+                                    "val/loss": val_loss,
+                                    "val/ppl": val_ppl,
+                                    "grad_norm": grad_norm,
+                                    "tokens_per_sec_per_rank": tokens_per_sec,
+                                    "global_tokens_per_sec": global_toks_per_sec,
+                                    "lr": current_lr,
+                                    "amp": float(use_amp),
+                                },
+                                step=step,
+                            )
         if step > num_steps:
             break
     if prof is not None:
@@ -608,6 +653,24 @@ def parse_args() -> argparse.Namespace:
         "--use-profiler",
         action="store_true",
         help="Use profiler",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Global random seed",
+    )
+    parser.add_argument(
+        "--grad-accum-steps",
+        type=int,
+        default=1,
+        help="Gradient accumulation steps",
+    )
+    parser.add_argument(
+        "--grad-clip-norm",
+        type=float,
+        default=1.0,
+        help="Gradient clipping norm",
     )
     # data and tokenizer
     parser.add_argument(
