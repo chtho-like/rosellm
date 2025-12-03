@@ -10,13 +10,17 @@ torchrun --nproc_per_node=2 train_ddp.py \
   --batch-size 2 \
   --grad-accum-steps 2 \
   --grad-clip-norm 1.0 \
-  --num-steps 50 \
+  --num-steps 122000 \
   --lr 3e-4 \
-  --train-data data/train.txt \
+  --data-mode fineweb_npy \
+  --train-npy data/edu_fineweb10B/edufineweb_train_000001.npy \
+  --val-npy data/edu_fineweb10B/edufineweb_val_000000.npy \
+  --val-max-tokens 1000000 \
+  --eval-steps 1000 \
   --tokenizer-name gpt2 \
-  --max-tokens 100000 \
   --data-seed 42 \
-  --val-ratio 0.001 \
   --use-wandb \
+  --wandb-project rosetrainer \
+  --wandb-run-name gpt2_small_ddp_edu_fineweb10B \
   --checkpoint-path checkpoints/gpt2_small_ddp.pt
 

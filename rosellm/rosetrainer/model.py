@@ -4,13 +4,14 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from config import GPTConfig
-from tensor_parallel import (
+from torch.utils.checkpoint import checkpoint as ckpt
+
+from .config import GPTConfig
+from .tensor_parallel import (
     ColumnParallelLinear,
     RowParallelLinear,
     init_tensor_parallel,
 )
-from torch.utils.checkpoint import checkpoint as ckpt
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -146,6 +147,10 @@ class GPTModel(nn.Module):
         )
         self.ln_f = nn.LayerNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        self.tie_weights()
+
+    def tie_weights(self) -> None:
+        self.lm_head.weight = self.token_embedding.weight
 
     def forward(
         self,

@@ -176,6 +176,7 @@ def main(args: argparse.Namespace) -> None:
             "use_toy_data": args.use_toy_data,
             "max_tokens": args.max_tokens,
             "data_seed": args.data_seed,
+            "eval_steps": args.eval_steps,
         }
         wandb.init(
             project=args.wandb_project,
@@ -266,7 +267,7 @@ def main(args: argparse.Namespace) -> None:
                 tokenizer=tokenizer,
                 seq_len=args.seq_len,
                 add_eos=True,
-                max_tokens=args.max_tokens,
+                max_tokens=args.val_max_tokens,
                 seed=val_seed,
             )
         else:
@@ -289,7 +290,7 @@ def main(args: argparse.Namespace) -> None:
             val_dataset = FineWebNPYDataset(
                 file_paths=args.val_npy,
                 seq_len=args.seq_len,
-                max_tokens=args.max_tokens,
+                max_tokens=args.val_max_tokens,
                 seed=val_seed,
             )
         else:
@@ -479,7 +480,7 @@ def main(args: argparse.Namespace) -> None:
                         scheduler=scheduler,
                         extra={"note": "minigpt_ddp"},
                     )
-                if step % 10 == 0:
+                if step % args.eval_steps == 0:
                     val_loss = evaluate_ddp(
                         ddp_model,
                         val_dataloader,
@@ -694,6 +695,12 @@ def parse_args() -> argparse.Namespace:
         help="Ratio of validation data",
     )
     parser.add_argument(
+        "--eval-steps",
+        type=int,
+        default=100,
+        help="Evaluation step",
+    )
+    parser.add_argument(
         "--data-mode",
         type=str,
         default="text",
@@ -730,6 +737,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="max tokens to sample from the dataset",
+    )
+    parser.add_argument(
+        "--val-max-tokens",
+        type=int,
+        default=None,
+        help="max tokens to sample from the val dataset",
     )
     parser.add_argument(
         "--data-seed",
