@@ -294,7 +294,7 @@ def main(args: argparse.Namespace) -> None:
                 seed=val_seed,
             )
         else:
-            val_size = min(128, max(int(0.1 * len(train_dataset)), 1))
+            val_size = min(1024, max(int(args.val_ratio * len(train_dataset)), 1))
             train_size = len(train_dataset) - val_size
             train_dataset, val_dataset = torch.utils.data.random_split(
                 train_dataset,
@@ -323,7 +323,10 @@ def main(args: argparse.Namespace) -> None:
         sampler=train_sampler,
     )
     if is_main_process(local_rank):
-        log_line(log_path, f"steps per epoch: {len(train_dataloader)}")
+        train_len = len(train_dataloader)
+        steps_per_epoch = train_len // args.grad_accum_steps
+        log_line(log_path, f"train micro steps per epoch: {train_len}")
+        log_line(log_path, f"train steps per epoch: {steps_per_epoch}")
     val_dataloader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,

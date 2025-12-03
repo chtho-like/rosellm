@@ -6,8 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as ckpt
 
-from .config import GPTConfig
-from .tensor_parallel import (
+from rosellm.rosetrainer.config import GPTConfig
+from rosellm.rosetrainer.tensor_parallel import (
     ColumnParallelLinear,
     RowParallelLinear,
     init_tensor_parallel,
@@ -81,7 +81,12 @@ class MultiHeadSelfAttention(nn.Module):
             full_seq_len = seq_len
 
         attn_scores = q @ k.transpose(-2, -1) * self.d_head**-0.5
-        causal_mask = self.mask[:, :, :seq_len, :full_seq_len]
+        causal_mask = self.mask[
+            :,
+            :,
+            full_seq_len - seq_len : full_seq_len,
+            :full_seq_len,
+        ]
         attn_scores = attn_scores.masked_fill(causal_mask == 0, float("-inf"))
         if attention_mask is not None:  # padding mask
             attn_mask = attention_mask[:, None, None, :]
@@ -192,7 +197,18 @@ class GPTModel(nn.Module):
         bsz, seq_len = input_ids.size()
         device = input_ids.device
         token_emb = self.token_embedding(input_ids)  # [B, T, D]
-        position_ids = torch.arange(seq_len, device=device).unsqueeze(0)  # [1, T]
+        if past_key_values is not None and len(past_key_values) > 0:
+            past_k = past_key_values[0][0]
+            past_len = past_k.size(-2)
+        else:
+            past_len = 0
+        position_ids = torch.arange(
+            past_len,
+            past_len + seq_len,
+            device=device,
+        ).unsqueeze(
+            0
+        )  # [1, T]
         pos_emb = self.position_embedding(position_ids)  # [1, T, D]
         pos_emb = pos_emb.expand(bsz, seq_len, -1)  # [B, T, D]
         x = token_emb + pos_emb

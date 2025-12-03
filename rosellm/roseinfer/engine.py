@@ -131,7 +131,7 @@ class InferenceEngine:
         self.model.eval()
         input_ids = self._encode_prompt(prompt)  # [1, T0]
         input_ids = self._maybe_truncate(input_ids)  # [1, T]
-        self.prefill(input_ids)
+        self.prefill(input_ids[:, :-1])
         last_token_id = int(input_ids[0, -1].item())
         generated_ids = [x for x in input_ids[0].tolist()]
 
