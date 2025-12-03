@@ -35,6 +35,7 @@ class InferenceEngine:
         self.model.eval()
         self.tokenizer = build_tokenizer(tokenizer_name)
         self.eos_token_id = self.tokenizer.eos_token_id
+        self.kv_cache = None
         if self.config.vocab_size < self.tokenizer.vocab_size:
             raise ValueError("the model vocab_size is less than tokenizer vocab_size")
 
@@ -57,6 +58,67 @@ class InferenceEngine:
         return input_ids
 
     @torch.no_grad()
+    def prefill(
+        self,
+        prompt_ids: torch.Tensor,
+    ):
+        from torch.amp import autocast
+
+        input_ids = self._maybe_truncate(prompt_ids)
+        if self.use_amp:
+            with autocast(device_type=self.device.type):
+                logits, _, presents = self.model(
+                    input_ids=input_ids,
+                    attention_mask=None,
+                    labels=None,
+                    past_key_values=None,
+                    use_cache=True,
+                )
+        else:
+            logits, _, presents = self.model(
+                input_ids=input_ids,
+                attention_mask=None,
+                labels=None,
+                past_key_values=None,
+                use_cache=True,
+            )
+        self.kv_cache = presents
+        return logits
+
+    @torch.no_grad()
+    def decode_step(self, last_token_id: int) -> tuple[int, torch.Tensor]:
+        assert self.kv_cache is not None
+        from torch.amp import autocast
+
+        input_ids = torch.tensor(  # [1, 1]
+            [[last_token_id]],
+            dtype=torch.long,
+            device=self.device,
+        )
+        if self.use_amp:
+            with autocast(device_type=self.device.type):
+                logits, _, presents = self.model(
+                    input_ids=input_ids,
+                    attention_mask=None,
+                    labels=None,
+                    past_key_values=self.kv_cache,
+                    use_cache=True,
+                )
+        else:
+            logits, _, presents = self.model(
+                input_ids=input_ids,
+                attention_mask=None,
+                labels=None,
+                past_key_values=self.kv_cache,
+                use_cache=True,
+            )
+        self.kv_cache = presents
+        next_logits = logits[:, -1, :]  # [1, V]
+        next_token = torch.argmax(next_logits, dim=-1)  # [1]
+        next_id = int(next_token.item())
+        return next_id, next_logits
+
+    @torch.no_grad()
     def generate(
         self,
         prompt: str,
@@ -69,37 +131,24 @@ class InferenceEngine:
         self.model.eval()
         input_ids = self._encode_prompt(prompt)  # [1, T0]
         input_ids = self._maybe_truncate(input_ids)  # [1, T]
-        from torch.amp import autocast
+        self.prefill(input_ids)
+        last_token_id = int(input_ids[0, -1].item())
+        generated_ids = [x for x in input_ids[0].tolist()]
 
         for _ in range(max_new_tokens):
-            if self.use_amp:
-                with autocast(device_type=self.device.type):
-                    logits, _ = self.model(  # [1, T, V]
-                        input_ids=input_ids,
-                        attention_mask=None,
-                        labels=None,
-                    )
-            else:
-                logits, _ = self.model(
-                    input_ids=input_ids,
-                    attention_mask=None,
-                    labels=None,
-                )
-            next_logits = logits[:, -1, :]  # [1, V]
-            next_token = torch.argmax(next_logits, dim=-1)  # [1]
-            next_id = next_token.item()
-            next_token_t = next_token.view(1, 1)  # [1, 1]
-            input_ids = torch.cat(  # [1, T+1]
-                [input_ids, next_token_t],
-                dim=1,
-            )
-            input_ids = self._maybe_truncate(input_ids)
+            next_id, _ = self.decode_step(last_token_id)
+            generated_ids.append(next_id)
+            last_token_id = next_id
             if (
                 stop_on_eos
                 and self.eos_token_id is not None
                 and next_id == self.eos_token_id
             ):
                 break
-        generated = input_ids[0]  # [T1]
+        generated = torch.tensor(
+            generated_ids,
+            dtype=torch.long,
+            device=self.device,
+        )
         text = self._decode_tokens(generated)
         return text

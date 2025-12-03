@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
@@ -63,15 +63,25 @@ class MultiHeadSelfAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,  # [B, T]
+        past_kv: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        return_kv: bool = False,
     ):
         bsz, seq_len, _ = x.size()
         qkv = self.qkv_proj(x)
         qkv = qkv.view(bsz, seq_len, 3, self.local_heads, self.d_head)
         qkv = qkv.permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        q, k, v = qkv[0], qkv[1], qkv[2]  # [B, H, T, D]
+        if past_kv is not None:
+            past_k, past_v = past_kv
+            k = torch.cat([past_k, k], dim=-2)
+            v = torch.cat([past_v, v], dim=-2)
+            full_seq_len = k.size(-2)
+        else:
+            full_seq_len = seq_len
+
         attn_scores = q @ k.transpose(-2, -1) * self.d_head**-0.5
-        causal_mask = self.mask[:, :, :seq_len, :seq_len]
+        causal_mask = self.mask[:, :, :seq_len, :full_seq_len]
         attn_scores = attn_scores.masked_fill(causal_mask == 0, float("-inf"))
         if attention_mask is not None:  # padding mask
             attn_mask = attention_mask[:, None, None, :]
@@ -83,6 +93,8 @@ class MultiHeadSelfAttention(nn.Module):
         attn_output = attn_output.view(bsz, seq_len, self.local_heads * self.d_head)
         out = self.out_proj(attn_output)
         out = self.dropout(out)
+        if return_kv:
+            return out, (k, v)
         return out
 
 
@@ -125,11 +137,28 @@ class TransformerBlock(nn.Module):
         self.attn = MultiHeadSelfAttention(config)
         self.mlp = FeedForward(config)
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
-        attn_out = self.attn(self.ln1(x), attention_mask=attention_mask)
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_kv: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        return_kv: bool = False,
+    ):
+        if return_kv:
+            attn_out, present_kv = self.attn(
+                self.ln1(x),
+                attention_mask=attention_mask,
+                past_kv=past_kv,
+                return_kv=True,
+            )
+        else:
+            attn_out = self.attn(self.ln1(x), attention_mask=attention_mask)
+            present_kv = None
         x = x + attn_out
         mlp_out = self.mlp(self.ln2(x))
         x = x + mlp_out
+        if return_kv:
+            return x, present_kv
         return x
 
 
@@ -157,6 +186,8 @@ class GPTModel(nn.Module):
         input_ids: torch.Tensor,  # [B, T]
         attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
+        past_key_values: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None,
+        use_cache: bool = False,
     ):
         bsz, seq_len = input_ids.size()
         device = input_ids.device
@@ -173,7 +204,9 @@ class GPTModel(nn.Module):
                 False,
             )
             and self.training
+            and not use_cache,
         )
+        presents: list[tuple[Any, Any]] | None = [] if use_cache else None
         if use_ckpt:
             for block in self.blocks:
 
@@ -185,8 +218,21 @@ class GPTModel(nn.Module):
 
                 x = ckpt(block_forward, x, attention_mask, use_reentrant=False)
         else:
-            for block in self.blocks:
-                x = block(x, attention_mask=attention_mask)
+            for layer_idx, block in enumerate(self.blocks):
+                if past_key_values is not None and layer_idx < len(past_key_values):
+                    past_kv = past_key_values[layer_idx]
+                else:
+                    past_kv = None
+                if use_cache:
+                    x, present_kv = block(
+                        x,
+                        attention_mask=attention_mask,
+                        past_kv=past_kv,
+                        return_kv=True,
+                    )
+                    presents.append(present_kv)
+                else:
+                    x = block(x, attention_mask=attention_mask, past_kv=past_kv)
         x = self.ln_f(x)
         logits = self.lm_head(x)
         loss = None
@@ -197,4 +243,6 @@ class GPTModel(nn.Module):
                 shift_logits.view(-1, self.config.vocab_size),  # [B*(T-1), V]
                 shift_labels.view(-1),  # [B*(T-1)]
             )
+        if use_cache:
+            return logits, loss, presents
         return logits, loss  # [B, T, V], []
