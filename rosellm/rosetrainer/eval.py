@@ -119,6 +119,7 @@ def evaluate(
     val_loader: DataLoader,
     device: torch.device,
     use_amp: bool,
+    amp_dtype: torch.dtype | None,
     distributed: bool,
     world_size: int,
 ):
@@ -140,7 +141,7 @@ def evaluate(
         labels = batch["labels"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         if use_amp and device.type == "cuda":
-            with autocast(device_type=device.type):
+            with autocast(device_type=device.type, dtype=amp_dtype):
                 _, loss = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -178,17 +179,32 @@ def main():
         print(f"Eval ckpt: {args.checkpoint_path}")
     model, config = load_model_from_checkpoint(args, device)
     val_dataset, val_loader = build_val_dataloader(
-        args, device, distributed, world_size, rank
+        args,
+        device,
+        distributed,
+        world_size,
+        rank,
     )
     use_amp = device.type == "cuda" and not args.no_amp
+    if args.no_amp and args.bf16:
+        if is_main_process(rank):
+            print("Warning: --no-amp is set, ignoring --bf16.")
+    if use_amp:
+        if args.bf16:
+            amp_dtype: torch.dtype | None = torch.bfloat16
+        else:
+            amp_dtype = torch.float16
+    else:
+        amp_dtype = None
     if is_main_process(rank):
-        print(f"use_amp: {use_amp}")
+        print(f"use_amp: {use_amp} (bf16={args.bf16})")
         print(f"val dataset size: {len(val_dataset)}")
     avg_loss, ppl = evaluate(
         model=model,
         val_loader=val_loader,
         device=device,
         use_amp=use_amp,
+        amp_dtype=amp_dtype,
         distributed=distributed,
         world_size=world_size,
     )
@@ -256,6 +272,11 @@ def parse_args() -> argparse.Namespace:
         "--no-amp",
         action="store_true",
         help="disable amp",
+    )
+    parser.add_argument(
+        "--bf16",
+        action="store_true",
+        help="use bfloat16 AMP on CUDA instead of float16",
     )
     parser.add_argument(
         "--seed",

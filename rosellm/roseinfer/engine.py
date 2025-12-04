@@ -14,12 +14,20 @@ class InferenceEngine:
         device: Optional[str] = None,
         use_amp: bool = True,
         max_position_embeddings: Optional[int] = None,
+        bf16: bool = False,
     ) -> None:
         super().__init__()
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
         self.use_amp = use_amp and self.device.type == "cuda"
+        if self.use_amp and self.device.type == "cuda":
+            if bf16:
+                self.amp_dtype: torch.dtype | None = torch.bfloat16
+            else:
+                self.amp_dtype = torch.float16
+        else:
+            self.amp_dtype = None
         ckpt = torch.load(checkpoint_path, map_location=self.device.type)
         cfg_dict = ckpt.get("config")
         if cfg_dict is None:
@@ -66,7 +74,7 @@ class InferenceEngine:
 
         input_ids = self._maybe_truncate(prompt_ids)
         if self.use_amp:
-            with autocast(device_type=self.device.type):
+            with autocast(device_type=self.device.type, dtype=self.amp_dtype):
                 logits, _, presents = self.model(
                     input_ids=input_ids,
                     attention_mask=None,
@@ -96,7 +104,7 @@ class InferenceEngine:
             device=self.device,
         )
         if self.use_amp:
-            with autocast(device_type=self.device.type):
+            with autocast(device_type=self.device.type, dtype=self.amp_dtype):
                 logits, _, presents = self.model(
                     input_ids=input_ids,
                     attention_mask=None,

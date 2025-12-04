@@ -54,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable automatic mixed precision",
     )
+    parser.add_argument(
+        "--bf16",
+        action="store_true",
+        help="Use bfloat16 AMP on CUDA instead of float16.",
+    )
     return parser.parse_args()
 
 
@@ -64,6 +69,7 @@ def main() -> None:
         tokenizer_name=args.tokenizer_name,
         device=args.device,
         use_amp=not args.no_amp,
+        bf16=args.bf16,
     )
     print(f"[roseinfer] device: {engine.device}")
     print(f"[roseinfer] use_amp: {engine.use_amp}")

@@ -1,6 +1,6 @@
 #!/bin/bash
 python generate.py \
-  --checkpoint-path checkpoints/gpt2_small_ddp.pt \
+  --checkpoint-path checkpoints/gpt2_small_ddp_edu.pt \
   --tokenizer-name gpt2 \
   --vocab-size 50257 \
   --max-position-embeddings 1024 \

@@ -22,6 +22,5 @@ torchrun --nproc_per_node=2 train_ddp.py \
   --data-seed 42 \
   --use-wandb \
   --wandb-project rosetrainer \
-  --wandb-run-name gpt2_small_ddp_edu_fineweb10B \
   --checkpoint-path checkpoints/gpt2_small_ddp.pt
 

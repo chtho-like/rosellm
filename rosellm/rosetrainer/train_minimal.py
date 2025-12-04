@@ -70,6 +70,7 @@ def evaluate(
     dataloader: DataLoader,
     device: torch.device,
     use_amp: bool,
+    amp_dtype: torch.dtype | None,
 ) -> float:
     model_was_training = model.training
     model.eval()
@@ -81,7 +82,7 @@ def evaluate(
             labels = batch["labels"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             if use_amp:
-                with autocast(device_type=device.type):
+                with autocast(device_type=device.type, dtype=amp_dtype):
                     _, loss = model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
@@ -139,6 +140,7 @@ def main(args: argparse.Namespace) -> None:
             "grad_accum_steps": args.grad_accum_steps,
             "grad_clip_norm": args.grad_clip_norm,
             "no_amp": args.no_amp,
+            "bf16": args.bf16,
             "checkpoint_path": args.checkpoint_path,
             "resume": args.resume,
             "lr_scheduler": args.lr_scheduler,
@@ -287,7 +289,17 @@ def main(args: argparse.Namespace) -> None:
     else:
         scheduler = None
     use_amp = device.type == "cuda" and not args.no_amp
-    scaler = GradScaler(enabled=use_amp)
+    if args.no_amp and args.bf16:
+        log_line(log_path, "Warning: --no-amp is set, ignoring --bf16.")
+    if use_amp:
+        if args.bf16:
+            amp_dtype: torch.dtype | None = torch.bfloat16
+        else:
+            amp_dtype = torch.float16
+    else:
+        amp_dtype = None
+    use_grad_scaler = bool(use_amp and not args.bf16)
+    scaler = GradScaler(enabled=use_grad_scaler)
     model.train()
     num_steps = args.num_steps
     step = 0
@@ -361,7 +373,7 @@ def main(args: argparse.Namespace) -> None:
             with record_function("forward"):
                 nvtx.range_push("forward")
                 if use_amp:
-                    with autocast(device_type=device.type):
+                    with autocast(device_type=device.type, dtype=amp_dtype):
                         logits, loss = model(
                             input_ids=input_ids,
                             attention_mask=attention_mask,
@@ -380,8 +392,10 @@ def main(args: argparse.Namespace) -> None:
             # backward
             with record_function("backward"):
                 nvtx.range_push("backward")
-                if use_amp:
+                if use_amp and use_grad_scaler:
                     scaler.scale(loss).backward()
+                elif use_amp:
+                    loss.backward()
                 else:
                     loss.backward()
                 nvtx.range_pop()
@@ -391,7 +405,7 @@ def main(args: argparse.Namespace) -> None:
                 with record_function("grad_clip_step"):
                     nvtx.range_push("grad_clip_step")
                     if args.grad_clip_norm > 0.0:
-                        if use_amp:
+                        if use_amp and use_grad_scaler:
                             scaler.unscale_(optimizer)
                         grad_norm = clip_grad_norm_(
                             model.parameters(),
@@ -411,9 +425,11 @@ def main(args: argparse.Namespace) -> None:
                 # optimizer step
                 with record_function("optimizer_step"):
                     nvtx.range_push("optimizer_step")
-                    if use_amp:
+                    if use_amp and use_grad_scaler:
                         scaler.step(optimizer)
                         scaler.update()
+                    elif use_amp:
+                        optimizer.step()
                     else:
                         optimizer.step()
                     nvtx.range_pop()
@@ -450,6 +466,7 @@ def main(args: argparse.Namespace) -> None:
                         val_dataloader,
                         device=device,
                         use_amp=use_amp,
+                        amp_dtype=amp_dtype,
                     )
                     val_ppl = math.exp(val_loss)
                     now = time.time()
@@ -471,7 +488,7 @@ def main(args: argparse.Namespace) -> None:
                         f"val ppl: {val_ppl:.4f} ",
                         f"dt: {time_since_last:.2f}s ",
                         f"eta: {eta_seconds/3600:.2f}h ",
-                        f"amp: {use_amp}",
+                        f"amp: {use_amp} (bf16={args.bf16})",
                     )
                     log_line(log_path, msg)
                     if args.use_wandb and wandb is not None:
@@ -485,6 +502,7 @@ def main(args: argparse.Namespace) -> None:
                                 "lr": current_lr,
                                 "grad_norm": grad_norm,
                                 "amp": float(use_amp),
+                                "bf16": float(args.bf16),
                             },
                             step=step,
                         )
@@ -579,6 +597,11 @@ def parse_args() -> argparse.Namespace:
         "--no-amp",
         action="store_true",
         help="Disable AMP even on CUDA.",
+    )
+    parser.add_argument(
+        "--bf16",
+        action="store_true",
+        help="Use bfloat16 AMP on CUDA instead of float16.",
     )
     parser.add_argument(
         "--checkpoint-path",
