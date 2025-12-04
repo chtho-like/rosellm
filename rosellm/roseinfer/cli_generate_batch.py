@@ -5,7 +5,7 @@ from .engine import InferenceEngine
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate text from a model",
+        description="Generate text from a model in batch mode",
     )
     parser.add_argument(
         "--checkpoint-path",
@@ -20,52 +20,17 @@ def parse_args() -> argparse.Namespace:
         help="Tokenizer name",
     )
     parser.add_argument(
-        "--prompt",
+        "--prompts",
         type=str,
+        nargs="+",
         required=True,
-        help="Prompt to generate text from",
+        help="Prompts to generate text from",
     )
     parser.add_argument(
         "--max-new-tokens",
         type=int,
         default=100,
         help="Maximum number of new tokens to generate",
-    )
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=0,
-        help="Top-k sampling",
-    )
-    parser.add_argument(
-        "--top-p",
-        type=float,
-        default=1.0,
-        help="Top-p sampling",
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=1.0,
-        help="Temperature for sampling",
-    )
-    parser.add_argument(
-        "--stop-on-eos",
-        dest="stop_on_eos",
-        action="store_true",
-        help="Stop on EOS token",
-    )
-    parser.add_argument(
-        "--no-stop-on-eos",
-        dest="stop_on_eos",
-        action="store_false",
-        help="Do not stop on EOS token",
-    )
-    parser.set_defaults(stop_on_eos=True)
-    parser.add_argument(
-        "--do-sample",
-        action="store_true",
-        help="Use sampling to generate text (or else greedy)",
     )
     parser.add_argument(
         "--device",
@@ -83,6 +48,42 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use bfloat16 AMP on CUDA instead of float16.",
     )
+    parser.add_argument(
+        "--stop-on-eos",
+        dest="stop_on_eos",
+        action="store_true",
+        help="Stop on EOS token",
+    )
+    parser.add_argument(
+        "--no-stop-on-eos",
+        dest="stop_on_eos",
+        action="store_false",
+        help="Do not stop on EOS token",
+    )
+    parser.set_defaults(stop_on_eos=True)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for sampling",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=0,
+        help="Top-k sampling",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=1.0,
+        help="Top-p sampling",
+    )
+    parser.add_argument(
+        "--do-sample",
+        action="store_true",
+        help="Use sampling to generate text (or else greedy)",
+    )
     return parser.parse_args()
 
 
@@ -95,19 +96,20 @@ def main() -> None:
         use_amp=not args.no_amp,
         bf16=args.bf16,
     )
-    print(f"[roseinfer] device: {engine.device}")
-    print(f"[roseinfer] use_amp: {engine.use_amp}")
-    print(f"[roseinfer] prompt: {args.prompt}")
-    output = engine.generate(
-        prompt=args.prompt,
+    print(f"[roseinfer-batch] device: {engine.device}")
+    print(f"[roseinfer-batch] use_amp: {engine.use_amp}")
+    print(f"[roseinfer-batch] prompts: {args.prompts}")
+    outputs = engine.generate_batch(
+        prompts=args.prompts,
         max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
         top_k=args.top_k,
         top_p=args.top_p,
-        temperature=args.temperature,
         stop_on_eos=args.stop_on_eos,
         do_sample=args.do_sample,
     )
-    print(f"[roseinfer] output: {output}")
+    for i, output in enumerate(outputs):
+        print(f"[roseinfer-batch] output {i}: {output}")
 
 
 if __name__ == "__main__":
