@@ -65,10 +65,74 @@ class InferenceEngine:
             input_ids = input_ids[:, -max_pos:]
         return input_ids
 
+    def _top_k_logits(
+        self,
+        logits: torch.Tensor,  # [..., vocab]
+        top_k: int,
+    ) -> torch.Tensor:
+        if top_k <= 0:
+            return logits
+        values, _ = torch.topk(logits, top_k)  # [..., k]
+        min_values = values[..., -1, None]  # [..., 1]
+        return torch.where(  # [..., vocab]
+            logits < min_values,
+            torch.full_like(logits, float("-inf")),
+            logits,
+        )
+
+    def _top_p_logits(
+        self,
+        logits: torch.Tensor,  # [..., vocab]
+        top_p: float,
+    ) -> torch.Tensor:
+        if top_p <= 0.0 or top_p >= 1.0:
+            return logits
+        sorted_logits, sorted_idx = torch.sort(  # [..., vocab]
+            logits,
+            descending=True,
+        )
+        probs = torch.softmax(sorted_logits, dim=-1)  # [..., vocab]
+        cum_probs = torch.cumsum(probs, dim=-1)  # [..., vocab]
+        mask = cum_probs > top_p  # [..., vocab]
+        mask[..., 0] = False  # keep at least one token
+        sorted_logits = sorted_logits.masked_fill(
+            mask,
+            float("-inf"),
+        )
+        _, inv_idx = torch.sort(
+            sorted_idx,
+            dim=-1,
+        )
+        logits_filtered = torch.gather(
+            sorted_logits,
+            dim=-1,
+            index=inv_idx,
+        )
+        return logits_filtered
+
+    def _sample_next_token(
+        self,
+        logits: torch.Tensor,  # [..., vocab]
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        do_sample: bool,
+    ) -> int:
+        if not do_sample or temperature <= 0.0:
+            next_token = torch.argmax(logits, dim=-1)  # [..., 1]
+            return int(next_token.item())
+        scaled = logits / float(temperature)
+        filtered = self._top_k_logits(scaled, top_k)
+        filtered = self._top_p_logits(filtered, top_p)
+        probs = torch.softmax(filtered, dim=-1)  # [..., vocab]
+        probs = probs.clamp_min(1e-9)
+        next_token = torch.multinomial(probs, num_samples=1)[:, 0]  # [..., 1]
+        return int(next_token.item())
+
     @torch.no_grad()
     def prefill(
         self,
-        prompt_ids: torch.Tensor,
+        prompt_ids: torch.Tensor,  # [..., T0]
     ):
         from torch.amp import autocast
 
@@ -91,10 +155,10 @@ class InferenceEngine:
                 use_cache=True,
             )
         self.kv_cache = presents
-        return logits
+        return logits  # [..., T0, vocab]
 
     @torch.no_grad()
-    def decode_step(self, last_token_id: int) -> tuple[int, torch.Tensor]:
+    def decode_step(self, last_token_id: int) -> torch.Tensor:
         assert self.kv_cache is not None
         from torch.amp import autocast
 
@@ -122,9 +186,7 @@ class InferenceEngine:
             )
         self.kv_cache = presents
         next_logits = logits[:, -1, :]  # [1, V]
-        next_token = torch.argmax(next_logits, dim=-1)  # [1]
-        next_id = int(next_token.item())
-        return next_id, next_logits
+        return next_logits  # [1, vocab]
 
     @torch.no_grad()
     def generate(
@@ -135,16 +197,51 @@ class InferenceEngine:
         top_k: int = 0,
         top_p: float = 1.0,
         stop_on_eos: bool = True,
+        do_sample: bool = False,
     ) -> str:
         self.model.eval()
         input_ids = self._encode_prompt(prompt)  # [1, T0]
         input_ids = self._maybe_truncate(input_ids)  # [1, T]
-        self.prefill(input_ids[:, :-1])
-        last_token_id = int(input_ids[0, -1].item())
-        generated_ids = [x for x in input_ids[0].tolist()]
+        logits = self.prefill(input_ids)  # [1, T, V]
+        last_logits = logits[:, -1, :]  # [1, V]
+        generated_ids = input_ids[0].tolist()
+        if max_new_tokens <= 0:
+            generated = torch.tensor(
+                generated_ids,
+                dtype=torch.long,
+                device=self.device,
+            )
+            return self._decode_tokens(generated)
+        next_id = self._sample_next_token(
+            logits=last_logits,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sample=do_sample,
+        )
+        generated_ids.append(next_id)
+        last_token_id = next_id
+        if (
+            stop_on_eos
+            and self.eos_token_id is not None
+            and next_id == self.eos_token_id
+        ):
+            generated = torch.tensor(
+                generated_ids,
+                dtype=torch.long,
+                device=self.device,
+            )
+            return self._decode_tokens(generated)
 
-        for _ in range(max_new_tokens):
-            next_id, _ = self.decode_step(last_token_id)
+        for _ in range(max_new_tokens - 1):
+            next_logits = self.decode_step(last_token_id)
+            next_id = self._sample_next_token(
+                logits=next_logits,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                do_sample=do_sample,
+            )
             generated_ids.append(next_id)
             last_token_id = next_id
             if (

@@ -44,6 +44,23 @@ def parse_args() -> argparse.Namespace:
         help="Top-p sampling",
     )
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for sampling",
+    )
+    parser.add_argument(
+        "--stop-on-eos",
+        action="store_true",
+        default=True,
+        help="Stop on EOS token",
+    )
+    parser.add_argument(
+        "--do-sample",
+        action="store_true",
+        help="Use sampling to generate text (or else greedy)",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="cuda",
@@ -79,6 +96,9 @@ def main() -> None:
         max_new_tokens=args.max_new_tokens,
         top_k=args.top_k,
         top_p=args.top_p,
+        temperature=args.temperature,
+        stop_on_eos=args.stop_on_eos,
+        do_sample=args.do_sample,
     )
     print(f"[roseinfer] output: {output}")
 
