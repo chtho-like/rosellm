@@ -1,3 +1,4 @@
+import math
 from typing import Any, Optional
 
 import torch
@@ -47,6 +48,7 @@ class MultiHeadSelfAttention(nn.Module):
             self.local_heads = self.n_heads
             self.qkv_proj = nn.Linear(config.d_model, 3 * config.d_model)
             self.out_proj = nn.Linear(config.d_model, config.d_model)
+        self.out_proj.gpt2_residual = True
         self.dropout = nn.Dropout(config.dropout)
         self.register_buffer(
             "mask",
@@ -124,6 +126,7 @@ class FeedForward(nn.Module):
         else:
             self.fc1 = nn.Linear(config.d_model, config.d_ff)
             self.fc2 = nn.Linear(config.d_ff, config.d_model)
+        self.fc2.gpt2_residual = True
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor):
@@ -182,9 +185,33 @@ class GPTModel(nn.Module):
         self.ln_f = nn.LayerNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.tie_weights()
+        self.apply(self._init_weights)
 
     def tie_weights(self) -> None:
         self.lm_head.weight = self.token_embedding.weight
+
+    def _init_weights(self, module: nn.Module) -> None:
+        if isinstance(
+            module,
+            (
+                nn.Linear,
+                ColumnParallelLinear,
+                RowParallelLinear,
+            ),
+        ):
+            std = 0.02
+            if getattr(module, "gpt2_residual", False):
+                n_layers = float(self.config.n_layers)
+                std = std / math.sqrt(2.0 * n_layers)
+            nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, nn.LayerNorm):
+            if module.elementwise_affine:
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
 
     def forward(
         self,
