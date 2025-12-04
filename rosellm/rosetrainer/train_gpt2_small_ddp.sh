@@ -13,7 +13,7 @@ torchrun --nproc_per_node=2 train_ddp.py \
   --warmup-steps 1000 \
   --num-steps 12000 \
   --lr 3e-4 \
-  --no-amp \
+  --bf16 \
   --data-mode fineweb_npy \
   --train-npy data/edu_fineweb10B/edufineweb_train_000001.npy \
   --val-max-tokens 1000000 \
