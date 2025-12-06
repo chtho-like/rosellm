@@ -64,7 +64,6 @@ class InferenceEngine:
 
         self._make_detok = make_detok
 
-        self.kv_cache = None
         if self.config.vocab_size < self.tokenizer.vocab_size:
             raise ValueError("the model vocab_size is less than tokenizer vocab_size")
 
@@ -217,133 +216,6 @@ class InferenceEngine:
         )
 
     @torch.no_grad()
-    def prefill(
-        self,
-        prompt_ids: torch.Tensor,  # [..., T0]
-    ):
-        from torch.amp import autocast
-
-        input_ids = self._maybe_truncate(prompt_ids)
-        if self.use_amp:
-            with autocast(device_type=self.device.type, dtype=self.amp_dtype):
-                logits, _, presents = self.model(
-                    input_ids=input_ids,
-                    attention_mask=None,
-                    labels=None,
-                    past_key_values=None,
-                    use_cache=True,
-                )
-        else:
-            logits, _, presents = self.model(
-                input_ids=input_ids,
-                attention_mask=None,
-                labels=None,
-                past_key_values=None,
-                use_cache=True,
-            )
-        self.kv_cache = presents
-        return logits  # [..., T0, vocab]
-
-    @torch.no_grad()
-    def prefill_batch(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        from torch.amp import autocast
-
-        input_ids = self._maybe_truncate(input_ids)
-        if attention_mask is not None and input_ids.size(1) < attention_mask.size(1):
-            attention_mask = attention_mask[:, -input_ids.size(1) :]
-        if self.use_amp:
-            with autocast(
-                device_type=self.device.type,
-                dtype=self.amp_dtype,
-            ):
-                logits, _, presents = self.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=None,
-                    past_key_values=None,
-                    use_cache=True,
-                )
-        else:
-            logits, _, presents = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=None,
-                past_key_values=None,
-                use_cache=True,
-            )
-        self.kv_cache = presents
-        last_logits = logits[:, -1, :]  # [batch, vocab]
-        return last_logits
-
-    @torch.no_grad()
-    def decode_step(self, last_token_id: int) -> torch.Tensor:
-        assert self.kv_cache is not None
-        from torch.amp import autocast
-
-        input_ids = torch.tensor(  # [1, 1]
-            [[last_token_id]],
-            dtype=torch.long,
-            device=self.device,
-        )
-        if self.use_amp:
-            with autocast(device_type=self.device.type, dtype=self.amp_dtype):
-                logits, _, presents = self.model(
-                    input_ids=input_ids,
-                    attention_mask=None,
-                    labels=None,
-                    past_key_values=self.kv_cache,
-                    use_cache=True,
-                )
-        else:
-            logits, _, presents = self.model(
-                input_ids=input_ids,
-                attention_mask=None,
-                labels=None,
-                past_key_values=self.kv_cache,
-                use_cache=True,
-            )
-        self.kv_cache = presents
-        next_logits = logits[:, -1, :]  # [1, V]
-        return next_logits  # [1, vocab]
-
-    @torch.no_grad()
-    def decode_step_batch(
-        self,
-        last_token_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        assert self.kv_cache is not None
-        from torch.amp import autocast
-
-        input_ids = last_token_ids.view(-1, 1)  # [B, 1]
-        if self.use_amp:
-            with autocast(
-                device_type=self.device.type,
-                dtype=self.amp_dtype,
-            ):
-                logits, _, presents = self.model(
-                    input_ids=input_ids,
-                    attention_mask=None,
-                    labels=None,
-                    past_key_values=self.kv_cache,
-                    use_cache=True,
-                )
-        else:
-            logits, _, presents = self.model(
-                input_ids=input_ids,
-                attention_mask=None,
-                labels=None,
-                past_key_values=self.kv_cache,
-                use_cache=True,
-            )
-        self.kv_cache = presents
-        next_logits = logits[:, -1, :]  # [B, V]
-        return next_logits  # [B, V]
-
-    @torch.no_grad()
     def generate(
         self,
         prompt: str,
@@ -355,9 +227,10 @@ class InferenceEngine:
         do_sample: bool = False,
     ) -> str:
         self.model.eval()
+        session = InferenceSession(self)
         input_ids = self._encode_prompt(prompt)  # [1, T0]
         input_ids = self._maybe_truncate(input_ids)  # [1, T]
-        logits = self.prefill(input_ids)  # [1, T, V]
+        logits = session.prefill(input_ids)  # [1, T, V]
         last_logits = logits[:, -1, :]  # [1, V]
         generated_ids = input_ids[0].tolist()
         if max_new_tokens <= 0:
@@ -389,7 +262,7 @@ class InferenceEngine:
             return self._decode_tokens(generated)
 
         for _ in range(max_new_tokens - 1):
-            next_logits = self.decode_step(last_token_id)
+            next_logits = session.decode_step(last_token_id)
             next_id = self._sample_next_token(
                 logits=next_logits,
                 temperature=temperature,
@@ -426,9 +299,10 @@ class InferenceEngine:
     ) -> list[str]:
         assert len(prompts) > 0
         self.model.eval()
+        session = InferenceSession(self)
         input_ids, attn_mask = self._encode_prompts_batch(prompts)
         batch_size = input_ids.size(0)
-        last_logits = self.prefill_batch(
+        last_logits = session.prefill_batch(
             input_ids,
             attention_mask=attn_mask,
         )
@@ -473,7 +347,7 @@ class InferenceEngine:
                 and all(pos is not None for pos in eos_positions)
             ):
                 break
-            next_logits = self.decode_step_batch(last_token_ids)
+            next_logits = session.decode_step_batch(last_token_ids)
             next_ids = self._sample_next_token_batch(
                 logits=next_logits,
                 temperature=temperature,
@@ -525,6 +399,7 @@ class InferenceEngine:
         do_sample: bool = False,
     ) -> Iterator[str]:
         self.model.eval()
+        session = InferenceSession(self)
         token_ids = self.tokenizer.encode(
             prompt,
             add_special_tokens=False,
@@ -538,7 +413,7 @@ class InferenceEngine:
         )
         detok = self._make_detok()
         detok.start_prompt(token_ids)
-        prefill_logits = self.prefill(ids_tensor)  # [1, T, V]
+        prefill_logits = session.prefill(ids_tensor)  # [1, T, V]
         last_logits = prefill_logits[:, -1, :]  # [1, V]
         if max_new_tokens <= 0:
             piece = detok.flush()
@@ -566,7 +441,7 @@ class InferenceEngine:
             return
         last_token_id = next_id
         for _ in range(max_new_tokens - 1):
-            next_logits = self.decode_step(last_token_id)  # [1, V]
+            next_logits = session.decode_step(last_token_id)  # [1, V]
             next_id = self._sample_next_token(
                 logits=next_logits,
                 temperature=temperature,
@@ -600,6 +475,7 @@ class InferenceEngine:
         do_sample: bool = True,
     ) -> Iterator[list[str]]:
         self.model.eval()
+        session = InferenceSession(self)
         batch_size = len(prompts)
         if batch_size == 0:
             return
@@ -635,7 +511,7 @@ class InferenceEngine:
             dtype=torch.long,
             device=self.device,
         )
-        last_logits = self.prefill_batch(
+        last_logits = session.prefill_batch(
             input_ids,
             attention_mask=attention_mask,
         )  # [B, V]
@@ -674,7 +550,7 @@ class InferenceEngine:
             device=self.device,
         )
         for _ in range(max_new_tokens - 1):
-            next_logits = self.decode_step_batch(last_token_ids)
+            next_logits = session.decode_step_batch(last_token_ids)
             new_ids: list[int] = []
             pieces: list[str] = []
             for b in range(batch_size):
@@ -711,3 +587,140 @@ class InferenceEngine:
             tails.append(tail)
         if any(tails):
             yield tails
+
+
+class InferenceSession:
+    def __init__(self, engine: "InferenceEngine") -> None:
+        self.engine = engine
+        self.kv_cache = None
+
+    @torch.no_grad()
+    def prefill(
+        self,
+        prompt_ids: torch.Tensor,  # [..., T0]
+    ):
+        from torch.amp import autocast
+
+        eng = self.engine
+        input_ids = eng._maybe_truncate(prompt_ids)
+        if eng.use_amp:
+            with autocast(device_type=eng.device.type, dtype=eng.amp_dtype):
+                logits, _, presents = eng.model(
+                    input_ids=input_ids,
+                    attention_mask=None,
+                    labels=None,
+                    past_key_values=None,
+                    use_cache=True,
+                )
+        else:
+            logits, _, presents = eng.model(
+                input_ids=input_ids,
+                attention_mask=None,
+                labels=None,
+                past_key_values=None,
+                use_cache=True,
+            )
+        self.kv_cache = presents
+        return logits  # [..., T0, vocab]
+
+    @torch.no_grad()
+    def prefill_batch(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        from torch.amp import autocast
+
+        eng = self.engine
+        input_ids = eng._maybe_truncate(input_ids)
+        if attention_mask is not None and input_ids.size(1) < attention_mask.size(1):
+            attention_mask = attention_mask[:, -input_ids.size(1) :]
+        if eng.use_amp:
+            with autocast(
+                device_type=eng.device.type,
+                dtype=eng.amp_dtype,
+            ):
+                logits, _, presents = eng.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=None,
+                    past_key_values=None,
+                    use_cache=True,
+                )
+        else:
+            logits, _, presents = eng.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=None,
+                past_key_values=None,
+                use_cache=True,
+            )
+        self.kv_cache = presents
+        last_logits = logits[:, -1, :]  # [batch, vocab]
+        return last_logits
+
+    @torch.no_grad()
+    def decode_step(self, last_token_id: int) -> torch.Tensor:
+        assert self.kv_cache is not None
+        from torch.amp import autocast
+
+        eng = self.engine
+        input_ids = torch.tensor(  # [1, 1]
+            [[last_token_id]],
+            dtype=torch.long,
+            device=eng.device,
+        )
+        if eng.use_amp:
+            with autocast(device_type=eng.device.type, dtype=eng.amp_dtype):
+                logits, _, presents = eng.model(
+                    input_ids=input_ids,
+                    attention_mask=None,
+                    labels=None,
+                    past_key_values=self.kv_cache,
+                    use_cache=True,
+                )
+        else:
+            logits, _, presents = eng.model(
+                input_ids=input_ids,
+                attention_mask=None,
+                labels=None,
+                past_key_values=self.kv_cache,
+                use_cache=True,
+            )
+        self.kv_cache = presents
+        next_logits = logits[:, -1, :]  # [1, V]
+        return next_logits  # [1, vocab]
+
+    @torch.no_grad()
+    def decode_step_batch(
+        self,
+        last_token_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.kv_cache is not None
+        from torch.amp import autocast
+
+        eng = self.engine
+        input_ids = last_token_ids.view(-1, 1)  # [B, 1]
+        if eng.use_amp:
+            with autocast(
+                device_type=eng.device.type,
+                dtype=eng.amp_dtype,
+            ):
+                logits, _, presents = eng.model(
+                    input_ids=input_ids,
+                    attention_mask=None,
+                    labels=None,
+                    past_key_values=self.kv_cache,
+                    use_cache=True,
+                )
+        else:
+            logits, _, presents = eng.model(
+                input_ids=input_ids,
+                attention_mask=None,
+                labels=None,
+                past_key_values=self.kv_cache,
+                use_cache=True,
+            )
+        self.kv_cache = presents
+        next_logits = logits[:, -1, :]  # [B, V]
+        return next_logits  # [B, V]
