@@ -593,6 +593,45 @@ class InferenceSession:
     def __init__(self, engine: "InferenceEngine") -> None:
         self.engine = engine
         self.kv_cache = None
+        self.input_ids: torch.Tensor | None = None
+        self.generated_ids: list[int] = []
+        self.finished: bool = False
+        self.max_new_tokens: int = 0
+        self.temperature: float = 1.0
+        self.top_k: int = 0
+        self.top_p: float = 1.0
+        self.do_sample: bool = False
+        self.stop_on_eos: bool = True
+        self.step_count: int = 0
+
+    def set_generation_config(
+        self,
+        max_new_tokens: int,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        do_sample: bool,
+        stop_on_eos: bool,
+    ) -> None:
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+        self.top_k = top_k
+        self.top_p = top_p
+        self.do_sample = do_sample
+        self.stop_on_eos = stop_on_eos
+
+    def all_token_ids(self) -> list[int]:
+        base_ids: list[int] = []
+        if self.input_ids is not None:
+            base_ids = list(self.input_ids[0].tolist())
+        return base_ids + self.generated_ids
+
+    def decode_text(self) -> str:
+        token_ids = self.all_token_ids()
+        return self.engine.tokenizer.decode(
+            token_ids,
+            skip_special_tokens=True,
+        )
 
     @torch.no_grad()
     def prefill(
@@ -692,6 +731,33 @@ class InferenceSession:
         return next_logits  # [1, vocab]
 
     @torch.no_grad()
+    def step_once(self) -> int | None:
+        if self.finished:
+            return None
+        if not self.generated_ids:
+            raise RuntimeError("no generated ids, call prefill first")
+        last_token_id = self.generated_ids[-1]
+        last_logits = self.decode_step(last_token_id)
+        eng = self.engine
+        next_token = eng._sample_next_token(
+            last_logits,
+            temperature=self.temperature,
+            top_k=self.top_k,
+            top_p=self.top_p,
+            do_sample=self.do_sample,
+        )
+        token_id = int(next_token)
+        self.generated_ids.append(token_id)
+        self.step_count += 1
+        if self.stop_on_eos:
+            eos_id = eng.eos_token_id
+            if eos_id is not None and token_id == eos_id:
+                self.finished = True
+        if self.max_new_tokens > 0 and self.step_count >= self.max_new_tokens:
+            self.finished = True
+        return token_id
+
+    @torch.no_grad()
     def decode_step_batch(
         self,
         last_token_ids: torch.Tensor,
@@ -724,3 +790,77 @@ class InferenceSession:
         self.kv_cache = presents
         next_logits = logits[:, -1, :]  # [B, V]
         return next_logits  # [B, V]
+
+
+class OfflineScheduler:
+    def __init__(self, engine: "InferenceEngine") -> None:
+        self.engine = engine
+        self._sessions: dict[int, InferenceSession] = {}
+        self._next_request_id: int = 0
+
+    @torch.no_grad()
+    def add_request(
+        self,
+        prompt: str,
+        max_new_tokens: int = 64,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        stop_on_eos: bool = True,
+        do_sample: bool = False,
+    ) -> int:
+        eng = self.engine
+        eng.model.eval()
+        input_ids = eng._encode_prompt(prompt)  # [1, T0]
+        input_ids = eng._maybe_truncate(input_ids)  # [1, T]
+        session = InferenceSession(eng)
+        session.input_ids = input_ids
+        session.set_generation_config(
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sample=do_sample,
+            stop_on_eos=stop_on_eos,
+        )
+        logits = session.prefill(input_ids)  # [1, T, V]
+        last_logits = logits[:, -1, :]  # [1, V]
+        next_token = eng._sample_next_token(
+            last_logits,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sample=do_sample,
+        )
+        token_id = int(next_token)
+        session.generated_ids.append(token_id)
+        session.step_count = 1
+        if stop_on_eos:
+            eos_id = eng.eos_token_id
+            if eos_id is not None and token_id == eos_id:
+                session.finished = True
+        if max_new_tokens > 0 and session.step_count >= max_new_tokens:
+            session.finished = True
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        self._sessions[request_id] = session
+        return request_id
+
+    @torch.no_grad()
+    def run(self) -> dict[int, str]:
+        active_ids: set[int] = {
+            rid for rid, sess in self._sessions.items() if not sess.finished
+        }
+        while active_ids:
+            for rid in list(active_ids):
+                session = self._sessions[rid]
+                if session.finished:
+                    active_ids.remove(rid)
+                    continue
+                _ = session.step_once()
+                if session.finished:
+                    active_ids.remove(rid)
+        outputs: dict[int, str] = {}
+        for rid, session in self._sessions.items():
+            outputs[rid] = session.decode_text()
+        return outputs
