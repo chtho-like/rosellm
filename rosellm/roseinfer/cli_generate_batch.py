@@ -84,6 +84,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use sampling to generate text (or else greedy)",
     )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Stream the output",
+    )
     return parser.parse_args()
 
 
@@ -99,17 +104,35 @@ def main() -> None:
     print(f"[roseinfer-batch] device: {engine.device}")
     print(f"[roseinfer-batch] use_amp: {engine.use_amp}")
     print(f"[roseinfer-batch] prompts: {args.prompts}")
-    outputs = engine.generate_batch(
-        prompts=args.prompts,
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        top_k=args.top_k,
-        top_p=args.top_p,
-        stop_on_eos=args.stop_on_eos,
-        do_sample=args.do_sample,
-    )
-    for i, output in enumerate(outputs):
-        print(f"[roseinfer-batch] output {i}: {output}")
+    if args.stream:
+        for i, prompt in enumerate(args.prompts):
+            print(f"[roseinfer-batch] output {i}: ", end="", flush=True)
+        print()
+        for pieces in engine.stream_generate_batch(
+            prompts=args.prompts,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            stop_on_eos=args.stop_on_eos,
+            do_sample=args.do_sample,
+        ):
+            for i, piece in enumerate(pieces):
+                if piece:
+                    print(piece, end="", flush=True)
+            print()
+    else:
+        outputs = engine.generate_batch(
+            prompts=args.prompts,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            stop_on_eos=args.stop_on_eos,
+            do_sample=args.do_sample,
+        )
+        for i, output in enumerate(outputs):
+            print(f"[roseinfer-batch] output {i}: {output}")
 
 
 if __name__ == "__main__":

@@ -83,6 +83,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use bfloat16 AMP on CUDA instead of float16.",
     )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Stream the output",
+    )
     return parser.parse_args()
 
 
@@ -98,16 +103,31 @@ def main() -> None:
     print(f"[roseinfer] device: {engine.device}")
     print(f"[roseinfer] use_amp: {engine.use_amp}")
     print(f"[roseinfer] prompt: {args.prompt}")
-    output = engine.generate(
-        prompt=args.prompt,
-        max_new_tokens=args.max_new_tokens,
-        top_k=args.top_k,
-        top_p=args.top_p,
-        temperature=args.temperature,
-        stop_on_eos=args.stop_on_eos,
-        do_sample=args.do_sample,
-    )
-    print(f"[roseinfer] output: {output}")
+    if args.stream:
+        print("[roseinfer] streaming output: ", end="", flush=True)
+        for piece in engine.stream_generate(
+            prompt=args.prompt,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            stop_on_eos=args.stop_on_eos,
+            do_sample=args.do_sample,
+        ):
+            if piece:
+                print(piece, end="", flush=True)
+        print()
+    else:
+        output = engine.generate(
+            prompt=args.prompt,
+            max_new_tokens=args.max_new_tokens,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            temperature=args.temperature,
+            stop_on_eos=args.stop_on_eos,
+            do_sample=args.do_sample,
+        )
+        print(f"[roseinfer] output: {output}")
 
 
 if __name__ == "__main__":

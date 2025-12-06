@@ -1,9 +1,19 @@
-from typing import Optional
+from typing import Iterator, Optional
 
 import torch
+from roseinfer.detokenizer import (
+    BaseDetokenizer,
+    GPT2ByteDetokenizer,
+    PrefixDiffDetokenizer,
+)
 from rosetrainer.config import GPTConfig
 from rosetrainer.dataset import build_tokenizer
 from rosetrainer.model import GPTModel
+
+try:
+    import tiktoken
+except ImportError:
+    tiktoken = None
 
 
 class InferenceEngine:
@@ -43,6 +53,17 @@ class InferenceEngine:
         self.model.eval()
         self.tokenizer = build_tokenizer(tokenizer_name)
         self.eos_token_id = self.tokenizer.eos_token_id
+
+        def make_detok() -> BaseDetokenizer:
+            if tokenizer_name.startswith("gpt2") and tiktoken is not None:
+                try:
+                    return GPT2ByteDetokenizer(self.tokenizer)
+                except Exception as e:
+                    print(f"failed to create GPT2ByteDetokenizer: {e}")
+            return PrefixDiffDetokenizer(self.tokenizer)
+
+        self._make_detok = make_detok
+
         self.kv_cache = None
         if self.config.vocab_size < self.tokenizer.vocab_size:
             raise ValueError("the model vocab_size is less than tokenizer vocab_size")
@@ -78,8 +99,8 @@ class InferenceEngine:
         masks = []
         for ids in all_ids:
             pad_len = max_len - len(ids)
-            batch.append(ids + [pad_id] * pad_len)
-            masks.append([1] * len(ids) + [0] * pad_len)
+            batch.append([pad_id] * pad_len + ids)
+            masks.append([0] * pad_len + [1] * len(ids))
         input_ids = torch.tensor(
             batch,
             dtype=torch.long,
@@ -255,17 +276,7 @@ class InferenceEngine:
                 use_cache=True,
             )
         self.kv_cache = presents
-        if attention_mask is None:
-            last_logits = logits[:, -1, :]  # [batch, vocab]
-        else:
-            batch_size = logits.size(0)
-            lengths = attention_mask.sum(dim=1).to(dtype=torch.long)  # [B]
-            last_indices = lengths - 1  # [B]
-            batch_indices = torch.arange(
-                batch_size,
-                device=logits.device,
-            )
-            last_logits = logits[batch_indices, last_indices, :]  # [B, vocab]
+        last_logits = logits[:, -1, :]  # [batch, vocab]
         return last_logits
 
     @torch.no_grad()
@@ -422,7 +433,9 @@ class InferenceEngine:
             attention_mask=attn_mask,
         )
         lengths = attn_mask.sum(dim=1).tolist()
-        generated_ids = [input_ids[b, : lengths[b]].tolist() for b in range(batch_size)]
+        generated_ids = [
+            input_ids[b, -lengths[b] :].tolist() for b in range(batch_size)
+        ]
         if max_new_tokens <= 0:
             outputs = []
             for ids in generated_ids:
@@ -499,3 +512,202 @@ class InferenceEngine:
             text = self._decode_tokens(t)
             outputs.append(text)
         return outputs
+
+    @torch.no_grad()
+    def stream_generate(
+        self,
+        prompt: str,
+        max_new_tokens: int = 64,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        stop_on_eos: bool = True,
+        do_sample: bool = False,
+    ) -> Iterator[str]:
+        self.model.eval()
+        token_ids = self.tokenizer.encode(
+            prompt,
+            add_special_tokens=False,
+        )
+        if not token_ids:
+            token_ids = [self.eos_token_id]
+        ids_tensor = torch.tensor(
+            [token_ids],
+            dtype=torch.long,
+            device=self.device,
+        )
+        detok = self._make_detok()
+        detok.start_prompt(token_ids)
+        prefill_logits = self.prefill(ids_tensor)  # [1, T, V]
+        last_logits = prefill_logits[:, -1, :]  # [1, V]
+        if max_new_tokens <= 0:
+            piece = detok.flush()
+            if piece:
+                yield piece
+            return
+        next_id = self._sample_next_token(
+            logits=last_logits,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sample=do_sample,
+        )
+        piece = detok.on_token(next_id)
+        if piece:
+            yield piece
+        if (
+            stop_on_eos
+            and self.eos_token_id is not None
+            and next_id == self.eos_token_id
+        ):
+            tail = detok.flush()
+            if tail:
+                yield tail
+            return
+        last_token_id = next_id
+        for _ in range(max_new_tokens - 1):
+            next_logits = self.decode_step(last_token_id)  # [1, V]
+            next_id = self._sample_next_token(
+                logits=next_logits,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                do_sample=do_sample,
+            )
+            piece = detok.on_token(next_id)
+            if piece:
+                yield piece
+            last_token_id = next_id
+            if (
+                stop_on_eos
+                and self.eos_token_id is not None
+                and next_id == self.eos_token_id
+            ):
+                break
+        tail = detok.flush()
+        if tail:
+            yield tail
+
+    @torch.no_grad()
+    def stream_generate_batch(
+        self,
+        prompts: list[str],
+        max_new_tokens: int = 64,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        stop_on_eos: bool = True,
+        do_sample: bool = True,
+    ) -> Iterator[list[str]]:
+        self.model.eval()
+        batch_size = len(prompts)
+        if batch_size == 0:
+            return
+        all_prompt_ids: list[list[int]] = []
+        for p in prompts:
+            ids = self.tokenizer.encode(
+                p,
+                add_special_tokens=False,
+            )
+            if not ids:
+                ids = [self.eos_token_id]
+            all_prompt_ids.append(ids)
+        detoks: list[BaseDetokenizer] = []
+        for ids in all_prompt_ids:
+            d = self._make_detok()
+            d.start_prompt(ids)
+            detoks.append(d)
+        max_len = max(len(ids) for ids in all_prompt_ids)
+        pad_id = self.eos_token_id
+        batch_ids = []
+        masks = []
+        for ids in all_prompt_ids:
+            pad_len = max_len - len(ids)
+            batch_ids.append([pad_id] * pad_len + ids)
+            masks.append([0] * pad_len + [1] * len(ids))
+        input_ids = torch.tensor(
+            batch_ids,
+            dtype=torch.long,
+            device=self.device,
+        )
+        attention_mask = torch.tensor(
+            masks,
+            dtype=torch.long,
+            device=self.device,
+        )
+        last_logits = self.prefill_batch(
+            input_ids,
+            attention_mask=attention_mask,
+        )  # [B, V]
+        if max_new_tokens <= 0:
+            first_pieces = []
+            for d in detoks:
+                tail = d.flush()
+                first_pieces.append(tail)
+            if any(first_pieces):
+                yield first_pieces
+            return
+        next_ids: list[int] = []
+        first_pieces: list[str] = []
+        finished = [False for _ in range(batch_size)]
+        for b in range(batch_size):
+            logits_b = last_logits[b : b + 1]  # [1, V]
+            tok_id = self._sample_next_token(
+                logits=logits_b,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                do_sample=do_sample,
+            )
+            next_ids.append(tok_id)
+            piece = detoks[b].on_token(tok_id)
+            if piece:
+                first_pieces.append(piece)
+            else:
+                first_pieces.append("")
+            if stop_on_eos and tok_id == self.eos_token_id:
+                finished[b] = True
+        yield first_pieces
+        last_token_ids = torch.tensor(
+            next_ids,
+            dtype=torch.long,
+            device=self.device,
+        )
+        for _ in range(max_new_tokens - 1):
+            next_logits = self.decode_step_batch(last_token_ids)
+            new_ids: list[int] = []
+            pieces: list[str] = []
+            for b in range(batch_size):
+                logits_b = next_logits[b : b + 1]  # [1, V]
+                tok_id = self._sample_next_token(
+                    logits=logits_b,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                )
+                new_ids.append(tok_id)
+                if stop_on_eos and finished[b]:
+                    pieces.append("")
+                    continue
+                piece = detoks[b].on_token(tok_id)
+                if piece:
+                    pieces.append(piece)
+                else:
+                    pieces.append("")
+                if stop_on_eos and tok_id == self.eos_token_id:
+                    finished[b] = True
+            last_token_ids = torch.tensor(
+                new_ids,
+                dtype=torch.long,
+                device=self.device,
+            )
+            yield pieces
+            if all(finished):
+                break
+        tails = []
+        for b in range(batch_size):
+            tail = detoks[b].flush()
+            tails.append(tail)
+        if any(tails):
+            yield tails
