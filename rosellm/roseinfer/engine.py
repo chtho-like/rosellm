@@ -600,6 +600,124 @@ class InferenceEngine:
         if any(tails):
             yield tails
 
+    @torch.no_grad()
+    def decode_step_sessions(
+        self,
+        sessions: list["InferenceSession"],
+    ) -> torch.Tensor:
+        assert sessions
+        from torch.amp import autocast
+
+        device = self.device
+        batch_size = len(sessions)
+        last_ids: list[int] = []
+        seq_lens: list[int] = []
+        for sess in sessions:
+            if sess.finished:
+                continue
+            assert sess.kv_cache is not None
+            assert sess.generated_ids
+            last_ids.append(sess.generated_ids[-1])
+            key0, _ = sess.kv_cache[0]
+            seq_lens.append(key0.size(2))
+        assert len(last_ids) == batch_size
+        lens = torch.tensor(seq_lens, device=device, dtype=torch.long)
+        max_len = max(seq_lens)
+        input_ids = torch.tensor(  # [B, 1]
+            last_ids,
+            dtype=torch.long,
+            device=device,
+        ).view(batch_size, 1)
+        past_mask = torch.arange(  # [B, max_len], bool
+            max_len,
+            device=device,
+        ).unsqueeze(0) < lens.unsqueeze(1)
+        new_mask = torch.ones(  # [B, 1]
+            batch_size,
+            1,
+            device=device,
+            dtype=past_mask.dtype,
+        )
+        attention_mask = torch.cat(
+            [past_mask, new_mask],
+            dim=1,
+        ).to(torch.long)
+
+        batched_past = []
+        num_layers = len(sessions[0].kv_cache)
+        for layer_idx in range(num_layers):
+            k_list = []
+            v_list = []
+            for idx, sess in enumerate(sessions):
+                k_layer, v_layer = sess.kv_cache[layer_idx]
+                T_i = seq_lens[idx]
+                if T_i < max_len:
+                    pad_len = max_len - T_i
+                    pad_shape = (
+                        1,
+                        k_layer.size(1),
+                        pad_len,
+                        k_layer.size(3),
+                    )
+                    k_pad = torch.zeros(
+                        pad_shape,
+                        dtype=k_layer.dtype,
+                        device=k_layer.device,
+                    )
+                    v_pad = torch.zeros(
+                        pad_shape,
+                        dtype=v_layer.dtype,
+                        device=v_layer.device,
+                    )
+                    k_full = torch.cat(
+                        [k_layer, k_pad],
+                        dim=2,
+                    )
+                    v_full = torch.cat(
+                        [v_layer, v_pad],
+                        dim=2,
+                    )
+                else:
+                    k_full = k_layer
+                    v_full = v_layer
+                k_list.append(k_full)
+                v_list.append(v_full)
+            k_cat = torch.cat(k_list, dim=0)
+            v_cat = torch.cat(v_list, dim=0)
+            batched_past.append((k_cat, v_cat))
+        if self.use_amp:
+            with autocast(
+                device_type=device.type,
+                dtype=self.amp_dtype,
+            ):
+                logits, _, presents = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=None,
+                    past_key_values=tuple(batched_past),
+                    use_cache=True,
+                )
+        else:
+            logits, _, presents = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=None,
+                past_key_values=tuple(batched_past),
+                use_cache=True,
+            )
+        last_logits = logits[:, -1, :]  # [B, V]
+        for layer_idx in range(num_layers):
+            k_b, v_b = presents[layer_idx]
+            for idx, sess in enumerate(sessions):
+                if sess.finished:
+                    continue
+                prev_len = seq_lens[idx]
+                new_len = prev_len + 1
+                k_slice = k_b[idx : idx + 1, :, :new_len, :].contiguous()
+                v_slice = v_b[idx : idx + 1, :, :new_len, :].contiguous()
+                sess.kv_cache[layer_idx] = (k_slice, v_slice)
+        return last_logits
+
 
 class InferenceSession:
     def __init__(self, engine: "InferenceEngine") -> None:
@@ -799,6 +917,33 @@ class InferenceSession:
             self.finished = True
         return token_id
 
+    @torch.no_grad()
+    def apply_batch_logits(
+        self,
+        last_logits: torch.Tensor,
+    ) -> int | None:
+        if self.finished:
+            return None
+        eng = self.engine
+        logits_2d = last_logits.view(1, -1)  # [1, V]
+        next_token = eng._sample_next_token(
+            logits_2d,
+            temperature=self.temperature,
+            top_k=self.top_k,
+            top_p=self.top_p,
+            do_sample=self.do_sample,
+        )
+        token_id = int(next_token)
+        self.generated_ids.append(token_id)
+        self.step_count += 1
+        if self.stop_on_eos:
+            eos_id = eng.eos_token_id
+            if eos_id is not None and token_id == eos_id:
+                self.finished = True
+        if self.max_new_tokens > 0 and self.step_count >= self.max_new_tokens:
+            self.finished = True
+        return token_id
+
     def release_kv_blocks(self) -> None:
         if self.kv_manager is None:
             return
@@ -897,20 +1042,30 @@ class OfflineScheduler:
         self._sessions[request_id] = session
         return request_id
 
+    def has_unfinished(self) -> bool:
+        return any(not sess.finished for sess in self._sessions.values())
+
+    @torch.no_grad()
+    def step(self) -> dict[int, int]:
+        active_pairs: list[tuple[int, InferenceSession]] = [
+            (rid, sess) for rid, sess in self._sessions.items() if not sess.finished
+        ]
+        if not active_pairs:
+            return {}
+        sessions = [pair[1] for pair in active_pairs]
+        last_logits = self.engine.decode_step_sessions(sessions)
+        step_tokens: dict[int, int] = {}
+        for idx, (rid, sess) in enumerate(active_pairs):
+            logits_row = last_logits[idx]
+            token_id = sess.apply_batch_logits(logits_row)
+            if token_id is not None:
+                step_tokens[rid] = token_id
+        return step_tokens
+
     @torch.no_grad()
     def run(self) -> dict[int, str]:
-        active_ids: set[int] = {
-            rid for rid, sess in self._sessions.items() if not sess.finished
-        }
-        while active_ids:
-            for rid in list(active_ids):
-                session = self._sessions[rid]
-                if session.finished:
-                    active_ids.remove(rid)
-                    continue
-                _ = session.step_once()
-                if session.finished:
-                    active_ids.remove(rid)
+        while self.has_unfinished():
+            self.step()
         outputs: dict[int, str] = {}
         for rid, session in self._sessions.items():
             outputs[rid] = session.decode_text()

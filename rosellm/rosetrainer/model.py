@@ -248,7 +248,7 @@ class GPTModel(nn.Module):
                 False,
             )
             and self.training
-            and not use_cache,
+            and not use_cache
         )
         presents: list[tuple[Any, Any]] | None = [] if use_cache else None
         if use_ckpt:
