@@ -12,10 +12,12 @@
 
 # Core dependencies
 torch==2.6.0
-transformers==4.20.0
+transformers==4.46.3
 huggingface-hub==0.26.2
 psutil==5.9.8
 pydantic==2.5.0
+fastapi==0.115.0
+uvicorn[standard]==0.34.0
 
 # Testing dependencies (optional, installed with [test])
 pytest==7.4.0
