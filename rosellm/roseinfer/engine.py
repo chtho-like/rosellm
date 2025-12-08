@@ -1097,6 +1097,109 @@ class OfflineScheduler:
         return outputs
 
 
+class OnlineScheduler:
+    def __init__(
+        self,
+        engine: "InferenceEngine",
+        max_batch_size: int = 8,
+    ) -> None:
+        self.engine = engine
+        self.max_batch_size = max_batch_size
+        self._sessions: dict[int, InferenceSession] = {}
+        self._next_request_id: int = 0
+        self._round_robin_pos: int = 0
+
+    @torch.no_grad()
+    def add_request(
+        self,
+        prompt: str,
+        max_new_tokens: int = 64,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        stop_on_eos: bool = True,
+        do_sample: bool = False,
+    ) -> int:
+        eng = self.engine
+        eng.model.eval()
+        input_ids = eng._encode_prompt(prompt)  # [1, T0]
+        input_ids = eng._maybe_truncate(input_ids)  # [1, T]
+        session = InferenceSession(eng)
+        session.input_ids = input_ids
+        session.set_generation_config(
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sample=do_sample,
+            stop_on_eos=stop_on_eos,
+        )
+        logits = session.prefill(input_ids)  # [1, T, V]
+        last_logits = logits[:, -1, :]  # [1, V]
+        next_token = eng._sample_next_token(
+            last_logits,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sample=do_sample,
+        )
+        token_id = int(next_token)
+        session.generated_ids.append(token_id)
+        session.step_count = 1
+        if stop_on_eos:
+            eos_id = eng.eos_token_id
+            if eos_id is not None and token_id == eos_id:
+                session.finished = True
+        if max_new_tokens > 0 and session.step_count >= max_new_tokens:
+            session.finished = True
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        self._sessions[request_id] = session
+        return request_id
+
+    def has_unfinished(self) -> bool:
+        return any(not sess.finished for sess in self._sessions.values())
+
+    def is_finished(self, request_id: int) -> bool:
+        session = self._sessions.get(request_id, None)
+        return session.finished
+
+    @torch.no_grad()
+    def step(self) -> dict[int, int]:
+        active_pairs: list[tuple[int, InferenceSession]] = [
+            (rid, sess) for rid, sess in self._sessions.items() if not sess.finished
+        ]
+        if not active_pairs:
+            return {}
+        num_active = len(active_pairs)
+        batch_size = min(self.max_batch_size, num_active)
+        start = self._round_robin_pos % num_active
+        selected_pairs: list[tuple[int, InferenceSession]] = []
+        for i in range(batch_size):
+            idx = (start + i) % num_active
+            selected_pairs.append(active_pairs[idx])
+        self._round_robin_pos = (start + batch_size) % num_active
+        sessions = [sess for _, sess in selected_pairs]
+        last_logits = self.engine.decode_step_sessions(sessions)
+        step_tokens: dict[int, int] = {}
+        for idx, (rid, sess) in enumerate(selected_pairs):
+            logits_row = last_logits[idx]
+            token_id = sess.apply_batch_logits(logits_row)
+            if token_id is not None:
+                step_tokens[rid] = token_id
+                if sess.finished:
+                    sess.release_kv_blocks()
+        return step_tokens
+
+    def get_response(self, request_id: int) -> str:
+        session = self._sessions[request_id]
+        return session.decode_text()
+
+    def pop_response(self, request_id: int) -> str:
+        session = self._sessions.pop(request_id)
+        return session.decode_text()
+
+
 class KVBlockInfo(NamedTuple):
     layer: int
     block_index: int
