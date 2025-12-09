@@ -240,43 +240,21 @@ class InferenceEngine:
     ) -> str:
         self.model.eval()
         session = InferenceSession(self)
-        input_ids = self._encode_prompt(prompt)  # [1, T0]
-        input_ids = self._maybe_truncate(input_ids)  # [1, T]
-        logits = session.prefill(input_ids)  # [1, T, V]
-        last_logits = logits[:, -1, :]  # [1, V]
-        generated_ids = input_ids[0].tolist()
-        if max_new_tokens <= 0:
-            generated = torch.tensor(
-                generated_ids,
-                dtype=torch.long,
-                device=self.device,
-            )
-            return self._decode_tokens(generated)
-        next_id = self._sample_next_token(
-            logits=last_logits,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            do_sample=do_sample,
-        )
-        generated_ids.append(next_id)
-        last_token_id = next_id
-        if (
-            stop_on_eos
-            and self.eos_token_id is not None
-            and next_id == self.eos_token_id
-        ):
-            generated = torch.tensor(
-                generated_ids,
-                dtype=torch.long,
-                device=self.device,
-            )
-            return self._decode_tokens(generated)
-
-        for _ in range(max_new_tokens - 1):
-            next_logits = session.decode_step(last_token_id)
+        try:
+            input_ids = self._encode_prompt(prompt)  # [1, T0]
+            input_ids = self._maybe_truncate(input_ids)  # [1, T]
+            logits = session.prefill(input_ids)  # [1, T, V]
+            last_logits = logits[:, -1, :]  # [1, V]
+            generated_ids = input_ids[0].tolist()
+            if max_new_tokens <= 0:
+                generated = torch.tensor(
+                    generated_ids,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                return self._decode_tokens(generated)
             next_id = self._sample_next_token(
-                logits=next_logits,
+                logits=last_logits,
                 temperature=temperature,
                 top_k=top_k,
                 top_p=top_p,
@@ -289,14 +267,39 @@ class InferenceEngine:
                 and self.eos_token_id is not None
                 and next_id == self.eos_token_id
             ):
-                break
-        generated = torch.tensor(
-            generated_ids,
-            dtype=torch.long,
-            device=self.device,
-        )
-        text = self._decode_tokens(generated)
-        return text
+                generated = torch.tensor(
+                    generated_ids,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                return self._decode_tokens(generated)
+
+            for _ in range(max_new_tokens - 1):
+                next_logits = session.decode_step(last_token_id)
+                next_id = self._sample_next_token(
+                    logits=next_logits,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                )
+                generated_ids.append(next_id)
+                last_token_id = next_id
+                if (
+                    stop_on_eos
+                    and self.eos_token_id is not None
+                    and next_id == self.eos_token_id
+                ):
+                    break
+            generated = torch.tensor(
+                generated_ids,
+                dtype=torch.long,
+                device=self.device,
+            )
+            text = self._decode_tokens(generated)
+            return text
+        finally:
+            session.release_kv_blocks()
 
     @torch.no_grad()
     def generate_batch(
@@ -312,19 +315,85 @@ class InferenceEngine:
         assert len(prompts) > 0
         self.model.eval()
         session = InferenceSession(self)
-        input_ids, attn_mask = self._encode_prompts_batch(prompts)
-        batch_size = input_ids.size(0)
-        last_logits = session.prefill_batch(
-            input_ids,
-            attention_mask=attn_mask,
-        )
-        lengths = attn_mask.sum(dim=1).tolist()
-        generated_ids = [
-            input_ids[b, -lengths[b] :].tolist() for b in range(batch_size)
-        ]
-        if max_new_tokens <= 0:
-            outputs = []
-            for ids in generated_ids:
+        try:
+            input_ids, attn_mask = self._encode_prompts_batch(prompts)
+            batch_size = input_ids.size(0)
+            last_logits = session.prefill_batch(
+                input_ids,
+                attention_mask=attn_mask,
+            )
+            lengths = attn_mask.sum(dim=1).tolist()
+            generated_ids = [
+                input_ids[b, -lengths[b] :].tolist() for b in range(batch_size)
+            ]
+            if max_new_tokens <= 0:
+                outputs = []
+                for ids in generated_ids:
+                    t = torch.tensor(
+                        ids,
+                        dtype=torch.long,
+                        device=self.device,
+                    )
+                    text = self._decode_tokens(t)
+                    outputs.append(text)
+                return outputs
+            next_ids = self._sample_next_token_batch(
+                logits=last_logits,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                do_sample=do_sample,
+            )
+            eos_positions: list[Optional[int]] = [None for _ in range(batch_size)]
+            for b in range(batch_size):
+                token_id = int(next_ids[b].item())
+                generated_ids[b].append(token_id)
+                if (
+                    stop_on_eos
+                    and self.eos_token_id is not None
+                    and eos_positions[b] is None
+                    and token_id == self.eos_token_id
+                ):
+                    eos_positions[b] = len(generated_ids[b]) - 1
+            last_token_ids = next_ids
+            for _ in range(max_new_tokens - 1):
+                if (
+                    stop_on_eos
+                    and self.eos_token_id is not None
+                    and all(pos is not None for pos in eos_positions)
+                ):
+                    break
+                next_logits = session.decode_step_batch(last_token_ids)
+                next_ids = self._sample_next_token_batch(
+                    logits=next_logits,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                )
+                for b in range(batch_size):
+                    token_id = int(next_ids[b].item())
+                    if (
+                        stop_on_eos
+                        and self.eos_token_id is not None
+                        and eos_positions[b] is not None
+                    ):
+                        continue
+                    generated_ids[b].append(token_id)
+                    if (
+                        stop_on_eos
+                        and self.eos_token_id is not None
+                        and token_id == self.eos_token_id
+                    ):
+                        eos_positions[b] = len(generated_ids[b]) - 1
+                last_token_ids = next_ids
+            outputs: list[str] = []
+            for b in range(batch_size):
+                ids = generated_ids[b]
+                if stop_on_eos and self.eos_token_id is not None:
+                    pos = eos_positions[b]
+                    if pos is not None:
+                        ids = ids[: pos + 1]
                 t = torch.tensor(
                     ids,
                     dtype=torch.long,
@@ -333,71 +402,8 @@ class InferenceEngine:
                 text = self._decode_tokens(t)
                 outputs.append(text)
             return outputs
-        next_ids = self._sample_next_token_batch(
-            logits=last_logits,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            do_sample=do_sample,
-        )
-        eos_positions: list[Optional[int]] = [None for _ in range(batch_size)]
-        for b in range(batch_size):
-            token_id = int(next_ids[b].item())
-            generated_ids[b].append(token_id)
-            if (
-                stop_on_eos
-                and self.eos_token_id is not None
-                and eos_positions[b] is None
-                and token_id == self.eos_token_id
-            ):
-                eos_positions[b] = len(generated_ids[b]) - 1
-        last_token_ids = next_ids
-        for _ in range(max_new_tokens - 1):
-            if (
-                stop_on_eos
-                and self.eos_token_id is not None
-                and all(pos is not None for pos in eos_positions)
-            ):
-                break
-            next_logits = session.decode_step_batch(last_token_ids)
-            next_ids = self._sample_next_token_batch(
-                logits=next_logits,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                do_sample=do_sample,
-            )
-            for b in range(batch_size):
-                token_id = int(next_ids[b].item())
-                if (
-                    stop_on_eos
-                    and self.eos_token_id is not None
-                    and eos_positions[b] is not None
-                ):
-                    continue
-                generated_ids[b].append(token_id)
-                if (
-                    stop_on_eos
-                    and self.eos_token_id is not None
-                    and token_id == self.eos_token_id
-                ):
-                    eos_positions[b] = len(generated_ids[b]) - 1
-            last_token_ids = next_ids
-        outputs: list[str] = []
-        for b in range(batch_size):
-            ids = generated_ids[b]
-            if stop_on_eos and self.eos_token_id is not None:
-                pos = eos_positions[b]
-                if pos is not None:
-                    ids = ids[: pos + 1]
-            t = torch.tensor(
-                ids,
-                dtype=torch.long,
-                device=self.device,
-            )
-            text = self._decode_tokens(t)
-            outputs.append(text)
-        return outputs
+        finally:
+            session.release_kv_blocks()
 
     @torch.no_grad()
     def stream_generate(
@@ -412,50 +418,29 @@ class InferenceEngine:
     ) -> Iterator[str]:
         self.model.eval()
         session = InferenceSession(self)
-        token_ids = self.tokenizer.encode(
-            prompt,
-            add_special_tokens=False,
-        )
-        if not token_ids:
-            token_ids = [self.eos_token_id]
-        ids_tensor = torch.tensor(
-            [token_ids],
-            dtype=torch.long,
-            device=self.device,
-        )
-        detok = self._make_detok()
-        detok.start_prompt(token_ids)
-        prefill_logits = session.prefill(ids_tensor)  # [1, T, V]
-        last_logits = prefill_logits[:, -1, :]  # [1, V]
-        if max_new_tokens <= 0:
-            piece = detok.flush()
-            if piece:
-                yield piece
-            return
-        next_id = self._sample_next_token(
-            logits=last_logits,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            do_sample=do_sample,
-        )
-        piece = detok.on_token(next_id)
-        if piece:
-            yield piece
-        if (
-            stop_on_eos
-            and self.eos_token_id is not None
-            and next_id == self.eos_token_id
-        ):
-            tail = detok.flush()
-            if tail:
-                yield tail
-            return
-        last_token_id = next_id
-        for _ in range(max_new_tokens - 1):
-            next_logits = session.decode_step(last_token_id)  # [1, V]
+        try:
+            token_ids = self.tokenizer.encode(
+                prompt,
+                add_special_tokens=False,
+            )
+            if not token_ids:
+                token_ids = [self.eos_token_id]
+            ids_tensor = torch.tensor(
+                [token_ids],
+                dtype=torch.long,
+                device=self.device,
+            )
+            detok = self._make_detok()
+            detok.start_prompt(token_ids)
+            prefill_logits = session.prefill(ids_tensor)  # [1, T, V]
+            last_logits = prefill_logits[:, -1, :]  # [1, V]
+            if max_new_tokens <= 0:
+                piece = detok.flush()
+                if piece:
+                    yield piece
+                return
             next_id = self._sample_next_token(
-                logits=next_logits,
+                logits=last_logits,
                 temperature=temperature,
                 top_k=top_k,
                 top_p=top_p,
@@ -464,16 +449,40 @@ class InferenceEngine:
             piece = detok.on_token(next_id)
             if piece:
                 yield piece
-            last_token_id = next_id
             if (
                 stop_on_eos
                 and self.eos_token_id is not None
                 and next_id == self.eos_token_id
             ):
-                break
-        tail = detok.flush()
-        if tail:
-            yield tail
+                tail = detok.flush()
+                if tail:
+                    yield tail
+                return
+            last_token_id = next_id
+            for _ in range(max_new_tokens - 1):
+                next_logits = session.decode_step(last_token_id)  # [1, V]
+                next_id = self._sample_next_token(
+                    logits=next_logits,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                )
+                piece = detok.on_token(next_id)
+                if piece:
+                    yield piece
+                last_token_id = next_id
+                if (
+                    stop_on_eos
+                    and self.eos_token_id is not None
+                    and next_id == self.eos_token_id
+                ):
+                    break
+            tail = detok.flush()
+            if tail:
+                yield tail
+        finally:
+            session.release_kv_blocks()
 
     @torch.no_grad()
     def stream_generate_batch(
@@ -488,85 +497,59 @@ class InferenceEngine:
     ) -> Iterator[list[str]]:
         self.model.eval()
         session = InferenceSession(self)
-        batch_size = len(prompts)
-        if batch_size == 0:
-            return
-        all_prompt_ids: list[list[int]] = []
-        for p in prompts:
-            ids = self.tokenizer.encode(
-                p,
-                add_special_tokens=False,
+        try:
+            batch_size = len(prompts)
+            if batch_size == 0:
+                return
+            all_prompt_ids: list[list[int]] = []
+            for p in prompts:
+                ids = self.tokenizer.encode(
+                    p,
+                    add_special_tokens=False,
+                )
+                if not ids:
+                    ids = [self.eos_token_id]
+                all_prompt_ids.append(ids)
+            detoks: list[BaseDetokenizer] = []
+            for ids in all_prompt_ids:
+                d = self._make_detok()
+                d.start_prompt(ids)
+                detoks.append(d)
+            max_len = max(len(ids) for ids in all_prompt_ids)
+            pad_id = self.eos_token_id
+            batch_ids = []
+            masks = []
+            for ids in all_prompt_ids:
+                pad_len = max_len - len(ids)
+                batch_ids.append([pad_id] * pad_len + ids)
+                masks.append([0] * pad_len + [1] * len(ids))
+            input_ids = torch.tensor(
+                batch_ids,
+                dtype=torch.long,
+                device=self.device,
             )
-            if not ids:
-                ids = [self.eos_token_id]
-            all_prompt_ids.append(ids)
-        detoks: list[BaseDetokenizer] = []
-        for ids in all_prompt_ids:
-            d = self._make_detok()
-            d.start_prompt(ids)
-            detoks.append(d)
-        max_len = max(len(ids) for ids in all_prompt_ids)
-        pad_id = self.eos_token_id
-        batch_ids = []
-        masks = []
-        for ids in all_prompt_ids:
-            pad_len = max_len - len(ids)
-            batch_ids.append([pad_id] * pad_len + ids)
-            masks.append([0] * pad_len + [1] * len(ids))
-        input_ids = torch.tensor(
-            batch_ids,
-            dtype=torch.long,
-            device=self.device,
-        )
-        attention_mask = torch.tensor(
-            masks,
-            dtype=torch.long,
-            device=self.device,
-        )
-        last_logits = session.prefill_batch(
-            input_ids,
-            attention_mask=attention_mask,
-        )  # [B, V]
-        if max_new_tokens <= 0:
-            first_pieces = []
-            for d in detoks:
-                tail = d.flush()
-                first_pieces.append(tail)
-            if any(first_pieces):
-                yield first_pieces
-            return
-        next_ids: list[int] = []
-        first_pieces: list[str] = []
-        finished = [False for _ in range(batch_size)]
-        for b in range(batch_size):
-            logits_b = last_logits[b : b + 1]  # [1, V]
-            tok_id = self._sample_next_token(
-                logits=logits_b,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                do_sample=do_sample,
+            attention_mask = torch.tensor(
+                masks,
+                dtype=torch.long,
+                device=self.device,
             )
-            next_ids.append(tok_id)
-            piece = detoks[b].on_token(tok_id)
-            if piece:
-                first_pieces.append(piece)
-            else:
-                first_pieces.append("")
-            if stop_on_eos and tok_id == self.eos_token_id:
-                finished[b] = True
-        yield first_pieces
-        last_token_ids = torch.tensor(
-            next_ids,
-            dtype=torch.long,
-            device=self.device,
-        )
-        for _ in range(max_new_tokens - 1):
-            next_logits = session.decode_step_batch(last_token_ids)
-            new_ids: list[int] = []
-            pieces: list[str] = []
+            last_logits = session.prefill_batch(
+                input_ids,
+                attention_mask=attention_mask,
+            )  # [B, V]
+            if max_new_tokens <= 0:
+                first_pieces = []
+                for d in detoks:
+                    tail = d.flush()
+                    first_pieces.append(tail)
+                if any(first_pieces):
+                    yield first_pieces
+                return
+            next_ids: list[int] = []
+            first_pieces: list[str] = []
+            finished = [False for _ in range(batch_size)]
             for b in range(batch_size):
-                logits_b = next_logits[b : b + 1]  # [1, V]
+                logits_b = last_logits[b : b + 1]  # [1, V]
                 tok_id = self._sample_next_token(
                     logits=logits_b,
                     temperature=temperature,
@@ -574,31 +557,60 @@ class InferenceEngine:
                     top_p=top_p,
                     do_sample=do_sample,
                 )
-                new_ids.append(tok_id)
-                if stop_on_eos and finished[b]:
-                    pieces.append("")
-                    continue
+                next_ids.append(tok_id)
                 piece = detoks[b].on_token(tok_id)
                 if piece:
-                    pieces.append(piece)
+                    first_pieces.append(piece)
                 else:
-                    pieces.append("")
+                    first_pieces.append("")
                 if stop_on_eos and tok_id == self.eos_token_id:
                     finished[b] = True
+            yield first_pieces
             last_token_ids = torch.tensor(
-                new_ids,
+                next_ids,
                 dtype=torch.long,
                 device=self.device,
             )
-            yield pieces
-            if all(finished):
-                break
-        tails = []
-        for b in range(batch_size):
-            tail = detoks[b].flush()
-            tails.append(tail)
-        if any(tails):
-            yield tails
+            for _ in range(max_new_tokens - 1):
+                next_logits = session.decode_step_batch(last_token_ids)
+                new_ids: list[int] = []
+                pieces: list[str] = []
+                for b in range(batch_size):
+                    logits_b = next_logits[b : b + 1]  # [1, V]
+                    tok_id = self._sample_next_token(
+                        logits=logits_b,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        do_sample=do_sample,
+                    )
+                    new_ids.append(tok_id)
+                    if stop_on_eos and finished[b]:
+                        pieces.append("")
+                        continue
+                    piece = detoks[b].on_token(tok_id)
+                    if piece:
+                        pieces.append(piece)
+                    else:
+                        pieces.append("")
+                    if stop_on_eos and tok_id == self.eos_token_id:
+                        finished[b] = True
+                last_token_ids = torch.tensor(
+                    new_ids,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                yield pieces
+                if all(finished):
+                    break
+            tails = []
+            for b in range(batch_size):
+                tail = detoks[b].flush()
+                tails.append(tail)
+            if any(tails):
+                yield tails
+        finally:
+            session.release_kv_blocks()
 
     @torch.no_grad()
     def decode_step_sessions(
