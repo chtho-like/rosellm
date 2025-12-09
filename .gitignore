@@ -185,3 +185,4 @@ AGENTS.md
 **/logdir/
 datasets
 checkpoints
+*.diff
