@@ -1,6 +1,8 @@
 import argparse
 import time
-from typing import List
+from typing import List, Optional
+
+import torch
 
 from .engine import InferenceEngine, OfflineScheduler, OnlineScheduler
 
@@ -91,11 +93,21 @@ def parse_args() -> argparse.Namespace:
         help="Use sampling to generate text (or else greedy)",
     )
     parser.add_argument(
+        "--no-stop-on-eos",
+        action="store_true",
+        help="Do not stop when EOS is generated",
+    )
+    parser.add_argument(
         "--mode",
         type=str,
         default="online",
         choices=["naive", "online", "offline", "all"],
         help="Mode to run the benchmark",
+    )
+    parser.add_argument(
+        "--no-prefix-cache",
+        action="store_true",
+        help="Disable prefix cache",
     )
     return parser.parse_args()
 
@@ -111,12 +123,22 @@ def count_tokens(tokenizer, text: str) -> int:
     return len(ids)
 
 
+def maybe_sync_cuda(engine: InferenceEngine) -> None:
+    if engine.device.type != "cuda":
+        return
+    if not torch.cuda.is_available():
+        return
+    torch.cuda.synchronize(device=engine.device)
+
+
 def report_stats(
     mode: str,
     engine: InferenceEngine,
     prompts: List[str],
     outputs: List[str],
     elapsed: float,
+    prefill_elapsed: Optional[float] = None,
+    decode_elapsed: Optional[float] = None,
 ) -> None:
     assert len(prompts) == len(outputs)
     tokenizer = engine.tokenizer
@@ -132,11 +154,16 @@ def report_stats(
         elapsed = 1e-6
     print(f"=== {mode} ===")
     print(f"Requests: {len(prompts)}")
-    print(f"Elapsed: {elapsed:.6f} seconds")
+    if prefill_elapsed is not None and decode_elapsed is not None:
+        print(f"Elapsed (prefill/add): {prefill_elapsed:.6f} seconds")
+        print(f"Elapsed (decode/run): {decode_elapsed:.6f} seconds")
+        print(f"Elapsed (total): {elapsed:.6f} seconds")
+    else:
+        print(f"Elapsed: {elapsed:.6f} seconds")
     print(f"Prompt tokens: {prompt_tokens}")
     print(f"Completion tokens: {completion_tokens}")
     print(f"Total tokens: {total_tokens}")
-    print(f"Throughput (completion): {total_tokens / elapsed:.2f} tokens/s")
+    print(f"Throughput (completion): {completion_tokens / elapsed:.2f} tokens/s")
     print(f"Throughput (total): {total_tokens / elapsed:.2f} tokens/s")
     print()
 
@@ -147,6 +174,8 @@ def benchmark_naive(
     args: argparse.Namespace,
 ) -> None:
     outputs: List[str] = []
+    stop_on_eos = not args.no_stop_on_eos
+    maybe_sync_cuda(engine)
     t0 = time.perf_counter()
     for p in prompts:
         text = engine.generate(
@@ -155,10 +184,11 @@ def benchmark_naive(
             temperature=args.temperature,
             top_k=args.top_k,
             top_p=args.top_p,
-            stop_on_eos=True,
+            stop_on_eos=stop_on_eos,
             do_sample=args.do_sample,
         )
         outputs.append(text)
+    maybe_sync_cuda(engine)
     t1 = time.perf_counter()
     report_stats("naive", engine, prompts, outputs, t1 - t0)
 
@@ -168,8 +198,14 @@ def benchmark_offline(
     prompts: List[str],
     args: argparse.Namespace,
 ) -> None:
-    scheduler = OfflineScheduler(engine)
+    scheduler = OfflineScheduler(
+        engine,
+        use_prefix_cache=not args.no_prefix_cache,
+    )
+    stop_on_eos = not args.no_stop_on_eos
     request_ids: List[int] = []
+    maybe_sync_cuda(engine)
+    t0 = time.perf_counter()
     for p in prompts:
         rid = scheduler.add_request(
             p,
@@ -177,18 +213,34 @@ def benchmark_offline(
             temperature=args.temperature,
             top_k=args.top_k,
             top_p=args.top_p,
-            stop_on_eos=True,
+            stop_on_eos=stop_on_eos,
             do_sample=args.do_sample,
         )
         request_ids.append(rid)
-    t0 = time.perf_counter()
-    outputs_by_id = scheduler.run()
+    maybe_sync_cuda(engine)
     t1 = time.perf_counter()
+    prefill_elapsed = t1 - t0
+
+    maybe_sync_cuda(engine)
+    t2 = time.perf_counter()
+    outputs_by_id = scheduler.run()
+    maybe_sync_cuda(engine)
+
     outputs: List[str] = []
     for rid in request_ids:
         text = outputs_by_id[rid]
         outputs.append(text)
-    report_stats("offline", engine, prompts, outputs, t1 - t0)
+    t3 = time.perf_counter()
+    decode_elapsed = t3 - t2
+    report_stats(
+        "offline",
+        engine,
+        prompts,
+        outputs,
+        prefill_elapsed + decode_elapsed,
+        prefill_elapsed=prefill_elapsed,
+        decode_elapsed=decode_elapsed,
+    )
 
 
 def benchmark_online(
@@ -196,8 +248,15 @@ def benchmark_online(
     prompts: List[str],
     args: argparse.Namespace,
 ) -> None:
-    scheduler = OnlineScheduler(engine, max_batch_size=args.max_batch_size)
+    scheduler = OnlineScheduler(
+        engine,
+        max_batch_size=args.max_batch_size,
+        use_prefix_cache=not args.no_prefix_cache,
+    )
+    stop_on_eos = not args.no_stop_on_eos
     request_ids: List[int] = []
+    maybe_sync_cuda(engine)
+    t0 = time.perf_counter()
     for p in prompts:
         rid = scheduler.add_request(
             p,
@@ -205,19 +264,35 @@ def benchmark_online(
             temperature=args.temperature,
             top_k=args.top_k,
             top_p=args.top_p,
-            stop_on_eos=True,
+            stop_on_eos=stop_on_eos,
             do_sample=args.do_sample,
         )
         request_ids.append(rid)
-    t0 = time.perf_counter()
+    maybe_sync_cuda(engine)
+    t1 = time.perf_counter()
+    prefill_elapsed = t1 - t0
+
+    maybe_sync_cuda(engine)
+    t2 = time.perf_counter()
     while scheduler.has_unfinished():
         scheduler.step()
-    t1 = time.perf_counter()
+    maybe_sync_cuda(engine)
+
     outputs: List[str] = []
     for rid in request_ids:
-        text = scheduler.get_response(rid)
+        text = scheduler.pop_response(rid)
         outputs.append(text)
-    report_stats("online", engine, prompts, outputs, t1 - t0)
+    t3 = time.perf_counter()
+    decode_elapsed = t3 - t2
+    report_stats(
+        "online",
+        engine,
+        prompts,
+        outputs,
+        prefill_elapsed + decode_elapsed,
+        prefill_elapsed=prefill_elapsed,
+        decode_elapsed=decode_elapsed,
+    )
 
 
 def main() -> None:
