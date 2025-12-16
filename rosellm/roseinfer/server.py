@@ -195,7 +195,7 @@ class SchedulerManager:
                 if detok is not None:
                     tail = detok.flush()
                     if tail:
-                        q.push(tail)
+                        q.put(tail)
                 q.put(None)
 
 
