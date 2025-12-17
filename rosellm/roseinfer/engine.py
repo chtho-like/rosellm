@@ -725,52 +725,26 @@ class InferenceEngine:
 
             batched_past = []
             num_layers = kvm.num_layers
+            num_heads = kvm.num_heads
+            head_dim = kvm.head_dim
             with record_function("roseinfer.decode_step_sessions.build_batched_past"):
                 for layer_idx in range(num_layers):
-                    k_list = []
-                    v_list = []
+                    k_cat = torch.zeros(
+                        [batch_size, num_heads, max_len, head_dim],
+                        dtype=kvm.dtype,
+                        device=device,
+                    )
+                    v_cat = torch.zeros_like(k_cat)
                     for idx, sess in enumerate(sessions):
                         seq_len = seq_lens[idx]
                         block_ids = sess.block_ids_per_layer[layer_idx]
-                        k_seq, v_seq = kvm.gather_sequence(
+                        kvm.gather_sequence_into(
                             layer_idx,
                             block_ids,
                             seq_len,
-                        )  # [1, H, T_i, D]
-                        T_i = k_seq.size(2)
-                        if T_i < max_len:
-                            pad_len = max_len - T_i
-                            pad_shape = (
-                                1,
-                                k_seq.size(1),
-                                pad_len,
-                                k_seq.size(3),
-                            )
-                            k_pad = torch.zeros(
-                                pad_shape,
-                                dtype=k_seq.dtype,
-                                device=k_seq.device,
-                            )
-                            v_pad = torch.zeros(
-                                pad_shape,
-                                dtype=v_seq.dtype,
-                                device=v_seq.device,
-                            )
-                            k_full = torch.cat(
-                                [k_seq, k_pad],
-                                dim=2,
-                            )
-                            v_full = torch.cat(
-                                [v_seq, v_pad],
-                                dim=2,
-                            )
-                        else:
-                            k_full = k_seq
-                            v_full = v_seq
-                        k_list.append(k_full)
-                        v_list.append(v_full)
-                    k_cat = torch.cat(k_list, dim=0)
-                    v_cat = torch.cat(v_list, dim=0)
+                            k_cat[idx],
+                            v_cat[idx],
+                        )
                     batched_past.append((k_cat, v_cat))
             with record_function("roseinfer.model.forward"):
                 if self.use_amp:
@@ -1572,6 +1546,34 @@ class KVBlockManager:
         )
         self._block_infos[last_id] = new_info
 
+    def gather_sequence_into(
+        self,
+        layer_idx: int,
+        block_ids: list[int],
+        total_len: int,
+        out_k: torch.Tensor,  # [H, >=total_len, D]
+        out_v: torch.Tensor,  # [H, >=total_len, D]
+    ) -> None:
+        assert 0 <= layer_idx < self.num_layers
+        cur = 0
+        for global_id in block_ids:
+            info = self._block_infos[global_id]
+            if info is None or info.layer != layer_idx:
+                continue
+            length = info.length
+            if length <= 0:
+                continue
+            end = min(cur + length, total_len)
+            take = end - cur
+            if take <= 0:
+                break
+            k_block, v_block = self._block_storage[global_id]
+            out_k[:, cur:end, :] = k_block[:, :take, :]
+            out_v[:, cur:end, :] = v_block[:, :take, :]
+            cur = end
+            if cur >= total_len:
+                break
+
     def gather_sequence(
         self,
         layer_idx: int,
@@ -1581,7 +1583,6 @@ class KVBlockManager:
         assert 0 <= layer_idx < self.num_layers
         k_seq = torch.zeros(
             (
-                1,
                 self.num_heads,
                 total_len,
                 self.head_dim,
@@ -1590,24 +1591,13 @@ class KVBlockManager:
             device=self.device,
         )
         v_seq = torch.zeros_like(k_seq)
-        cur = 0
-        for global_id in block_ids:
-            info = self._block_infos[global_id]
-            if info is None:
-                continue
-            if info.layer != layer_idx:
-                continue
-            k_block, v_block = self._block_storage[global_id]
-            length = info.length
-            if length <= 0:
-                continue
-            end = min(cur + length, total_len)
-            take = end - cur
-            if take <= 0:
-                break
-            k_seq[0, :, cur:end, :] = k_block[:, :take, :]
-            v_seq[0, :, cur:end, :] = v_block[:, :take, :]
-            cur = end
-            if cur >= total_len:
-                break
+        self.gather_sequence_into(
+            layer_idx,
+            block_ids,
+            total_len,
+            k_seq,
+            v_seq,
+        )
+        k_seq.unsqueeze_(0)
+        v_seq.unsqueeze_(0)
         return k_seq, v_seq
