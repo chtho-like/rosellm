@@ -2,14 +2,16 @@ from collections import OrderedDict
 from typing import Iterator, NamedTuple, Optional
 
 import torch
-from roseinfer.detokenizer import (
+from torch.profiler import record_function
+
+from rosellm.roseinfer.detokenizer import (
     BaseDetokenizer,
     GPT2ByteDetokenizer,
     PrefixDiffDetokenizer,
 )
-from rosetrainer.config import GPTConfig
-from rosetrainer.dataset import build_tokenizer
-from rosetrainer.model import GPTModel
+from rosellm.rosetrainer.config import GPTConfig
+from rosellm.rosetrainer.dataset import build_tokenizer
+from rosellm.rosetrainer.model import GPTModel
 
 try:
     import tiktoken
@@ -678,141 +680,145 @@ class InferenceEngine:
         self,
         sessions: list["InferenceSession"],
     ) -> torch.Tensor:
-        assert sessions
-        from torch.amp import autocast
+        with record_function("roseinfer.decode_step_sessions.total"):
+            assert sessions
+            from torch.amp import autocast
 
-        device = self.device
-        batch_size = len(sessions)
-        kvm = self.kv_manager
+            device = self.device
+            batch_size = len(sessions)
+            kvm = self.kv_manager
 
-        last_ids: list[int] = []
-        seq_lens: list[int] = []
-        for sess in sessions:
-            if sess.finished:
-                continue
-            assert sess.generated_ids
-            last_ids.append(sess.generated_ids[-1])
-            seq_len = sess.prompt_length + sess.step_count - 1
-            seq_lens.append(seq_len)
-        assert len(last_ids) == batch_size
-        lens = torch.tensor(seq_lens, device=device, dtype=torch.long)
-        max_len = max(seq_lens)
-
-        input_ids = torch.tensor(  # [B, 1]
-            last_ids,
-            dtype=torch.long,
-            device=device,
-        ).view(batch_size, 1)
-        past_mask = torch.arange(
-            max_len,
-            device=device,
-        ).unsqueeze(
-            0
-        ) < lens.unsqueeze(1)
-        new_mask = torch.ones(
-            batch_size,
-            1,
-            device=device,
-            dtype=past_mask.dtype,
-        )
-        attention_mask = torch.cat(
-            [past_mask, new_mask],
-            dim=1,
-        ).to(torch.long)
-
-        batched_past = []
-        num_layers = kvm.num_layers
-        for layer_idx in range(num_layers):
-            k_list = []
-            v_list = []
-            for idx, sess in enumerate(sessions):
-                seq_len = seq_lens[idx]
-                block_ids = sess.block_ids_per_layer[layer_idx]
-                k_seq, v_seq = kvm.gather_sequence(
-                    layer_idx,
-                    block_ids,
-                    seq_len,
-                )  # [1, H, T_i, D]
-                T_i = k_seq.size(2)
-                if T_i < max_len:
-                    pad_len = max_len - T_i
-                    pad_shape = (
-                        1,
-                        k_seq.size(1),
-                        pad_len,
-                        k_seq.size(3),
-                    )
-                    k_pad = torch.zeros(
-                        pad_shape,
-                        dtype=k_seq.dtype,
-                        device=k_seq.device,
-                    )
-                    v_pad = torch.zeros(
-                        pad_shape,
-                        dtype=v_seq.dtype,
-                        device=v_seq.device,
-                    )
-                    k_full = torch.cat(
-                        [k_seq, k_pad],
-                        dim=2,
-                    )
-                    v_full = torch.cat(
-                        [v_seq, v_pad],
-                        dim=2,
-                    )
-                else:
-                    k_full = k_seq
-                    v_full = v_seq
-                k_list.append(k_full)
-                v_list.append(v_full)
-            k_cat = torch.cat(k_list, dim=0)
-            v_cat = torch.cat(v_list, dim=0)
-            batched_past.append((k_cat, v_cat))
-        if self.use_amp:
-            with autocast(
-                device_type=device.type,
-                dtype=self.amp_dtype,
-            ):
-                logits, _, presents = self.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=None,
-                    past_key_values=tuple(batched_past),
-                    use_cache=True,
-                )
-        else:
-            logits, _, presents = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=None,
-                past_key_values=tuple(batched_past),
-                use_cache=True,
-            )
-        last_logits = logits[:, -1, :]  # [B, V]
-        for layer_idx in range(num_layers):
-            k_b, v_b = presents[layer_idx]
-            for idx, sess in enumerate(sessions):
+            last_ids: list[int] = []
+            seq_lens: list[int] = []
+            for sess in sessions:
                 if sess.finished:
                     continue
-                k_new = k_b[
-                    idx : idx + 1,
-                    :,
-                    max_len : max_len + 1,
-                    :,
-                ]
-                v_new = v_b[
-                    idx : idx + 1,
-                    :,
-                    max_len : max_len + 1,
-                    :,
-                ]
-                kvm.append_token(
-                    layer_idx,
-                    sess.block_ids_per_layer[layer_idx],
-                    k_new,
-                    v_new,
-                )
-        return last_logits
+                assert sess.generated_ids
+                last_ids.append(sess.generated_ids[-1])
+                seq_len = sess.prompt_length + sess.step_count - 1
+                seq_lens.append(seq_len)
+            assert len(last_ids) == batch_size
+            lens = torch.tensor(seq_lens, device=device, dtype=torch.long)
+            max_len = max(seq_lens)
+
+            input_ids = torch.tensor(  # [B, 1]
+                last_ids,
+                dtype=torch.long,
+                device=device,
+            ).view(batch_size, 1)
+            past_mask = torch.arange(
+                max_len,
+                device=device,
+            ).unsqueeze(
+                0
+            ) < lens.unsqueeze(1)
+            new_mask = torch.ones(
+                batch_size,
+                1,
+                device=device,
+                dtype=past_mask.dtype,
+            )
+            attention_mask = torch.cat(
+                [past_mask, new_mask],
+                dim=1,
+            ).to(torch.long)
+
+            batched_past = []
+            num_layers = kvm.num_layers
+            with record_function("roseinfer.decode_step_sessions.build_batched_past"):
+                for layer_idx in range(num_layers):
+                    k_list = []
+                    v_list = []
+                    for idx, sess in enumerate(sessions):
+                        seq_len = seq_lens[idx]
+                        block_ids = sess.block_ids_per_layer[layer_idx]
+                        k_seq, v_seq = kvm.gather_sequence(
+                            layer_idx,
+                            block_ids,
+                            seq_len,
+                        )  # [1, H, T_i, D]
+                        T_i = k_seq.size(2)
+                        if T_i < max_len:
+                            pad_len = max_len - T_i
+                            pad_shape = (
+                                1,
+                                k_seq.size(1),
+                                pad_len,
+                                k_seq.size(3),
+                            )
+                            k_pad = torch.zeros(
+                                pad_shape,
+                                dtype=k_seq.dtype,
+                                device=k_seq.device,
+                            )
+                            v_pad = torch.zeros(
+                                pad_shape,
+                                dtype=v_seq.dtype,
+                                device=v_seq.device,
+                            )
+                            k_full = torch.cat(
+                                [k_seq, k_pad],
+                                dim=2,
+                            )
+                            v_full = torch.cat(
+                                [v_seq, v_pad],
+                                dim=2,
+                            )
+                        else:
+                            k_full = k_seq
+                            v_full = v_seq
+                        k_list.append(k_full)
+                        v_list.append(v_full)
+                    k_cat = torch.cat(k_list, dim=0)
+                    v_cat = torch.cat(v_list, dim=0)
+                    batched_past.append((k_cat, v_cat))
+            with record_function("roseinfer.model.forward"):
+                if self.use_amp:
+                    with autocast(
+                        device_type=device.type,
+                        dtype=self.amp_dtype,
+                    ):
+                        logits, _, presents = self.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=None,
+                            past_key_values=tuple(batched_past),
+                            use_cache=True,
+                        )
+                else:
+                    logits, _, presents = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        past_key_values=tuple(batched_past),
+                        use_cache=True,
+                    )
+            last_logits = logits[:, -1, :]  # [B, V]
+            with record_function("roseinfer.kv.append_token"):
+                for layer_idx in range(num_layers):
+                    k_b, v_b = presents[layer_idx]
+                    for idx, sess in enumerate(sessions):
+                        if sess.finished:
+                            continue
+                        k_new = k_b[
+                            idx : idx + 1,
+                            :,
+                            max_len : max_len + 1,
+                            :,
+                        ]
+                        v_new = v_b[
+                            idx : idx + 1,
+                            :,
+                            max_len : max_len + 1,
+                            :,
+                        ]
+                        kvm.append_token(
+                            layer_idx,
+                            sess.block_ids_per_layer[layer_idx],
+                            k_new,
+                            v_new,
+                        )
+            return last_logits
 
 
 class InferenceSession:

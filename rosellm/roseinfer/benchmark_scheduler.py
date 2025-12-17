@@ -1,8 +1,11 @@
 import argparse
+import os
 import time
+from pathlib import Path
 from typing import List, Optional
 
 import torch
+from torch.profiler import ProfilerActivity, profile, schedule
 
 from .engine import InferenceEngine, OfflineScheduler, OnlineScheduler
 
@@ -108,6 +111,17 @@ def parse_args() -> argparse.Namespace:
         "--no-prefix-cache",
         action="store_true",
         help="Disable prefix cache",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable profiler",
+    )
+    parser.add_argument(
+        "--profile-dir",
+        type=str,
+        default="profiles",
+        help="Directory to save profiler output",
     )
     return parser.parse_args()
 
@@ -223,8 +237,23 @@ def benchmark_offline(
 
     maybe_sync_cuda(engine)
     t2 = time.perf_counter()
-    outputs_by_id = scheduler.run()
-    maybe_sync_cuda(engine)
+    prof = None
+    trace_path = None
+    if args.profile:
+        out_dir = Path(args.profile_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        trace_path = os.fspath(out_dir / "offline_run.json")
+        sched = schedule(wait=1, warmup=2, active=3, repeat=1)
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            schedule=sched,
+        ) as prof:
+            outputs_by_id = scheduler.run()
+            prof.step()
+            maybe_sync_cuda(engine)
+    else:
+        outputs_by_id = scheduler.run()
+        maybe_sync_cuda(engine)
 
     outputs: List[str] = []
     for rid in request_ids:
@@ -241,6 +270,9 @@ def benchmark_offline(
         prefill_elapsed=prefill_elapsed,
         decode_elapsed=decode_elapsed,
     )
+    if prof is not None and trace_path is not None:
+        prof.export_chrome_trace(trace_path)
+        print(f"[profile] wrote: {trace_path}")
 
 
 def benchmark_online(
@@ -274,9 +306,25 @@ def benchmark_online(
 
     maybe_sync_cuda(engine)
     t2 = time.perf_counter()
-    while scheduler.has_unfinished():
-        scheduler.step()
-    maybe_sync_cuda(engine)
+    prof = None
+    trace_path = None
+    if args.profile:
+        out_dir = Path(args.profile_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        trace_path = os.fspath(out_dir / "online_decode.json")
+        sched = schedule(wait=1, warmup=2, active=3, repeat=1)
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            schedule=sched,
+        ) as prof:
+            while scheduler.has_unfinished():
+                scheduler.step()
+                prof.step()
+            maybe_sync_cuda(engine)
+    else:
+        while scheduler.has_unfinished():
+            scheduler.step()
+        maybe_sync_cuda(engine)
 
     outputs: List[str] = []
     for rid in request_ids:
@@ -293,6 +341,9 @@ def benchmark_online(
         prefill_elapsed=prefill_elapsed,
         decode_elapsed=decode_elapsed,
     )
+    if prof is not None and trace_path is not None:
+        prof.export_chrome_trace(trace_path)
+        print(f"[profile] wrote: {trace_path}")
 
 
 def main() -> None:
