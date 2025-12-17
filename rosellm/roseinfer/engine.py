@@ -770,27 +770,17 @@ class InferenceEngine:
             last_logits = logits[:, -1, :]  # [B, V]
             with record_function("roseinfer.kv.append_token"):
                 for layer_idx in range(num_layers):
-                    k_b, v_b = presents[layer_idx]
+                    k_b, v_b = presents[layer_idx]  # [B, H, max_len+1, D]
+                    k_step = k_b.select(2, max_len)  # [B, H, D]
+                    v_step = v_b.select(2, max_len)  # [B, H, D]
                     for idx, sess in enumerate(sessions):
                         if sess.finished:
                             continue
-                        k_new = k_b[
-                            idx : idx + 1,
-                            :,
-                            max_len : max_len + 1,
-                            :,
-                        ]
-                        v_new = v_b[
-                            idx : idx + 1,
-                            :,
-                            max_len : max_len + 1,
-                            :,
-                        ]
                         kvm.append_token(
                             layer_idx,
                             sess.block_ids_per_layer[layer_idx],
-                            k_new,
-                            v_new,
+                            k_step[idx],  # [H, D]
+                            v_step[idx],  # [H, D]
                         )
             return last_logits
 
@@ -1453,11 +1443,10 @@ class KVBlockManager:
         self,
         layer_idx: int,
         block_ids: list[int],
-        key_new: torch.Tensor,
-        value_new: torch.Tensor,
+        key_new: torch.Tensor,  # [H, D]
+        value_new: torch.Tensor,  # [H, D]
     ) -> None:
         assert 0 <= layer_idx < self.num_layers
-        assert key_new.size(2) == 1
         if not block_ids:
             block_idx = self._alloc_block_index(layer_idx)
             global_id = self._to_global_block_id(
@@ -1536,8 +1525,8 @@ class KVBlockManager:
         info = self._block_infos[last_id]
         k_block, v_block = self._block_storage[last_id]
         pos = info.length
-        k_block[:, pos, :] = key_new[0, :, 0, :]
-        v_block[:, pos, :] = value_new[0, :, 0, :]
+        k_block[:, pos, :] = key_new
+        v_block[:, pos, :] = value_new
         new_info = KVBlockInfo(
             layer=info.layer,
             block_index=info.block_index,
