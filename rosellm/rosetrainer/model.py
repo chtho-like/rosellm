@@ -221,22 +221,26 @@ class GPTModel(nn.Module):
         labels: Optional[torch.Tensor] = None,
         past_key_values: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None,
         use_cache: bool = False,
+        position_ids: Optional[torch.Tensor] = None,
     ):
         bsz, seq_len = input_ids.size()
         device = input_ids.device
         token_emb = self.token_embedding(input_ids)  # [B, T, D]
-        if past_key_values is not None and len(past_key_values) > 0:
-            past_k = past_key_values[0][0]
-            past_len = past_k.size(-2)
+        if position_ids is None:
+            if past_key_values is not None and len(past_key_values) > 0:
+                past_k = past_key_values[0][0]
+                past_len = past_k.size(-2)
+            else:
+                past_len = 0
+            position_ids = torch.arange(
+                past_len,
+                past_len + seq_len,
+                device=device,
+            ).unsqueeze(
+                0
+            )  # [1, T]
         else:
-            past_len = 0
-        position_ids = torch.arange(
-            past_len,
-            past_len + seq_len,
-            device=device,
-        ).unsqueeze(
-            0
-        )  # [1, T]
+            position_ids = position_ids.to(device=device, dtype=torch.long)
         pos_emb = self.position_embedding(position_ids)  # [1, T, D]
         pos_emb = pos_emb.expand(bsz, seq_len, -1)  # [B, T, D]
         x = token_emb + pos_emb

@@ -706,6 +706,7 @@ class InferenceEngine:
                 dtype=torch.long,
                 device=device,
             ).view(batch_size, 1)
+            position_ids = lens.view(batch_size, 1)
             past_mask = torch.arange(
                 max_len,
                 device=device,
@@ -758,6 +759,7 @@ class InferenceEngine:
                             labels=None,
                             past_key_values=tuple(batched_past),
                             use_cache=True,
+                            position_ids=position_ids,
                         )
                 else:
                     logits, _, presents = self.model(
@@ -766,6 +768,7 @@ class InferenceEngine:
                         labels=None,
                         past_key_values=tuple(batched_past),
                         use_cache=True,
+                        position_ids=position_ids,
                     )
             last_logits = logits[:, -1, :]  # [B, V]
             with record_function("roseinfer.kv.append_token"):
