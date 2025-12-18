@@ -1337,10 +1337,12 @@ class KVBlockManager:
         self._next_block_index: list[int] = [0 for _ in range(num_layers)]
         self._free_block_indices: list[list[int]] = [[] for _ in range(num_layers)]
         self._block_infos: dict[int, KVBlockInfo] = {}
-        self._block_storage: dict[
-            int,
-            tuple[torch.Tensor, torch.Tensor],
-        ] = {}  # global_id -> (key_block, value_block)
+        self._k_cache = torch.empty(
+            (num_layers, max_blocks_per_layer, num_heads, block_size, head_dim),
+            device=device,
+            dtype=dtype,
+        )
+        self._v_cache = torch.empty_like(self._k_cache)
         self._block_refcounts: dict[int, int] = {}
 
     def _alloc_block_index(self, layer_idx: int) -> int:
@@ -1363,7 +1365,7 @@ class KVBlockManager:
     def register_prefill_layer(
         self,
         layer_idx: int,
-        key: torch.Tensor,  # [1, H, D, T]
+        key: torch.Tensor,  # [1, H, T, D]
         value: torch.Tensor,
     ) -> list[int]:
         assert 0 <= layer_idx < self.num_layers
@@ -1389,19 +1391,8 @@ class KVBlockManager:
                 length=length,
             )
             self._block_infos[global_id] = info
-            k_block = torch.zeros(
-                (
-                    self.num_heads,
-                    block_size,
-                    self.head_dim,
-                ),
-                dtype=self.dtype,
-                device=self.device,
-            )
-            v_block = torch.zeros_like(k_block)
-            k_block[:, :length, :] = k_slice[0]
-            v_block[:, :length, :] = v_slice[0]
-            self._block_storage[global_id] = (k_block, v_block)
+            self._k_cache[layer_idx, block_idx, :, :length, :].copy_(k_slice[0])
+            self._v_cache[layer_idx, block_idx, :, :length, :].copy_(v_slice[0])
             self._block_refcounts[global_id] = 1
             block_ids.append(global_id)
         return block_ids
@@ -1440,7 +1431,6 @@ class KVBlockManager:
             self._free_block_indices[layer_idx].append(
                 info.block_index,
             )
-            self._block_storage.pop(global_id, None)
 
     def append_token(
         self,
@@ -1463,17 +1453,6 @@ class KVBlockManager:
                 length=0,
             )
             self._block_infos[global_id] = info
-            k_block = torch.zeros(
-                (
-                    self.num_heads,
-                    self.block_size,
-                    self.head_dim,
-                ),
-                dtype=self.dtype,
-                device=self.device,
-            )
-            v_block = torch.zeros_like(k_block)
-            self._block_storage[global_id] = (k_block, v_block)
             self._block_refcounts[global_id] = 1
             block_ids.append(global_id)
         last_id = block_ids[-1]
@@ -1493,10 +1472,14 @@ class KVBlockManager:
                 length=info.length,
             )
             self._block_infos[new_global_id] = new_info
-            k_block_old, v_block_old = self._block_storage[last_id]
-            k_block = k_block_old.clone()
-            v_block = v_block_old.clone()
-            self._block_storage[new_global_id] = (k_block, v_block)
+            self._k_cache[
+                layer_idx,
+                block_idx,
+            ].copy_(self._k_cache[layer_idx, info.block_index])
+            self._v_cache[
+                layer_idx,
+                block_idx,
+            ].copy_(self._v_cache[layer_idx, info.block_index])
             self._block_refcounts[new_global_id] = 1
             block_ids[-1] = new_global_id
             last_id = new_global_id
@@ -1511,25 +1494,15 @@ class KVBlockManager:
                 length=0,
             )
             self._block_infos[global_id] = info
-            k_block = torch.zeros(
-                (
-                    self.num_heads,
-                    self.block_size,
-                    self.head_dim,
-                ),
-                dtype=self.dtype,
-                device=self.device,
-            )
-            v_block = torch.zeros_like(k_block)
-            self._block_storage[global_id] = (k_block, v_block)
             self._block_refcounts[global_id] = 1
             block_ids.append(global_id)
             last_id = global_id
         info = self._block_infos[last_id]
-        k_block, v_block = self._block_storage[last_id]
+        k_block = self._k_cache[layer_idx, info.block_index]
+        v_block = self._v_cache[layer_idx, info.block_index]
         pos = info.length
-        k_block[:, pos, :] = key_new
-        v_block[:, pos, :] = value_new
+        k_block[:, pos, :].copy_(key_new)
+        v_block[:, pos, :].copy_(value_new)
         new_info = KVBlockInfo(
             layer=info.layer,
             block_index=info.block_index,
@@ -1559,9 +1532,10 @@ class KVBlockManager:
             take = end - cur
             if take <= 0:
                 break
-            k_block, v_block = self._block_storage[global_id]
-            out_k[:, cur:end, :] = k_block[:, :take, :]
-            out_v[:, cur:end, :] = v_block[:, :take, :]
+            k_block = self._k_cache[layer_idx, info.block_index]
+            v_block = self._v_cache[layer_idx, info.block_index]
+            out_k[:, cur:end, :].copy_(k_block[:, :take, :])
+            out_v[:, cur:end, :].copy_(v_block[:, :take, :])
             cur = end
             if cur >= total_len:
                 break

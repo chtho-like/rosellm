@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import time
 from pathlib import Path
@@ -6,6 +7,8 @@ from typing import List, Optional
 
 import torch
 from torch.profiler import ProfilerActivity, profile, schedule
+
+from rosellm.rosetrainer.dataset import build_tokenizer
 
 from .engine import InferenceEngine, OfflineScheduler, OnlineScheduler
 
@@ -348,14 +351,40 @@ def benchmark_online(
 
 def main() -> None:
     args = parse_args()
+    prompts = build_prompts(args)
+    block_size = 64
+    tokenizer = build_tokenizer(args.tokenizer_name)
+    prompt_lens = [count_tokens(tokenizer, p) for p in prompts]
+    blocks_per_request = [
+        math.ceil((l + args.max_new_tokens) / block_size) for l in prompt_lens
+    ]
+    required_blocks_per_layer = sum(blocks_per_request)
+    if not args.no_prefix_cache and args.max_new_tokens > 0:
+        unique_prompt_lens = {p: count_tokens(tokenizer, p) for p in set(prompts)}
+        prefix_extra_blocks = sum(
+            1 for l in unique_prompt_lens.values() if (l % block_size) != 0
+        )
+        required_blocks_per_layer += prefix_extra_blocks
+    ckpt = torch.load(
+        args.checkpoint_path,
+        map_location="meta",
+        weights_only=True,
+    )
+    cfg_dict = ckpt.get("config") or {}
+    max_context = int(cfg_dict.get("max_position_embeddings", 1024))
+    kv_cache_max_concurrency = max(
+        1,
+        math.ceil(required_blocks_per_layer * block_size / max_context),
+    )
     engine = InferenceEngine(
         checkpoint_path=args.checkpoint_path,
         tokenizer_name=args.tokenizer_name,
         device=args.device,
         use_amp=not args.no_amp,
         bf16=args.bf16,
+        kv_cache_max_concurrency=kv_cache_max_concurrency,
+        prefix_cache_max_entries=len(set(prompts)),
     )
-    prompts = build_prompts(args)
     if args.mode in ("naive", "all"):
         benchmark_naive(engine, prompts, args)
     if args.mode in ("offline", "all"):
