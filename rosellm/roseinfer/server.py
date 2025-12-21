@@ -103,6 +103,7 @@ class SchedulerManager:
             max_batch_size=max_batch_size,
         )
         self._lock = threading.Lock()
+        self._wakeup = threading.Event()
         self._queues: Dict[int, "queue.Queue[Optional[str]]"] = {}
         self._detoks: Dict[int, BaseDetokenizer] = {}
         self._running = True
@@ -153,6 +154,8 @@ class SchedulerManager:
                 if tail:
                     q.put(tail)
                 q.put(None)
+            else:
+                self._wakeup.set()
         return request_id
 
     def stream_text(self, request_id: int) -> Iterator[str]:
@@ -182,8 +185,9 @@ class SchedulerManager:
                 else:
                     step_tokens = {}
                     finished_ids = []
+                    self._wakeup.clear()
             if not has_work:
-                time.sleep(0.005)
+                self._wakeup.wait()
                 continue
             for rid, token_id in step_tokens.items():
                 detok = self._detoks.get(rid)
