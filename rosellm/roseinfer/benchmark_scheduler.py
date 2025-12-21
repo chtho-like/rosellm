@@ -1,6 +1,7 @@
 import argparse
 import math
 import os
+import statistics
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -126,6 +127,33 @@ def parse_args() -> argparse.Namespace:
         default="profiles",
         help="Directory to save profiler output",
     )
+    parser.add_argument(
+        "--warmup-runs",
+        type=int,
+        default=1,
+        help="Number of warmup runs (ignored when --profile is set).",
+    )
+    parser.add_argument(
+        "--repeat-runs",
+        type=int,
+        default=3,
+        help="Number of measured runs (ignored when --profile is set).",
+    )
+    parser.add_argument(
+        "--print-per-run",
+        action="store_true",
+        help="Print per-run stats in repeat mode.",
+    )
+    parser.add_argument(
+        "--keep-prefix-cache-across-runs",
+        action="store_true",
+        help="Keep prefix cache entries between runs (default resets for fairness).",
+    )
+    parser.add_argument(
+        "--paged-attn",
+        action="store_true",
+        help="Use paged attention",
+    )
     return parser.parse_args()
 
 
@@ -156,13 +184,15 @@ def report_stats(
     elapsed: float,
     prefill_elapsed: Optional[float] = None,
     decode_elapsed: Optional[float] = None,
+    prompt_lens: Optional[List[int]] = None,
 ) -> None:
     assert len(prompts) == len(outputs)
     tokenizer = engine.tokenizer
-    prompt_tokens = sum(count_tokens(tokenizer, p) for p in prompts)
+    if prompt_lens is None:
+        prompt_lens = [count_tokens(tokenizer, p) for p in prompts]
+    prompt_tokens = sum(prompt_lens)
     completion_tokens = 0
-    for p, out in zip(prompts, outputs):
-        t_prompt = count_tokens(tokenizer, p)
+    for t_prompt, out in zip(prompt_lens, outputs):
         t_out = count_tokens(tokenizer, out)
         if t_out > t_prompt:
             completion_tokens += t_out - t_prompt
@@ -180,14 +210,66 @@ def report_stats(
     print(f"Prompt tokens: {prompt_tokens}")
     print(f"Completion tokens: {completion_tokens}")
     print(f"Total tokens: {total_tokens}")
-    print(f"Throughput (completion): {completion_tokens / elapsed:.2f} tokens/s")
-    print(f"Throughput (total): {total_tokens / elapsed:.2f} tokens/s")
+    print(f"Throughput (completion,total): {completion_tokens / elapsed:.2f} tokens/s")
+    if decode_elapsed is not None and decode_elapsed > 0:
+        print(
+            f"Throughput (completion,decode): "
+            f"{completion_tokens / decode_elapsed:.2f} tokens/s"
+        )
+    print(f"Throughput (total,total): {total_tokens / elapsed:.2f} tokens/s")
+    print()
+
+
+def maybe_reset_prefix_cache(engine: InferenceEngine, args: argparse.Namespace) -> None:
+    if args.no_prefix_cache:
+        return
+    if args.keep_prefix_cache_across_runs:
+        return
+    engine.prefix_cache.clear()
+
+
+def summarize_runs(
+    mode: str,
+    results: List[dict],
+    warmup_runs: int,
+    repeat_runs: int,
+) -> None:
+    if not results:
+        return
+    decode_times = [r["decode_elapsed"] for r in results]
+    total_times = [r["elapsed"] for r in results]
+    tps_decode = [r["completion_tokens"] / r["decode_elapsed"] for r in results]
+    tps_total = [r["completion_tokens"] / r["elapsed"] for r in results]
+    print(f"=== {mode} summary ===")
+    print(f"Warmup runs: {warmup_runs}")
+    print(f"Measured runs: {repeat_runs}")
+    print(
+        f"Decode time p50/mean: "
+        f"{statistics.median(decode_times):.6f}/"
+        f"{statistics.mean(decode_times):.6f} s"
+    )
+    print(
+        f"Total time p50/mean: "
+        f"{statistics.median(total_times):.6f}/"
+        f"{statistics.mean(total_times):.6f} s"
+    )
+    print(
+        f"Throughput(completion,decode) p50/mean: "
+        f"{statistics.median(tps_decode):.2f}/"
+        f"{statistics.mean(tps_decode):.2f} tokens/s"
+    )
+    print(
+        f"Throughput(completion,total) p50/mean: "
+        f"{statistics.median(tps_total):.2f}/"
+        f"{statistics.mean(tps_total):.2f} tokens/s"
+    )
     print()
 
 
 def benchmark_naive(
     engine: InferenceEngine,
     prompts: List[str],
+    prompt_lens: List[int],
     args: argparse.Namespace,
 ) -> None:
     outputs: List[str] = []
@@ -207,42 +289,77 @@ def benchmark_naive(
         outputs.append(text)
     maybe_sync_cuda(engine)
     t1 = time.perf_counter()
-    report_stats("naive", engine, prompts, outputs, t1 - t0)
+    report_stats("naive", engine, prompts, outputs, t1 - t0, prompt_lens=prompt_lens)
 
 
 def benchmark_offline(
     engine: InferenceEngine,
     prompts: List[str],
+    prompt_lens: List[int],
     args: argparse.Namespace,
 ) -> None:
-    scheduler = OfflineScheduler(
-        engine,
-        use_prefix_cache=not args.no_prefix_cache,
-    )
-    stop_on_eos = not args.no_stop_on_eos
-    request_ids: List[int] = []
-    maybe_sync_cuda(engine)
-    t0 = time.perf_counter()
-    for p in prompts:
-        rid = scheduler.add_request(
-            p,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature,
-            top_k=args.top_k,
-            top_p=args.top_p,
-            stop_on_eos=stop_on_eos,
-            do_sample=args.do_sample,
+    def run_once() -> tuple[List[str], float, float]:
+        scheduler = OfflineScheduler(
+            engine,
+            use_prefix_cache=not args.no_prefix_cache,
         )
-        request_ids.append(rid)
-    maybe_sync_cuda(engine)
-    t1 = time.perf_counter()
-    prefill_elapsed = t1 - t0
+        stop_on_eos = not args.no_stop_on_eos
+        request_ids: List[int] = []
+        maybe_sync_cuda(engine)
+        t0 = time.perf_counter()
+        for p in prompts:
+            rid = scheduler.add_request(
+                p,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                stop_on_eos=stop_on_eos,
+                do_sample=args.do_sample,
+            )
+            request_ids.append(rid)
+        maybe_sync_cuda(engine)
+        t1 = time.perf_counter()
+        prefill_elapsed = t1 - t0
 
-    maybe_sync_cuda(engine)
-    t2 = time.perf_counter()
-    prof = None
-    trace_path = None
+        maybe_sync_cuda(engine)
+        t2 = time.perf_counter()
+        outputs_by_id = scheduler.run()
+        maybe_sync_cuda(engine)
+        outputs: List[str] = []
+        for rid in request_ids:
+            text = outputs_by_id[rid]
+            outputs.append(text)
+        t3 = time.perf_counter()
+        decode_elapsed = t3 - t2
+        return outputs, prefill_elapsed, decode_elapsed
+
     if args.profile:
+        scheduler = OfflineScheduler(
+            engine,
+            use_prefix_cache=not args.no_prefix_cache,
+        )
+        stop_on_eos = not args.no_stop_on_eos
+        request_ids: List[int] = []
+        maybe_sync_cuda(engine)
+        t0 = time.perf_counter()
+        for p in prompts:
+            rid = scheduler.add_request(
+                p,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                stop_on_eos=stop_on_eos,
+                do_sample=args.do_sample,
+            )
+            request_ids.append(rid)
+        maybe_sync_cuda(engine)
+        t1 = time.perf_counter()
+        prefill_elapsed = t1 - t0
+
+        maybe_sync_cuda(engine)
+        t2 = time.perf_counter()
         out_dir = Path(args.profile_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         trace_path = os.fspath(out_dir / "offline_run.json")
@@ -254,64 +371,135 @@ def benchmark_offline(
             outputs_by_id = scheduler.run()
             prof.step()
             maybe_sync_cuda(engine)
-    else:
-        outputs_by_id = scheduler.run()
-        maybe_sync_cuda(engine)
-
-    outputs: List[str] = []
-    for rid in request_ids:
-        text = outputs_by_id[rid]
-        outputs.append(text)
-    t3 = time.perf_counter()
-    decode_elapsed = t3 - t2
-    report_stats(
-        "offline",
-        engine,
-        prompts,
-        outputs,
-        prefill_elapsed + decode_elapsed,
-        prefill_elapsed=prefill_elapsed,
-        decode_elapsed=decode_elapsed,
-    )
-    if prof is not None and trace_path is not None:
+        outputs: List[str] = []
+        for rid in request_ids:
+            outputs.append(outputs_by_id[rid])
+        t3 = time.perf_counter()
+        decode_elapsed = t3 - t2
+        report_stats(
+            "offline",
+            engine,
+            prompts,
+            outputs,
+            prefill_elapsed + decode_elapsed,
+            prefill_elapsed=prefill_elapsed,
+            decode_elapsed=decode_elapsed,
+            prompt_lens=prompt_lens,
+        )
         prof.export_chrome_trace(trace_path)
         print(f"[profile] wrote: {trace_path}")
+        return
+
+    warmup_runs = max(0, int(args.warmup_runs))
+    repeat_runs = max(1, int(args.repeat_runs))
+    for _ in range(warmup_runs):
+        maybe_reset_prefix_cache(engine, args)
+        run_once()
+
+    results: List[dict] = []
+    for i in range(repeat_runs):
+        maybe_reset_prefix_cache(engine, args)
+        outputs, prefill_elapsed, decode_elapsed = run_once()
+        elapsed = prefill_elapsed + decode_elapsed
+        completion_tokens = 0
+        for t_prompt, out in zip(prompt_lens, outputs):
+            t_out = count_tokens(engine.tokenizer, out)
+            completion_tokens += max(0, t_out - t_prompt)
+        total_tokens = sum(prompt_lens) + completion_tokens
+        results.append(
+            dict(
+                run=i,
+                prefill_elapsed=prefill_elapsed,
+                decode_elapsed=decode_elapsed,
+                elapsed=elapsed,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
+        )
+        if args.print_per_run:
+            report_stats(
+                "offline",
+                engine,
+                prompts,
+                outputs,
+                elapsed,
+                prefill_elapsed=prefill_elapsed,
+                decode_elapsed=decode_elapsed,
+                prompt_lens=prompt_lens,
+            )
+    summarize_runs("offline", results, warmup_runs, repeat_runs)
 
 
 def benchmark_online(
     engine: InferenceEngine,
     prompts: List[str],
+    prompt_lens: List[int],
     args: argparse.Namespace,
 ) -> None:
-    scheduler = OnlineScheduler(
-        engine,
-        max_batch_size=args.max_batch_size,
-        use_prefix_cache=not args.no_prefix_cache,
-    )
-    stop_on_eos = not args.no_stop_on_eos
-    request_ids: List[int] = []
-    maybe_sync_cuda(engine)
-    t0 = time.perf_counter()
-    for p in prompts:
-        rid = scheduler.add_request(
-            p,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature,
-            top_k=args.top_k,
-            top_p=args.top_p,
-            stop_on_eos=stop_on_eos,
-            do_sample=args.do_sample,
+    def run_once() -> tuple[List[str], float, float]:
+        scheduler = OnlineScheduler(
+            engine,
+            max_batch_size=args.max_batch_size,
+            use_prefix_cache=not args.no_prefix_cache,
         )
-        request_ids.append(rid)
-    maybe_sync_cuda(engine)
-    t1 = time.perf_counter()
-    prefill_elapsed = t1 - t0
+        stop_on_eos = not args.no_stop_on_eos
+        request_ids: List[int] = []
+        maybe_sync_cuda(engine)
+        t0 = time.perf_counter()
+        for p in prompts:
+            rid = scheduler.add_request(
+                p,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                stop_on_eos=stop_on_eos,
+                do_sample=args.do_sample,
+            )
+            request_ids.append(rid)
+        maybe_sync_cuda(engine)
+        t1 = time.perf_counter()
+        prefill_elapsed = t1 - t0
 
-    maybe_sync_cuda(engine)
-    t2 = time.perf_counter()
-    prof = None
-    trace_path = None
+        maybe_sync_cuda(engine)
+        t2 = time.perf_counter()
+        while scheduler.has_unfinished():
+            scheduler.step()
+        maybe_sync_cuda(engine)
+        outputs: List[str] = []
+        for rid in request_ids:
+            outputs.append(scheduler.pop_response(rid))
+        t3 = time.perf_counter()
+        decode_elapsed = t3 - t2
+        return outputs, prefill_elapsed, decode_elapsed
+
     if args.profile:
+        scheduler = OnlineScheduler(
+            engine,
+            max_batch_size=args.max_batch_size,
+            use_prefix_cache=not args.no_prefix_cache,
+        )
+        stop_on_eos = not args.no_stop_on_eos
+        request_ids: List[int] = []
+        maybe_sync_cuda(engine)
+        t0 = time.perf_counter()
+        for p in prompts:
+            rid = scheduler.add_request(
+                p,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                stop_on_eos=stop_on_eos,
+                do_sample=args.do_sample,
+            )
+            request_ids.append(rid)
+        maybe_sync_cuda(engine)
+        t1 = time.perf_counter()
+        prefill_elapsed = t1 - t0
+
+        maybe_sync_cuda(engine)
+        t2 = time.perf_counter()
         out_dir = Path(args.profile_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         trace_path = os.fspath(out_dir / "online_decode.json")
@@ -324,29 +512,63 @@ def benchmark_online(
                 scheduler.step()
                 prof.step()
             maybe_sync_cuda(engine)
-    else:
-        while scheduler.has_unfinished():
-            scheduler.step()
-        maybe_sync_cuda(engine)
-
-    outputs: List[str] = []
-    for rid in request_ids:
-        text = scheduler.pop_response(rid)
-        outputs.append(text)
-    t3 = time.perf_counter()
-    decode_elapsed = t3 - t2
-    report_stats(
-        "online",
-        engine,
-        prompts,
-        outputs,
-        prefill_elapsed + decode_elapsed,
-        prefill_elapsed=prefill_elapsed,
-        decode_elapsed=decode_elapsed,
-    )
-    if prof is not None and trace_path is not None:
+        outputs: List[str] = []
+        for rid in request_ids:
+            outputs.append(scheduler.pop_response(rid))
+        t3 = time.perf_counter()
+        decode_elapsed = t3 - t2
+        report_stats(
+            "online",
+            engine,
+            prompts,
+            outputs,
+            prefill_elapsed + decode_elapsed,
+            prefill_elapsed=prefill_elapsed,
+            decode_elapsed=decode_elapsed,
+            prompt_lens=prompt_lens,
+        )
         prof.export_chrome_trace(trace_path)
         print(f"[profile] wrote: {trace_path}")
+        return
+
+    warmup_runs = max(0, int(args.warmup_runs))
+    repeat_runs = max(1, int(args.repeat_runs))
+    for _ in range(warmup_runs):
+        maybe_reset_prefix_cache(engine, args)
+        run_once()
+
+    results: List[dict] = []
+    for i in range(repeat_runs):
+        maybe_reset_prefix_cache(engine, args)
+        outputs, prefill_elapsed, decode_elapsed = run_once()
+        elapsed = prefill_elapsed + decode_elapsed
+        completion_tokens = 0
+        for t_prompt, out in zip(prompt_lens, outputs):
+            t_out = count_tokens(engine.tokenizer, out)
+            completion_tokens += max(0, t_out - t_prompt)
+        total_tokens = sum(prompt_lens) + completion_tokens
+        results.append(
+            dict(
+                run=i,
+                prefill_elapsed=prefill_elapsed,
+                decode_elapsed=decode_elapsed,
+                elapsed=elapsed,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
+        )
+        if args.print_per_run:
+            report_stats(
+                "online",
+                engine,
+                prompts,
+                outputs,
+                elapsed,
+                prefill_elapsed=prefill_elapsed,
+                decode_elapsed=decode_elapsed,
+                prompt_lens=prompt_lens,
+            )
+    summarize_runs("online", results, warmup_runs, repeat_runs)
 
 
 def main() -> None:
@@ -384,13 +606,14 @@ def main() -> None:
         bf16=args.bf16,
         kv_cache_max_concurrency=kv_cache_max_concurrency,
         prefix_cache_max_entries=len(set(prompts)),
+        use_paged_attention=args.paged_attn,
     )
     if args.mode in ("naive", "all"):
-        benchmark_naive(engine, prompts, args)
+        benchmark_naive(engine, prompts, prompt_lens, args)
     if args.mode in ("offline", "all"):
-        benchmark_offline(engine, prompts, args)
+        benchmark_offline(engine, prompts, prompt_lens, args)
     if args.mode in ("online", "all"):
-        benchmark_online(engine, prompts, args)
+        benchmark_online(engine, prompts, prompt_lens, args)
 
 
 if __name__ == "__main__":

@@ -8,10 +8,20 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as ckpt
 
 from rosellm.rosetrainer.config import GPTConfig
+from rosellm.rosetrainer.paged_attention import (
+    TRITON_AVAILABLE,
+    PagedKVCache,
+    paged_attention_decode_ref,
+    paged_attention_decode_triton,
+)
 from rosellm.rosetrainer.tensor_parallel import (
     ColumnParallelLinear,
     RowParallelLinear,
     init_tensor_parallel,
+)
+
+paged_attention_decode = (
+    paged_attention_decode_triton if TRITON_AVAILABLE else paged_attention_decode_ref
 )
 
 
@@ -68,12 +78,43 @@ class MultiHeadSelfAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,  # [B, T]
         past_kv: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         return_kv: bool = False,
+        paged_kv_cache: Optional[PagedKVCache] = None,
+        layer_idx: int = 0,
     ):
         bsz, seq_len, _ = x.size()
         qkv = self.qkv_proj(x)
         qkv = qkv.view(bsz, seq_len, 3, self.local_heads, self.d_head)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # [B, H, T, D]
+        if paged_kv_cache is not None:
+            if past_kv is not None:
+                raise ValueError("past_kv and paged_kv_cache cannot be used together")
+            if seq_len != 1:
+                raise ValueError("paged attention only supports decode(T=1)")
+            out_h = paged_attention_decode(
+                q=q.squeeze(-2),  # [B, H, D]
+                k_new=k.squeeze(-2),  # [B, H, D]
+                v_new=v.squeeze(-2),
+                k_cache_layer=paged_kv_cache.k_cache[layer_idx],
+                v_cache_layer=paged_kv_cache.v_cache[layer_idx],
+                block_table=paged_kv_cache.block_tables[layer_idx],
+                context_lens=paged_kv_cache.context_lens,
+                scale=self.d_head**-0.5,
+                block_size=paged_kv_cache.block_size,
+            )  # [B, H, D]
+            attn_output = out_h.unsqueeze(2)  # [B, H, 1, D]
+            # [B, 1, H, D]
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.view(
+                bsz,
+                seq_len,
+                self.local_heads * self.d_head,
+            )
+            out = self.out_proj(attn_output)
+            out = self.dropout(out)
+            if return_kv:
+                return out, (k, v)
+            return out
         if past_kv is not None:
             past_k, past_v = past_kv
             k = torch.cat([past_k, k], dim=-2)
@@ -152,6 +193,8 @@ class TransformerBlock(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         past_kv: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         return_kv: bool = False,
+        paged_kv_cache: Optional[PagedKVCache] = None,
+        layer_idx: int = 0,
     ):
         if return_kv:
             attn_out, present_kv = self.attn(
@@ -159,6 +202,8 @@ class TransformerBlock(nn.Module):
                 attention_mask=attention_mask,
                 past_kv=past_kv,
                 return_kv=True,
+                paged_kv_cache=paged_kv_cache,
+                layer_idx=layer_idx,
             )
         else:
             attn_out = self.attn(self.ln1(x), attention_mask=attention_mask)
@@ -222,6 +267,7 @@ class GPTModel(nn.Module):
         past_key_values: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None,
         use_cache: bool = False,
         position_ids: Optional[torch.Tensor] = None,
+        paged_kv_cache: Optional[PagedKVCache] = None,
     ):
         bsz, seq_len = input_ids.size()
         device = input_ids.device
@@ -277,6 +323,8 @@ class GPTModel(nn.Module):
                         attention_mask=attention_mask,
                         past_kv=past_kv,
                         return_kv=True,
+                        paged_kv_cache=paged_kv_cache,
+                        layer_idx=layer_idx,
                     )
                     presents.append(present_kv)
                 else:

@@ -30,8 +30,10 @@ class InferenceEngine:
         bf16: bool = False,
         kv_cache_max_concurrency: int = 256,
         prefix_cache_max_entries: int = 256,
+        use_paged_attention: bool = False,
     ) -> None:
         super().__init__()
+        self.use_paged_attention = use_paged_attention
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
@@ -73,6 +75,9 @@ class InferenceEngine:
         max_concurrency = max(1, kv_cache_max_concurrency)
         max_total_tokens = max_context * max_concurrency
         max_blocks_per_layer = (max_total_tokens + block_size - 1) // block_size
+        self.block_size = block_size
+        self.max_context = max_context
+        self.max_blocks_per_seq = (max_context + block_size - 1) // block_size
         self.kv_manager = KVBlockManager(
             num_layers=self.config.n_layers,
             num_heads=self.config.n_heads,
@@ -86,6 +91,8 @@ class InferenceEngine:
             self.kv_manager,
             max_entries=prefix_cache_max_entries,
         )
+        self._paged_block_tables_buf: torch.Tensor | None = None
+        self._paged_block_tables_capacity: int = 0
 
         if self.config.vocab_size < self.tokenizer.vocab_size:
             raise ValueError("the model vocab_size is less than tokenizer vocab_size")
@@ -164,6 +171,18 @@ class InferenceEngine:
         input_ids = self._encode_prompt(prompt)
         input_ids = self._maybe_truncate(input_ids)
         session.input_ids = input_ids
+        max_new_tokens = int(max_new_tokens)
+        if max_new_tokens > 0:
+            available = self.config.max_position_embeddings - input_ids.size(1)
+            if available <= 0:
+                session.finished = True
+                return
+            if max_new_tokens > available:
+                print(
+                    f"[warn] max_new_tokens clamped from {max_new_tokens} to {available} "
+                    f"(max_position_embeddings={self.config.max_position_embeddings})"
+                )
+                max_new_tokens = available
         session.set_generation_config(
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -306,6 +325,13 @@ class InferenceEngine:
         try:
             input_ids = self._encode_prompt(prompt)  # [1, T0]
             input_ids = self._maybe_truncate(input_ids)  # [1, T]
+            max_new_tokens = int(max_new_tokens)
+            if max_new_tokens > 0:
+                available = self.config.max_position_embeddings - input_ids.size(1)
+                if available <= 0:
+                    max_new_tokens = 0
+                elif max_new_tokens > available:
+                    max_new_tokens = available
             logits = session.prefill(input_ids)  # [1, T, V]
             last_logits = logits[:, -1, :]  # [1, V]
             generated_ids = input_ids[0].tolist()
@@ -675,6 +701,27 @@ class InferenceEngine:
         finally:
             session.release_kv_blocks()
 
+    def _get_paged_block_tables_buf(
+        self,
+        batch_size: int,
+    ) -> torch.Tensor:
+        if (
+            self._paged_block_tables_buf is None
+            or self._paged_block_tables_capacity < batch_size
+        ):
+            cap = max(batch_size, self._paged_block_tables_capacity * 2, 16)
+            self._paged_block_tables_buf = torch.empty(
+                (
+                    self.config.n_layers,
+                    cap,
+                    self.max_blocks_per_seq,
+                ),
+                device=self.device,
+                dtype=torch.int32,
+            )
+            self._paged_block_tables_capacity = cap
+        return self._paged_block_tables_buf
+
     @torch.no_grad()
     def decode_step_sessions(
         self,
@@ -723,11 +770,86 @@ class InferenceEngine:
                 [past_mask, new_mask],
                 dim=1,
             ).to(torch.long)
-
-            batched_past = []
             num_layers = kvm.num_layers
             num_heads = kvm.num_heads
             head_dim = kvm.head_dim
+            if self.use_paged_attention:
+                from rosellm.rosetrainer.paged_attention import PagedKVCache
+
+                block_size = kvm.block_size
+                num_blocks_max = self.max_blocks_per_seq
+                max_blocks_per_layer = kvm.max_blocks_per_layer
+                block_tables_buf = self._get_paged_block_tables_buf(batch_size)
+                with record_function(
+                    "roseinfer.decode_step_sessions.build_block_tables",
+                ):
+                    block_tables: list[torch.Tensor] = []
+                    for layer_idx in range(num_layers):
+                        offset = layer_idx * max_blocks_per_layer
+                        rows: list[list[int]] = []
+                        for idx, sess in enumerate(sessions):
+                            ids = sess.block_ids_per_layer[layer_idx]
+                            physical = [gid - offset for gid in ids]
+                            if not physical:
+                                physical = [0]
+                            if len(physical) < num_blocks_max:
+                                physical = physical + [0] * (
+                                    num_blocks_max - len(physical)
+                                )
+                            else:
+                                physical = physical[:num_blocks_max]
+                            rows.append(physical)
+                        cpu_table = torch.tensor(rows, dtype=torch.int32)
+                        block_table = block_tables_buf[layer_idx, :batch_size]
+                        block_table.copy_(cpu_table)
+                        block_tables.append(block_table)
+                paged = PagedKVCache(
+                    k_cache=kvm._k_cache,
+                    v_cache=kvm._v_cache,
+                    block_tables=block_tables,
+                    context_lens=lens.to(torch.int32),
+                    block_size=block_size,
+                )
+                with record_function(
+                    "roseinfer.model.forward",
+                ):
+                    if self.use_amp:
+                        with autocast(device_type=device.type, dtype=self.amp_dtype):
+                            logits, _, presents = self.model(
+                                input_ids=input_ids,
+                                attention_mask=None,
+                                labels=None,
+                                past_key_values=None,
+                                use_cache=True,
+                                position_ids=position_ids,
+                                paged_kv_cache=paged,
+                            )
+                    else:
+                        logits, _, presents = self.model(
+                            input_ids=input_ids,
+                            attention_mask=None,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=True,
+                            position_ids=position_ids,
+                            paged_kv_cache=paged,
+                        )
+                last_logits = logits[:, -1, :]  # [B, V]
+                with record_function("roseinfer.kv.append_token"):
+                    for layer_idx in range(num_layers):
+                        k_step, v_step = presents[layer_idx]  # [B, H, 1, D]
+                        k_step = k_step.squeeze(2)  # [B, H, D]
+                        v_step = v_step.squeeze(2)
+                        for idx, sess in enumerate(sessions):
+                            kvm.append_token(
+                                layer_idx,
+                                sess.block_ids_per_layer[layer_idx],
+                                k_step[idx],
+                                v_step[idx],
+                            )
+                return last_logits
+
+            batched_past = []
             with record_function("roseinfer.decode_step_sessions.build_batched_past"):
                 for layer_idx in range(num_layers):
                     k_cat = torch.zeros(
@@ -1083,7 +1205,7 @@ class PrefixCache:
         self._entries: OrderedDict[str, PrefixCacheEntry] = OrderedDict()
 
     def _release_entry(self, entry: PrefixCacheEntry) -> None:
-        for layer_idx, block_ids in enumerate(entry.block_ids_per_layer):
+        for layer_idx, block_ids in enumerate(entry.blocks_ids_per_layer):
             if block_ids:
                 self.kv_manager.free_blocks(layer_idx, block_ids)
 
@@ -1092,6 +1214,11 @@ class PrefixCache:
             return
         _, entry = self._entries.popitem(last=False)
         self._release_entry(entry)
+
+    def clear(self) -> None:
+        while self._entries:
+            _, entry = self._entries.popitem(last=False)
+            self._release_entry(entry)
 
     def get(self, prompt: str) -> PrefixCacheEntry | None:
         return self._entries.get(prompt)
