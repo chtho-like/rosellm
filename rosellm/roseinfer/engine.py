@@ -1,4 +1,4 @@
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from typing import Iterator, NamedTuple, Optional
 
 import torch
@@ -1392,7 +1392,7 @@ class OnlineScheduler:
         self.use_prefix_cache = use_prefix_cache
         self._sessions: dict[int, InferenceSession] = {}
         self._next_request_id: int = 0
-        self._round_robin_pos: int = 0
+        self._active_rids: deque[int] = deque()
         self._finished_ids: list[int] = []
 
     @torch.no_grad()
@@ -1425,30 +1425,45 @@ class OnlineScheduler:
         request_id = self._next_request_id
         self._next_request_id += 1
         self._sessions[request_id] = session
+        if not session.finished:
+            self._active_rids.append(request_id)
         return request_id
 
     def has_unfinished(self) -> bool:
-        return any(not sess.finished for sess in self._sessions.values())
+        while self._active_rids:
+            rid = self._active_rids[0]
+            sess = self._sessions.get(rid)
+            if sess is None or sess.finished:
+                self._active_rids.popleft()
+                continue
+            return True
+        return False
 
     def is_finished(self, request_id: int) -> bool:
-        session = self._sessions.get(request_id, None)
+        session = self._sessions.get(request_id)
+        if session is None:
+            return True
         return session.finished
 
     @torch.no_grad()
     def step(self) -> dict[int, int]:
-        active_pairs: list[tuple[int, InferenceSession]] = [
-            (rid, sess) for rid, sess in self._sessions.items() if not sess.finished
-        ]
-        if not active_pairs:
+        if not self._active_rids:
             return {}
-        num_active = len(active_pairs)
-        batch_size = min(self.max_batch_size, num_active)
-        start = self._round_robin_pos % num_active
         selected_pairs: list[tuple[int, InferenceSession]] = []
-        for i in range(batch_size):
-            idx = (start + i) % num_active
-            selected_pairs.append(active_pairs[idx])
-        self._round_robin_pos = (start + batch_size) % num_active
+        max_examine = len(self._active_rids)
+        while (
+            len(selected_pairs) < self.max_batch_size
+            and self._active_rids
+            and max_examine > 0
+        ):
+            max_examine -= 1
+            rid = self._active_rids.popleft()
+            sess = self._sessions.get(rid)
+            if sess is None or sess.finished:
+                continue
+            selected_pairs.append((rid, sess))
+        if not selected_pairs:
+            return {}
         sessions = [sess for _, sess in selected_pairs]
         last_logits = self.engine.decode_step_sessions(sessions)
         step_tokens: dict[int, int] = {}
@@ -1461,6 +1476,8 @@ class OnlineScheduler:
                 if sess.finished:
                     just_finished.append(rid)
                     sess.release_kv_blocks()
+                else:
+                    self._active_rids.append(rid)
         if just_finished:
             self._finished_ids.extend(just_finished)
         return step_tokens
@@ -1482,6 +1499,7 @@ class OnlineScheduler:
         session = self._sessions.pop(request_id, None)
         if session is not None:
             session.release_kv_blocks()
+
 
 class KVBlockInfo(NamedTuple):
     layer: int
