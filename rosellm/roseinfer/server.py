@@ -113,6 +113,23 @@ class SchedulerManager:
         )
         self._worker.start()
 
+    def close(self) -> None:
+        worker = self._worker
+        with self._lock:
+            if not self._running:
+                return
+            self._running = False
+            self._wakeup.set()
+            request_ids = list(self._queues.keys())
+            for rid in request_ids:
+                q = self._queues.get(rid)
+                if q is not None:
+                    q.put(None)
+                self.scheduler.discard_request(rid)
+            self._queues.clear()
+            self._detoks.clear()
+        worker.join(timeout=1.0)
+
     def add_request(
         self,
         prompt: str,
@@ -176,8 +193,10 @@ class SchedulerManager:
                 self.scheduler.discard_request(request_id)
 
     def _worker_loop(self) -> None:
-        while self._running:
+        while True:
             with self._lock:
+                if not self._running:
+                    break
                 has_work = self.scheduler.has_unfinished()
                 if has_work:
                     step_tokens = self.scheduler.step()
@@ -244,6 +263,7 @@ def estimate_usage(
 def create_app(engine: InferenceEngine) -> FastAPI:
     app = FastAPI(title="roseinfer", version="0.1.0")
     sched_manager = SchedulerManager(engine, max_batch_size=8)
+    app.add_event_handler("shutdown", sched_manager.close)
 
     @app.get("/health")
     def health() -> dict[str, str]:
