@@ -156,12 +156,21 @@ class SchedulerManager:
         return request_id
 
     def stream_text(self, request_id: int) -> Iterator[str]:
-        q = self._queues[request_id]
-        while True:
-            piece = q.get()
-            if piece is None:
-                break
-            yield piece
+        with self._lock:
+            q = self._queues.get(request_id)
+        if q is None:
+            return
+        try:
+            while True:
+                piece = q.get()
+                if piece is None:
+                    break
+                yield piece
+        finally:
+            with self._lock:
+                self._queues.pop(request_id, None)
+                self._detoks.pop(request_id, None)
+                self.scheduler.discard_request(request_id)
 
     def _worker_loop(self) -> None:
         while self._running:
@@ -169,8 +178,10 @@ class SchedulerManager:
                 has_work = self.scheduler.has_unfinished()
                 if has_work:
                     step_tokens = self.scheduler.step()
+                    finished_ids = self.scheduler.pop_finished_ids()
                 else:
                     step_tokens = {}
+                    finished_ids = []
             if not has_work:
                 time.sleep(0.005)
                 continue
@@ -182,14 +193,11 @@ class SchedulerManager:
                 piece = detok.on_token(int(token_id))
                 if piece:
                     q.put(piece)
-            finished_ids: list[int] = []
-            with self._lock:
-                for rid in list(self._queues.keys()):
-                    if self.scheduler.is_finished(rid):
-                        finished_ids.append(rid)
             for rid in finished_ids:
-                detok = self._detoks.pop(rid, None)
-                q = self._queues.pop(rid, None)
+                with self._lock:
+                    detok = self._detoks.pop(rid, None)
+                    q = self._queues.get(rid)
+                    self.scheduler.discard_request(rid)
                 if q is None:
                     continue
                 if detok is not None:

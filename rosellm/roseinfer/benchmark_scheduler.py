@@ -245,6 +245,13 @@ def summarize_runs(
     total_times = [r["elapsed"] for r in results]
     tps_decode = [r["completion_tokens"] / r["decode_elapsed"] for r in results]
     tps_total = [r["completion_tokens"] / r["elapsed"] for r in results]
+    has_latency_metrics = all(
+        k in results[0] for k in ("ttft_p50", "tpot_p50", "total_p50")
+    )
+    if has_latency_metrics:
+        ttft_p50s = [r["ttft_p50"] for r in results]
+        tpot_p50s = [r["tpot_p50"] for r in results]
+        total_p50s = [r["total_p50"] for r in results]
     print(f"=== {mode} summary ===")
     print(f"Warmup runs: {warmup_runs}")
     print(f"Measured runs: {repeat_runs}")
@@ -268,6 +275,22 @@ def summarize_runs(
         f"{statistics.median(tps_total):.2f}/"
         f"{statistics.mean(tps_total):.2f} tokens/s"
     )
+    if has_latency_metrics:
+        print(
+            f"TTFT p50/mean: "
+            f"{statistics.median(ttft_p50s)*1e3:.2f}/"
+            f"{statistics.mean(ttft_p50s)*1e3:.2f} ms"
+        )
+        print(
+            f"TPOT p50/mean: "
+            f"{statistics.median(tpot_p50s)*1e3:.2f}/"
+            f"{statistics.mean(tpot_p50s)*1e3:.2f} ms/token"
+        )
+        print(
+            f"Latency p50/mean: "
+            f"{statistics.median(total_p50s)*1e3:.2f}/"
+            f"{statistics.mean(total_p50s)*1e3:.2f} ms"
+        )
     print()
 
 
@@ -441,17 +464,31 @@ def benchmark_online(
     prompt_lens: List[int],
     args: argparse.Namespace,
 ) -> None:
-    def run_once() -> tuple[List[str], float, float]:
+    def run_once() -> tuple[
+        List[str],
+        float,
+        float,
+        List[int],
+        dict[int, float],
+        dict[int, float],
+        dict[int, float],
+        dict[int, int],
+    ]:
         scheduler = OnlineScheduler(
             engine,
             max_batch_size=args.max_batch_size,
             use_prefix_cache=not args.no_prefix_cache,
         )
+        submit_ts: dict[int, float] = {}
+        first_ts: dict[int, float] = {}
+        finish_ts: dict[int, float] = {}
+        out_tokens_by_id: dict[int, int] = {}
         stop_on_eos = not args.no_stop_on_eos
         request_ids: List[int] = []
         maybe_sync_cuda(engine)
         t0 = time.perf_counter()
         for p in prompts:
+            submit = time.perf_counter()
             rid = scheduler.add_request(
                 p,
                 max_new_tokens=args.max_new_tokens,
@@ -461,7 +498,12 @@ def benchmark_online(
                 stop_on_eos=stop_on_eos,
                 do_sample=args.do_sample,
             )
+            submit_ts[rid] = submit
+            first = time.perf_counter()
+            first_ts[rid] = first
             request_ids.append(rid)
+            if scheduler.is_finished(rid):
+                finish_ts[rid] = first
         maybe_sync_cuda(engine)
         t1 = time.perf_counter()
         prefill_elapsed = t1 - t0
@@ -470,13 +512,32 @@ def benchmark_online(
         t2 = time.perf_counter()
         while scheduler.has_unfinished():
             scheduler.step()
+            now = time.perf_counter()
+            for rid in scheduler.pop_finished_ids():
+                finish_ts[rid] = now
+        for rid in request_ids:
+            if rid not in finish_ts and scheduler.is_finished(rid):
+                finish_ts[rid] = time.perf_counter()
         maybe_sync_cuda(engine)
         outputs: List[str] = []
+        for rid in request_ids:
+            sess = scheduler._sessions.get(rid)
+            if sess is not None:
+                out_tokens_by_id[rid] = sess.step_count
         for rid in request_ids:
             outputs.append(scheduler.pop_response(rid))
         t3 = time.perf_counter()
         decode_elapsed = t3 - t2
-        return outputs, prefill_elapsed, decode_elapsed
+        return (
+            outputs,
+            prefill_elapsed,
+            decode_elapsed,
+            request_ids,
+            submit_ts,
+            first_ts,
+            finish_ts,
+            out_tokens_by_id,
+        )
 
     if args.profile:
         scheduler = OnlineScheduler(
@@ -545,13 +606,38 @@ def benchmark_online(
     results: List[dict] = []
     for i in range(repeat_runs):
         maybe_reset_prefix_cache(engine, args)
-        outputs, prefill_elapsed, decode_elapsed = run_once()
+        (
+            outputs,
+            prefill_elapsed,
+            decode_elapsed,
+            request_ids,
+            submit_ts,
+            first_ts,
+            finish_ts,
+            out_tokens_by_id,
+        ) = run_once()
         elapsed = prefill_elapsed + decode_elapsed
         completion_tokens = 0
         for t_prompt, out in zip(prompt_lens, outputs):
             t_out = count_tokens(engine.tokenizer, out)
             completion_tokens += max(0, t_out - t_prompt)
         total_tokens = sum(prompt_lens) + completion_tokens
+        ttfts = []
+        tpots = []
+        totals = []
+        for rid in request_ids:
+            ttft = first_ts[rid] - submit_ts[rid]
+            total = finish_ts[rid] - submit_ts[rid]
+            decode = finish_ts[rid] - first_ts[rid]
+            out_tokens = out_tokens_by_id.get(rid, 0)
+            denom = max(1, out_tokens - 1)
+            tpot = decode / denom
+            ttfts.append(ttft)
+            tpots.append(tpot)
+            totals.append(total)
+        ttft_p50 = statistics.median(ttfts)
+        tpot_p50 = statistics.median(tpots)
+        total_p50 = statistics.median(totals)
         results.append(
             dict(
                 run=i,
@@ -560,6 +646,9 @@ def benchmark_online(
                 elapsed=elapsed,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
+                ttft_p50=ttft_p50,
+                tpot_p50=tpot_p50,
+                total_p50=total_p50,
             )
         )
         if args.print_per_run:
@@ -621,7 +710,9 @@ def main() -> None:
         )
     else:
         if args.tokenizer_name is None:
-            raise SystemExit("--tokenizer-name is required when using --checkpoint-path")
+            raise SystemExit(
+                "--tokenizer-name is required when using --checkpoint-path"
+            )
         tokenizer = build_tokenizer(args.tokenizer_name)
         prompt_lens = [count_tokens(tokenizer, p) for p in prompts]
         blocks_per_request = [

@@ -1393,6 +1393,7 @@ class OnlineScheduler:
         self._sessions: dict[int, InferenceSession] = {}
         self._next_request_id: int = 0
         self._round_robin_pos: int = 0
+        self._finished_ids: list[int] = []
 
     @torch.no_grad()
     def add_request(
@@ -1451,14 +1452,22 @@ class OnlineScheduler:
         sessions = [sess for _, sess in selected_pairs]
         last_logits = self.engine.decode_step_sessions(sessions)
         step_tokens: dict[int, int] = {}
+        just_finished: list[int] = []
         for idx, (rid, sess) in enumerate(selected_pairs):
             logits_row = last_logits[idx]
             token_id = sess.apply_batch_logits(logits_row)
             if token_id is not None:
                 step_tokens[rid] = token_id
                 if sess.finished:
+                    just_finished.append(rid)
                     sess.release_kv_blocks()
+        if just_finished:
+            self._finished_ids.extend(just_finished)
         return step_tokens
+
+    def pop_finished_ids(self) -> list[int]:
+        ids, self._finished_ids = self._finished_ids, []
+        return ids
 
     def get_response(self, request_id: int) -> str:
         session = self._sessions[request_id]
@@ -1469,6 +1478,10 @@ class OnlineScheduler:
         session.release_kv_blocks()
         return session.decode_text()
 
+    def discard_request(self, request_id: int) -> None:
+        session = self._sessions.pop(request_id, None)
+        if session is not None:
+            session.release_kv_blocks()
 
 class KVBlockInfo(NamedTuple):
     layer: int
