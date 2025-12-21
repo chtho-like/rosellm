@@ -1445,6 +1445,18 @@ class OnlineScheduler:
             return True
         return session.finished
 
+    def get_generated_ids(self, request_id: int) -> list[int]:
+        session = self._sessions.get(request_id)
+        if session is None:
+            return []
+        return list(session.generated_ids)
+
+    def get_step_count(self, request_id: int) -> int:
+        session = self._sessions.get(request_id)
+        if session is None:
+            return 0
+        return int(session.step_count)
+
     @torch.no_grad()
     def step(self) -> dict[int, int]:
         if not self._active_rids:

@@ -161,12 +161,11 @@ class SchedulerManager:
             q: "queue.Queue[Optional[str]]" = queue.Queue()
             self._queues[request_id] = q
             self._detoks[request_id] = detok
-            session = self.scheduler._sessions[request_id]
-            for tid in session.generated_ids:
+            for tid in self.scheduler.get_generated_ids(request_id):
                 piece = detok.on_token(int(tid))
                 if piece:
                     q.put(piece)
-            if session.finished:
+            if self.scheduler.is_finished(request_id):
                 tail = detok.flush()
                 if tail:
                     q.put(tail)

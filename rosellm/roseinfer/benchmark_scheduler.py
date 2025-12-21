@@ -464,16 +464,18 @@ def benchmark_online(
     prompt_lens: List[int],
     args: argparse.Namespace,
 ) -> None:
-    def run_once() -> tuple[
-        List[str],
-        float,
-        float,
-        List[int],
-        dict[int, float],
-        dict[int, float],
-        dict[int, float],
-        dict[int, int],
-    ]:
+    def run_once() -> (
+        tuple[
+            List[str],
+            float,
+            float,
+            List[int],
+            dict[int, float],
+            dict[int, float],
+            dict[int, float],
+            dict[int, int],
+        ]
+    ):
         scheduler = OnlineScheduler(
             engine,
             max_batch_size=args.max_batch_size,
@@ -521,9 +523,7 @@ def benchmark_online(
         maybe_sync_cuda(engine)
         outputs: List[str] = []
         for rid in request_ids:
-            sess = scheduler._sessions.get(rid)
-            if sess is not None:
-                out_tokens_by_id[rid] = sess.step_count
+            out_tokens_by_id[rid] = scheduler.get_step_count(rid)
         for rid in request_ids:
             outputs.append(scheduler.pop_response(rid))
         t3 = time.perf_counter()
