@@ -22,7 +22,7 @@ except ImportError:
 class InferenceEngine:
     def __init__(
         self,
-        checkpoint_path: str,
+        checkpoint_path: str | None = None,
         tokenizer_name: str = "gpt2",
         device: Optional[str] = None,
         use_amp: bool = True,
@@ -31,6 +31,9 @@ class InferenceEngine:
         kv_cache_max_concurrency: int = 256,
         prefix_cache_max_entries: int = 256,
         use_paged_attention: bool = False,
+        model: GPTModel | None = None,
+        config: GPTConfig | None = None,
+        tokenizer=None,
     ) -> None:
         super().__init__()
         self.use_paged_attention = use_paged_attention
@@ -45,24 +48,54 @@ class InferenceEngine:
                 self.amp_dtype = torch.float16
         else:
             self.amp_dtype = None
-        ckpt = torch.load(checkpoint_path, map_location=self.device.type)
-        cfg_dict = ckpt.get("config")
-        if cfg_dict is None:
-            print("cannot find config from checkpoints, use GPTConfig")
-            config = GPTConfig()
+        if model is None:
+            if checkpoint_path is None:
+                raise ValueError("checkpoint_path must be provided when model is None")
+            ckpt = torch.load(checkpoint_path, map_location=self.device.type)
+            cfg_dict = ckpt.get("config")
+            if cfg_dict is None:
+                print("cannot find config from checkpoints, use GPTConfig")
+                config = GPTConfig()
+            else:
+                config = GPTConfig(**cfg_dict)
+            if max_position_embeddings is not None:
+                if max_position_embeddings > config.max_position_embeddings:
+                    raise ValueError(
+                        "max_position_embeddings cannot exceed model max_position_embeddings "
+                        f"({max_position_embeddings} > {config.max_position_embeddings})"
+                    )
+                config.max_position_embeddings = max_position_embeddings
+            self.config = config
+            self.model = GPTModel(config).to(self.device)
+            self.model.load_state_dict(ckpt["model"])
         else:
-            config = GPTConfig(**cfg_dict)
-        if max_position_embeddings is not None:
-            config.max_position_embeddings = max_position_embeddings
-        self.config = config
-        self.model = GPTModel(config).to(self.device)
-        self.model.load_state_dict(ckpt["model"])
+            if config is None:
+                raise ValueError("config must be provided when model is not None")
+            if max_position_embeddings is not None:
+                if max_position_embeddings > config.max_position_embeddings:
+                    raise ValueError(
+                        "max_position_embeddings cannot exceed model max_position_embeddings "
+                        f"({max_position_embeddings} > {config.max_position_embeddings})"
+                    )
+                config.max_position_embeddings = max_position_embeddings
+            self.config = config
+            self.model = model.to(self.device)
         self.model.eval()
-        self.tokenizer = build_tokenizer(tokenizer_name)
+        if tokenizer is None:
+            self.tokenizer = build_tokenizer(tokenizer_name)
+        else:
+            self.tokenizer = tokenizer
         self.eos_token_id = self.tokenizer.eos_token_id
 
         def make_detok() -> BaseDetokenizer:
-            if tokenizer_name.startswith("gpt2") and tiktoken is not None:
+            tok_name = tokenizer_name
+            if tok_name is None:
+                tok_name = getattr(self.tokenizer, "name_or_path", "")
+            if (
+                isinstance(tok_name, str)
+                and tok_name.startswith("gpt2")
+                and tiktoken is not None
+            ):
                 try:
                     return GPT2ByteDetokenizer(self.tokenizer)
                 except Exception as e:
@@ -78,6 +111,7 @@ class InferenceEngine:
         self.block_size = block_size
         self.max_context = max_context
         self.max_blocks_per_seq = (max_context + block_size - 1) // block_size
+        model_dtype = next(self.model.parameters()).dtype
         self.kv_manager = KVBlockManager(
             num_layers=self.config.n_layers,
             num_heads=self.config.n_heads,
@@ -85,7 +119,7 @@ class InferenceEngine:
             block_size=block_size,
             max_blocks_per_layer=max_blocks_per_layer,
             device=self.device,
-            dtype=self.amp_dtype if self.use_amp else self.model.dtype,
+            dtype=self.amp_dtype if self.use_amp else model_dtype,
         )
         self.prefix_cache = PrefixCache(
             self.kv_manager,

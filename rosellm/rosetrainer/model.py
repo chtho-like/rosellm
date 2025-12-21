@@ -147,6 +147,12 @@ class MultiHeadSelfAttention(nn.Module):
         return out
 
 
+def gelu_new(x: torch.Tensor) -> torch.Tensor:
+    return (
+        0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * x**3)))
+    )
+
+
 class FeedForward(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
@@ -170,10 +176,14 @@ class FeedForward(nn.Module):
             self.fc2 = nn.Linear(config.d_ff, config.d_model)
         self.fc2.gpt2_residual = True
         self.dropout = nn.Dropout(config.dropout)
+        self.activation = getattr(config, "activation", "gelu")
 
     def forward(self, x: torch.Tensor):
         x = self.fc1(x)
-        x = F.gelu(x)
+        if self.activation == "gelu_new":
+            x = gelu_new(x)
+        else:
+            x = F.gelu(x)
         x = self.fc2(x)
         x = self.dropout(x)
         return x

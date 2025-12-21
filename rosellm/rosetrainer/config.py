@@ -10,5 +10,6 @@ class GPTConfig:
     d_model: int = 768
     d_ff: int = 3072
     dropout: float = 0.1
+    activation: str = "gelu"
     use_tensor_parallel: bool = False
     use_activation_checkpoint: bool = False

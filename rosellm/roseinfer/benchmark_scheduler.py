@@ -10,6 +10,7 @@ import torch
 from torch.profiler import ProfilerActivity, profile, schedule
 
 from rosellm.rosetrainer.dataset import build_tokenizer
+from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
 
 from .engine import InferenceEngine, OfflineScheduler, OnlineScheduler
 
@@ -19,15 +20,19 @@ def parse_args() -> argparse.Namespace:
         description="Benchmark the scheduler",
     )
     parser.add_argument(
+        "--hf-model-id",
+        type=str,
+        help="HF model ID",
+    )
+    parser.add_argument(
         "--checkpoint-path",
         type=str,
-        required=True,
+        default=None,
         help="Path to checkpoint file",
     )
     parser.add_argument(
         "--tokenizer-name",
         type=str,
-        required=True,
         help="Tokenizer name",
     )
     parser.add_argument(
@@ -573,41 +578,83 @@ def benchmark_online(
 
 def main() -> None:
     args = parse_args()
+    if args.hf_model_id is None and args.checkpoint_path is None:
+        raise SystemExit("either --hf-model-id or --checkpoint-path must be provided")
     prompts = build_prompts(args)
     block_size = 64
-    tokenizer = build_tokenizer(args.tokenizer_name)
-    prompt_lens = [count_tokens(tokenizer, p) for p in prompts]
-    blocks_per_request = [
-        math.ceil((l + args.max_new_tokens) / block_size) for l in prompt_lens
-    ]
-    required_blocks_per_layer = sum(blocks_per_request)
-    if not args.no_prefix_cache and args.max_new_tokens > 0:
-        unique_prompt_lens = {p: count_tokens(tokenizer, p) for p in set(prompts)}
-        prefix_extra_blocks = sum(
-            1 for l in unique_prompt_lens.values() if (l % block_size) != 0
+    if args.hf_model_id is not None:
+        if args.device == "cuda":
+            dtype = torch.bfloat16 if args.bf16 else torch.float16
+        else:
+            dtype = torch.float32
+        model, cfg, tokenizer = load_gpt2_from_hf_pretrained(
+            args.hf_model_id,
+            device=torch.device(args.device),
+            dtype=dtype,
         )
-        required_blocks_per_layer += prefix_extra_blocks
-    ckpt = torch.load(
-        args.checkpoint_path,
-        map_location="meta",
-        weights_only=True,
-    )
-    cfg_dict = ckpt.get("config") or {}
-    max_context = int(cfg_dict.get("max_position_embeddings", 1024))
-    kv_cache_max_concurrency = max(
-        1,
-        math.ceil(required_blocks_per_layer * block_size / max_context),
-    )
-    engine = InferenceEngine(
-        checkpoint_path=args.checkpoint_path,
-        tokenizer_name=args.tokenizer_name,
-        device=args.device,
-        use_amp=not args.no_amp,
-        bf16=args.bf16,
-        kv_cache_max_concurrency=kv_cache_max_concurrency,
-        prefix_cache_max_entries=len(set(prompts)),
-        use_paged_attention=args.paged_attn,
-    )
+        prompt_lens = [count_tokens(tokenizer, p) for p in prompts]
+        blocks_per_request = [
+            math.ceil((l + args.max_new_tokens) / block_size) for l in prompt_lens
+        ]
+        required_blocks_per_layer = sum(blocks_per_request)
+        if not args.no_prefix_cache and args.max_new_tokens > 0:
+            unique_prompt_lens = {p: count_tokens(tokenizer, p) for p in set(prompts)}
+            prefix_extra_blocks = sum(
+                1 for l in unique_prompt_lens.values() if (l % block_size) != 0
+            )
+            required_blocks_per_layer += prefix_extra_blocks
+        max_context = cfg.max_position_embeddings
+        kv_cache_max_concurrency = max(
+            1,
+            math.ceil(required_blocks_per_layer * block_size / max_context),
+        )
+        engine = InferenceEngine(
+            model=model,
+            config=cfg,
+            tokenizer=tokenizer,
+            device=args.device,
+            use_amp=not args.no_amp,
+            bf16=args.bf16,
+            kv_cache_max_concurrency=kv_cache_max_concurrency,
+            prefix_cache_max_entries=len(set(prompts)),
+            use_paged_attention=args.paged_attn,
+        )
+    else:
+        if args.tokenizer_name is None:
+            raise SystemExit("--tokenizer-name is required when using --checkpoint-path")
+        tokenizer = build_tokenizer(args.tokenizer_name)
+        prompt_lens = [count_tokens(tokenizer, p) for p in prompts]
+        blocks_per_request = [
+            math.ceil((l + args.max_new_tokens) / block_size) for l in prompt_lens
+        ]
+        required_blocks_per_layer = sum(blocks_per_request)
+        if not args.no_prefix_cache and args.max_new_tokens > 0:
+            unique_prompt_lens = {p: count_tokens(tokenizer, p) for p in set(prompts)}
+            prefix_extra_blocks = sum(
+                1 for l in unique_prompt_lens.values() if (l % block_size) != 0
+            )
+            required_blocks_per_layer += prefix_extra_blocks
+        ckpt = torch.load(
+            args.checkpoint_path,
+            map_location="meta",
+            weights_only=True,
+        )
+        cfg_dict = ckpt.get("config") or {}
+        max_context = int(cfg_dict.get("max_position_embeddings", 1024))
+        kv_cache_max_concurrency = max(
+            1,
+            math.ceil(required_blocks_per_layer * block_size / max_context),
+        )
+        engine = InferenceEngine(
+            checkpoint_path=args.checkpoint_path,
+            tokenizer_name=args.tokenizer_name,
+            device=args.device,
+            use_amp=not args.no_amp,
+            bf16=args.bf16,
+            kv_cache_max_concurrency=kv_cache_max_concurrency,
+            prefix_cache_max_entries=len(set(prompts)),
+            use_paged_attention=args.paged_attn,
+        )
     if args.mode in ("naive", "all"):
         benchmark_naive(engine, prompts, prompt_lens, args)
     if args.mode in ("offline", "all"):
