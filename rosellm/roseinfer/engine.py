@@ -1574,21 +1574,6 @@ class OnlineScheduler:
     ) -> list[int]:
         if not requests:
             return []
-        if self.use_prefix_cache:
-            return [
-                self.add_request(
-                    prompt=req.prompt,
-                    max_new_tokens=req.max_new_tokens,
-                    temperature=req.temperature,
-                    top_k=req.top_k,
-                    top_p=req.top_p,
-                    stop_on_eos=req.stop_on_eos,
-                    do_sample=req.do_sample,
-                    prompt_token_ids=req.prompt_token_ids,
-                    request_id=req.request_id,
-                )
-                for req in requests
-            ]
 
         eng = self.engine
         eng.model.eval()
@@ -1616,7 +1601,12 @@ class OnlineScheduler:
 
         sessions: list[InferenceSession] = []
         token_ids_list: list[list[int]] = []
-        for req in requests:
+        last_logits_per_req: list[torch.Tensor | None] = [None for _ in requests]
+        miss_idx: list[int] = []
+        dup_of: dict[int, int] = {}
+        first_idx_for_prompt: dict[str, int] = {}
+
+        for i, req in enumerate(requests):
             rid = alloc_rid(req.request_id)
             rids.append(rid)
 
@@ -1656,37 +1646,84 @@ class OnlineScheduler:
             )
             sessions.append(sess)
 
-        batch_idx = [i for i, s in enumerate(sessions) if not s.finished]
-        if batch_idx:
-            batch_token_ids = [token_ids_list[i] for i in batch_idx]
+            if self.use_prefix_cache:
+                src = first_idx_for_prompt.get(req.prompt)
+                if src is not None:
+                    dup_of[i] = src
+                    continue
+                first_idx_for_prompt[req.prompt] = i
+
+                cached_logits = eng.prefix_cache.attach(req.prompt, sess)
+                if cached_logits is not None:
+                    last_logits_per_req[i] = cached_logits
+                    continue
+
+            miss_idx.append(i)
+
+        if miss_idx:
+            batch_token_ids = [token_ids_list[i] for i in miss_idx]
             input_ids, attn_mask, lengths, _ = eng._encode_prompt_token_ids_batch(
                 batch_token_ids
             )
-            batch_sessions = [sessions[i] for i in batch_idx]
+            batch_sessions = [sessions[i] for i in miss_idx]
             last_logits = eng._prefill_register_kv_batch(
                 sessions=batch_sessions,
                 input_ids=input_ids,
                 attention_mask=attn_mask,
                 lengths=lengths,
             )
-            for b, sess in enumerate(batch_sessions):
-                token_id = eng._sample_next_token(
-                    logits=last_logits[b : b + 1],
-                    temperature=sess.temperature,
-                    top_k=sess.top_k,
-                    top_p=sess.top_p,
-                    do_sample=sess.do_sample,
-                )
-                sess.generated_ids.append(int(token_id))
-                sess.step_count = 1
-                if sess.stop_on_eos:
-                    eos_id = eng.eos_token_id
-                    if eos_id is not None and int(token_id) == eos_id:
-                        sess.finished = True
-                if sess.max_new_tokens > 0 and sess.step_count >= sess.max_new_tokens:
-                    sess.finished = True
+            for b, idx in enumerate(miss_idx):
+                logits = last_logits[b : b + 1]
+                last_logits_per_req[idx] = logits
+                if self.use_prefix_cache:
+                    eng.prefix_cache.put(
+                        requests[idx].prompt,
+                        sessions[idx],
+                        logits,
+                    )
+
+        if dup_of:
+            kvm = eng.kv_manager
+            for idx, src in dup_of.items():
+                sess = sessions[idx]
                 if sess.finished:
-                    sess.release_kv_blocks()
+                    continue
+                src_sess = sessions[src]
+                if src_sess.finished:
+                    sess.finished = True
+                    continue
+                sess.prompt_length = src_sess.prompt_length
+                sess.block_ids_per_layer = [[] for _ in range(kvm.num_layers)]
+                for layer_idx, block_ids in enumerate(src_sess.block_ids_per_layer):
+                    if not block_ids:
+                        continue
+                    kvm.incref_blocks(block_ids)
+                    sess.block_ids_per_layer[layer_idx] = list(block_ids)
+                last_logits_per_req[idx] = last_logits_per_req[src]
+
+        for idx, sess in enumerate(sessions):
+            if sess.finished:
+                continue
+            logits = last_logits_per_req[idx]
+            if logits is None:
+                raise RuntimeError(f"missing prefill logits for request {rids[idx]}")
+            token_id = eng._sample_next_token(
+                logits=logits,
+                temperature=sess.temperature,
+                top_k=sess.top_k,
+                top_p=sess.top_p,
+                do_sample=sess.do_sample,
+            )
+            sess.generated_ids.append(int(token_id))
+            sess.step_count = 1
+            if sess.stop_on_eos:
+                eos_id = eng.eos_token_id
+                if eos_id is not None and int(token_id) == eos_id:
+                    sess.finished = True
+            if sess.max_new_tokens > 0 and sess.step_count >= sess.max_new_tokens:
+                sess.finished = True
+            if sess.finished:
+                sess.release_kv_blocks()
 
         for rid, sess in zip(rids, sessions):
             self._sessions[rid] = sess

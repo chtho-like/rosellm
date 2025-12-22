@@ -23,6 +23,7 @@ class StreamResult:
     finish_ts: float
     completion_text: str
     completion_tokens: int
+    token_timestamps: list[float]
 
 
 def parse_args() -> argparse.Namespace:
@@ -178,7 +179,11 @@ def main() -> None:
         kv_cache_max_concurrency=kv_cache_max_concurrency,
         prefix_cache_max_entries=len(set(prompts)),
     )
-    mgr = SchedulerManager(engine, max_batch_size=int(args.max_batch_size))
+    mgr = SchedulerManager(
+        engine,
+        max_batch_size=int(args.max_batch_size),
+        record_token_timestamps=True,
+    )
     if args.no_prefix_cache:
         mgr.scheduler.use_prefix_cache = False
 
@@ -194,14 +199,15 @@ def main() -> None:
         first_token_ts: float | None = None
         pieces: list[str] = []
         for piece in mgr.stream_text(request_id):
-            if first_token_ts is None:
-                first_token_ts = time.perf_counter()
             pieces.append(piece)
         finish_ts = time.perf_counter()
+        token_ts = mgr.pop_token_timestamps(request_id)
+        if token_ts:
+            first_token_ts = token_ts[0]
         if first_token_ts is None:
             first_token_ts = finish_ts
         completion_text = "".join(pieces)
-        completion_tokens = count_tokens(engine.tokenizer, completion_text)
+        completion_tokens = len(token_ts)
         with results_lock:
             results.append(
                 StreamResult(
@@ -212,6 +218,7 @@ def main() -> None:
                     finish_ts=finish_ts,
                     completion_text=completion_text,
                     completion_tokens=completion_tokens,
+                    token_timestamps=token_ts,
                 )
             )
 
@@ -244,8 +251,18 @@ def main() -> None:
         add_lats = [r.submit_end - r.submit_start for r in results]
         ttfts = [r.first_token_ts - r.submit_start for r in results]
         totals = [r.finish_ts - r.submit_start for r in results]
-        completion_tokens = [r.completion_tokens for r in results]
-        sum_tokens = sum(completion_tokens)
+        completion_tokens = [int(r.completion_tokens) for r in results]
+        sum_tokens = int(sum(completion_tokens))
+
+        tpots: list[float] = []
+        itls: list[float] = []
+        for r in results:
+            ts = r.token_timestamps
+            if len(ts) < 2:
+                continue
+            tpots.append((ts[-1] - ts[0]) / float(len(ts) - 1))
+            for i in range(1, len(ts)):
+                itls.append(ts[i] - ts[i - 1])
 
         start0 = min(r.submit_start for r in results) if results else 0.0
         end0 = max(r.finish_ts for r in results) if results else 0.0
@@ -269,6 +286,20 @@ def main() -> None:
             f"{statistics.median(ttfts)*1e3:.2f}/"
             f"{percentile(ttfts, 95)*1e3:.2f}/"
             f"{percentile(ttfts, 99)*1e3:.2f} ms"
+        )
+        tpot_p50 = statistics.median(tpots) if tpots else 0.0
+        itl_p50 = statistics.median(itls) if itls else 0.0
+        print(
+            f"TPOT p50/p95/p99: "
+            f"{tpot_p50*1e3:.2f}/"
+            f"{percentile(tpots, 95)*1e3:.2f}/"
+            f"{percentile(tpots, 99)*1e3:.2f} ms/token"
+        )
+        print(
+            f"ITL p50/p95/p99: "
+            f"{itl_p50*1e3:.2f}/"
+            f"{percentile(itls, 95)*1e3:.2f}/"
+            f"{percentile(itls, 99)*1e3:.2f} ms"
         )
         print(
             f"Latency p50/p95/p99: "

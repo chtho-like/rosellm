@@ -111,6 +111,7 @@ class SchedulerManager:
         self,
         engine: InferenceEngine,
         max_batch_size: int = 8,
+        record_token_timestamps: bool = False,
     ) -> None:
         self.engine = engine
         self.scheduler = OnlineScheduler(
@@ -121,6 +122,8 @@ class SchedulerManager:
         self._wakeup = threading.Event()
         self._queues: Dict[int, "queue.Queue[Optional[str]]"] = {}
         self._detoks: Dict[int, BaseDetokenizer] = {}
+        self._record_token_timestamps = bool(record_token_timestamps)
+        self._token_timestamps: Dict[int, list[float]] = {}
         self._pending: "queue.Queue[_PendingRequest]" = queue.Queue()
         self._next_request_id: int = 0
         self._running = True
@@ -145,6 +148,7 @@ class SchedulerManager:
                     q.put(None)
             self._queues.clear()
             self._detoks.clear()
+            self._token_timestamps.clear()
         worker.join(timeout=1.0)
         if worker.is_alive():
             return
@@ -177,6 +181,8 @@ class SchedulerManager:
             q: "queue.Queue[Optional[str]]" = queue.Queue()
             self._queues[request_id] = q
             self._detoks[request_id] = detok
+            if self._record_token_timestamps:
+                self._token_timestamps[request_id] = []
         self._pending.put(
             _PendingRequest(
                 request_id=request_id,
@@ -192,6 +198,14 @@ class SchedulerManager:
         )
         self._wakeup.set()
         return request_id
+
+    def pop_token_timestamps(
+        self,
+        request_id: int,
+    ) -> list[float]:
+        with self._lock:
+            out = self._token_timestamps.pop(request_id, None)
+        return list(out) if out is not None else []
 
     def stream_text(self, request_id: int) -> Iterator[str]:
         with self._lock:
@@ -249,10 +263,17 @@ class SchedulerManager:
                     with self._lock:
                         q = self._queues.get(rid)
                         detok = self._detoks.get(rid)
+                        token_ts = (
+                            self._token_timestamps.get(rid)
+                            if self._record_token_timestamps
+                            else None
+                        )
                     if q is None or detok is None:
                         self.scheduler.discard_request(rid)
                         continue
                     for tid in self.scheduler.get_generated_ids(rid):
+                        if token_ts is not None:
+                            token_ts.append(time.perf_counter())
                         piece = detok.on_token(int(tid))
                         if piece:
                             q.put(piece)
@@ -274,9 +295,16 @@ class SchedulerManager:
                     with self._lock:
                         q = self._queues.get(rid)
                         detok = self._detoks.get(rid)
+                        token_ts = (
+                            self._token_timestamps.get(rid)
+                            if self._record_token_timestamps
+                            else None
+                        )
                     if q is None or detok is None:
                         self.scheduler.discard_request(rid)
                         continue
+                    if token_ts is not None:
+                        token_ts.append(time.perf_counter())
                     piece = detok.on_token(int(token_id))
                     if piece:
                         q.put(piece)
