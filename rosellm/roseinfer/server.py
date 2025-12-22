@@ -157,6 +157,7 @@ class SchedulerManager:
                 top_p=top_p,
                 stop_on_eos=stop_on_eos,
                 do_sample=do_sample,
+                prompt_token_ids=token_ids,
             )
             q: "queue.Queue[Optional[str]]" = queue.Queue()
             self._queues[request_id] = q

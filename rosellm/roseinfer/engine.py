@@ -138,6 +138,13 @@ class InferenceEngine:
         input_ids = torch.tensor([ids], dtype=torch.long, device=self.device)
         return input_ids  # [1, T0]
 
+    def _encode_prompt_token_ids(self, token_ids: list[int]) -> torch.Tensor:
+        ids = list(token_ids)
+        if not ids:
+            ids = [self.eos_token_id]
+        input_ids = torch.tensor([ids], dtype=torch.long, device=self.device)
+        return input_ids  # [1, T0]
+
     def _encode_prompts_batch(
         self,
         prompts: list[str],
@@ -201,8 +208,12 @@ class InferenceEngine:
         top_p: float,
         do_sample: bool,
         stop_on_eos: bool,
+        prompt_token_ids: Optional[list[int]] = None,
     ) -> None:
-        input_ids = self._encode_prompt(prompt)
+        if prompt_token_ids is None:
+            input_ids = self._encode_prompt(prompt)
+        else:
+            input_ids = self._encode_prompt_token_ids(prompt_token_ids)
         input_ids = self._maybe_truncate(input_ids)
         session.input_ids = input_ids
         max_new_tokens = int(max_new_tokens)
@@ -1327,6 +1338,7 @@ class OfflineScheduler:
         top_p: float = 1.0,
         stop_on_eos: bool = True,
         do_sample: bool = False,
+        prompt_token_ids: Optional[list[int]] = None,
     ) -> int:
         eng = self.engine
         eng.model.eval()
@@ -1342,6 +1354,7 @@ class OfflineScheduler:
             top_p=top_p,
             do_sample=do_sample,
             stop_on_eos=stop_on_eos,
+            prompt_token_ids=prompt_token_ids,
         )
         request_id = self._next_request_id
         self._next_request_id += 1
@@ -1405,6 +1418,7 @@ class OnlineScheduler:
         top_p: float = 1.0,
         stop_on_eos: bool = True,
         do_sample: bool = False,
+        prompt_token_ids: Optional[list[int]] = None,
     ) -> int:
         eng = self.engine
         eng.model.eval()
@@ -1419,6 +1433,7 @@ class OnlineScheduler:
             top_p=top_p,
             do_sample=do_sample,
             stop_on_eos=stop_on_eos,
+            prompt_token_ids=prompt_token_ids,
         )
         if session.finished:
             session.release_kv_blocks()

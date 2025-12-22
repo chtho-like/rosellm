@@ -64,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         help="Prompts to generate text from",
     )
     parser.add_argument(
+        "--pretok",
+        action="store_true",
+        help="Pre-tokenize prompts outside timed region (online/offline mode).",
+    )
+    parser.add_argument(
         "--num-requests",
         type=int,
         default=16,
@@ -326,6 +331,18 @@ def benchmark_offline(
     prompt_lens: List[int],
     args: argparse.Namespace,
 ) -> None:
+    prompt_token_ids_list: Optional[List[List[int]]] = None
+    if args.pretok:
+        eos_id = engine.eos_token_id
+        if eos_id is None:
+            raise ValueError("tokenizer eos_token_id is None")
+        prompt_token_ids_list = []
+        for p in prompts:
+            ids = engine.tokenizer.encode(p, add_special_tokens=False)
+            if not ids:
+                ids = [eos_id]
+            prompt_token_ids_list.append(ids)
+
     def run_once() -> tuple[List[str], float, float]:
         scheduler = OfflineScheduler(
             engine,
@@ -335,9 +352,13 @@ def benchmark_offline(
         request_ids: List[int] = []
         maybe_sync_cuda(engine)
         t0 = time.perf_counter()
-        for p in prompts:
+        for i, p in enumerate(prompts):
+            prompt_token_ids = None
+            if prompt_token_ids_list is not None:
+                prompt_token_ids = prompt_token_ids_list[i]
             rid = scheduler.add_request(
                 p,
+                prompt_token_ids=prompt_token_ids,
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 top_k=args.top_k,
@@ -371,9 +392,13 @@ def benchmark_offline(
         request_ids: List[int] = []
         maybe_sync_cuda(engine)
         t0 = time.perf_counter()
-        for p in prompts:
+        for i, p in enumerate(prompts):
+            prompt_token_ids = None
+            if prompt_token_ids_list is not None:
+                prompt_token_ids = prompt_token_ids_list[i]
             rid = scheduler.add_request(
                 p,
+                prompt_token_ids=prompt_token_ids,
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 top_k=args.top_k,
@@ -464,6 +489,18 @@ def benchmark_online(
     prompt_lens: List[int],
     args: argparse.Namespace,
 ) -> None:
+    prompt_token_ids_list: Optional[List[List[int]]] = None
+    if args.pretok:
+        eos_id = engine.eos_token_id
+        if eos_id is None:
+            raise ValueError("tokenizer eos_token_id is None")
+        prompt_token_ids_list = []
+        for p in prompts:
+            ids = engine.tokenizer.encode(p, add_special_tokens=False)
+            if not ids:
+                ids = [eos_id]
+            prompt_token_ids_list.append(ids)
+
     def run_once() -> (
         tuple[
             List[str],
@@ -489,10 +526,14 @@ def benchmark_online(
         request_ids: List[int] = []
         maybe_sync_cuda(engine)
         t0 = time.perf_counter()
-        for p in prompts:
+        for i, p in enumerate(prompts):
             submit = time.perf_counter()
+            prompt_token_ids = None
+            if prompt_token_ids_list is not None:
+                prompt_token_ids = prompt_token_ids_list[i]
             rid = scheduler.add_request(
                 p,
+                prompt_token_ids=prompt_token_ids,
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 top_k=args.top_k,
