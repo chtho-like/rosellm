@@ -76,6 +76,15 @@ def parse_args() -> argparse.Namespace:
         help="Online scheduler max batch size (decode step)",
     )
     parser.add_argument(
+        "--prefill-max-batch-size",
+        type=int,
+        default=None,
+        help=(
+            "Max pending requests to prefill per worker iteration "
+            "(default: same as --max-batch-size)."
+        ),
+    )
+    parser.add_argument(
         "--max-new-tokens",
         type=int,
         default=16,
@@ -182,6 +191,7 @@ def main() -> None:
     mgr = SchedulerManager(
         engine,
         max_batch_size=int(args.max_batch_size),
+        prefill_max_batch_size=args.prefill_max_batch_size,
         record_token_timestamps=True,
     )
     if args.no_prefix_cache:

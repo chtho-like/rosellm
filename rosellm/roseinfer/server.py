@@ -111,12 +111,21 @@ class SchedulerManager:
         self,
         engine: InferenceEngine,
         max_batch_size: int = 8,
+        prefill_max_batch_size: Optional[int] = None,
         record_token_timestamps: bool = False,
     ) -> None:
+        if max_batch_size <= 0:
+            raise ValueError("max_batch_size must be positive")
+        if prefill_max_batch_size is None:
+            prefill_max_batch_size = max_batch_size
+        self._prefill_max_batch_size = int(prefill_max_batch_size)
+        if self._prefill_max_batch_size <= 0:
+            raise ValueError("prefill_max_batch_size must be positive")
+
         self.engine = engine
         self.scheduler = OnlineScheduler(
             engine,
-            max_batch_size=max_batch_size,
+            max_batch_size=int(max_batch_size),
         )
         self._lock = threading.Lock()
         self._wakeup = threading.Event()
@@ -229,7 +238,7 @@ class SchedulerManager:
                 with self._lock:
                     if not self._running:
                         break
-                    max_new = self.scheduler.max_batch_size
+                    max_new = self._prefill_max_batch_size
                 pending: list[_PendingRequest] = []
                 for _ in range(max_new):
                     try:
