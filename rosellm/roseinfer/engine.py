@@ -128,6 +128,8 @@ class InferenceEngine:
         )
         self._paged_block_tables_buf: torch.Tensor | None = None
         self._paged_block_tables_capacity: int = 0
+        self._paged_block_tables_cpu_buf: torch.Tensor | None = None
+        self._paged_block_tables_cpu_capacity: int = 0
 
         if self.config.vocab_size < self.tokenizer.vocab_size:
             raise ValueError("the model vocab_size is less than tokenizer vocab_size")
@@ -869,6 +871,28 @@ class InferenceEngine:
             self._paged_block_tables_capacity = cap
         return self._paged_block_tables_buf
 
+    def _get_paged_block_tables_cpu_buf(
+        self,
+        batch_size: int,
+    ) -> torch.Tensor:
+        if (
+            self._paged_block_tables_cpu_buf is None
+            or self._paged_block_tables_cpu_capacity < batch_size
+        ):
+            cap = max(batch_size, self._paged_block_tables_cpu_capacity * 2, 16)
+            self._paged_block_tables_cpu_buf = torch.empty(
+                (
+                    self.config.n_layers,
+                    cap,
+                    self.max_blocks_per_seq,
+                ),
+                device="cpu",
+                dtype=torch.int32,
+                pin_memory=(self.device.type == "cuda"),
+            )
+            self._paged_block_tables_cpu_capacity = cap
+        return self._paged_block_tables_cpu_buf
+
     @torch.no_grad()
     def decode_step_sessions(
         self,
@@ -893,7 +917,6 @@ class InferenceEngine:
                 seq_lens.append(seq_len)
             assert len(last_ids) == batch_size
             lens = torch.tensor(seq_lens, device=device, dtype=torch.long)
-            max_len = max(seq_lens)
 
             input_ids = torch.tensor(  # [B, 1]
                 last_ids,
@@ -901,22 +924,6 @@ class InferenceEngine:
                 device=device,
             ).view(batch_size, 1)
             position_ids = lens.view(batch_size, 1)
-            past_mask = torch.arange(
-                max_len,
-                device=device,
-            ).unsqueeze(
-                0
-            ) < lens.unsqueeze(1)
-            new_mask = torch.ones(
-                batch_size,
-                1,
-                device=device,
-                dtype=past_mask.dtype,
-            )
-            attention_mask = torch.cat(
-                [past_mask, new_mask],
-                dim=1,
-            ).to(torch.long)
             num_layers = kvm.num_layers
             num_heads = kvm.num_heads
             head_dim = kvm.head_dim
@@ -927,10 +934,10 @@ class InferenceEngine:
                 num_blocks_max = self.max_blocks_per_seq
                 max_blocks_per_layer = kvm.max_blocks_per_layer
                 block_tables_buf = self._get_paged_block_tables_buf(batch_size)
+                block_tables_cpu = self._get_paged_block_tables_cpu_buf(batch_size)
                 with record_function(
                     "roseinfer.decode_step_sessions.build_block_tables",
                 ):
-                    block_tables: list[torch.Tensor] = []
                     for layer_idx in range(num_layers):
                         offset = layer_idx * max_blocks_per_layer
                         rows: list[list[int]] = []
@@ -946,10 +953,19 @@ class InferenceEngine:
                             else:
                                 physical = physical[:num_blocks_max]
                             rows.append(physical)
-                        cpu_table = torch.tensor(rows, dtype=torch.int32)
-                        block_table = block_tables_buf[layer_idx, :batch_size]
-                        block_table.copy_(cpu_table)
-                        block_tables.append(block_table)
+                        tmp = torch.tensor(rows, dtype=torch.int32)
+                        block_tables_cpu[layer_idx, :batch_size].copy_(tmp)
+                with record_function(
+                    "roseinfer.decode_step_sessions.h2d_block_tables",
+                ):
+                    block_tables_buf[:, :batch_size].copy_(
+                        block_tables_cpu[:, :batch_size],
+                        non_blocking=True,
+                    )
+                block_tables = [
+                    block_tables_buf[layer_idx, :batch_size]
+                    for layer_idx in range(num_layers)
+                ]
                 paged = PagedKVCache(
                     k_cache=kvm._k_cache,
                     v_cache=kvm._v_cache,
@@ -995,6 +1011,24 @@ class InferenceEngine:
                                 v_step[idx],
                             )
                 return last_logits
+
+            max_len = max(seq_lens)
+            past_mask = torch.arange(
+                max_len,
+                device=device,
+            ).unsqueeze(
+                0
+            ) < lens.unsqueeze(1)
+            new_mask = torch.ones(
+                batch_size,
+                1,
+                device=device,
+                dtype=past_mask.dtype,
+            )
+            attention_mask = torch.cat(
+                [past_mask, new_mask],
+                dim=1,
+            ).to(torch.long)
 
             batched_past = []
             with record_function("roseinfer.decode_step_sessions.build_batched_past"):
