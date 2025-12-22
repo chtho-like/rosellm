@@ -2,7 +2,9 @@ import argparse
 import queue
 import threading
 import time
+import traceback
 import uuid
+from dataclasses import dataclass
 from typing import Dict, Iterator, List, Literal, Optional
 
 from fastapi import FastAPI
@@ -91,6 +93,19 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
 
 
+@dataclass(frozen=True)
+class _PendingRequest:
+    request_id: int
+    prompt: str
+    prompt_token_ids: list[int]
+    max_new_tokens: int
+    temperature: float
+    top_k: int
+    top_p: float
+    stop_on_eos: bool
+    do_sample: bool
+
+
 class SchedulerManager:
     def __init__(
         self,
@@ -106,6 +121,8 @@ class SchedulerManager:
         self._wakeup = threading.Event()
         self._queues: Dict[int, "queue.Queue[Optional[str]]"] = {}
         self._detoks: Dict[int, BaseDetokenizer] = {}
+        self._pending: "queue.Queue[_PendingRequest]" = queue.Queue()
+        self._next_request_id: int = 0
         self._running = True
         self._worker = threading.Thread(
             target=self._worker_loop,
@@ -115,6 +132,7 @@ class SchedulerManager:
 
     def close(self) -> None:
         worker = self._worker
+        request_ids: list[int] = []
         with self._lock:
             if not self._running:
                 return
@@ -125,10 +143,13 @@ class SchedulerManager:
                 q = self._queues.get(rid)
                 if q is not None:
                     q.put(None)
-                self.scheduler.discard_request(rid)
             self._queues.clear()
             self._detoks.clear()
         worker.join(timeout=1.0)
+        if worker.is_alive():
+            return
+        for rid in request_ids:
+            self.scheduler.discard_request(rid)
 
     def add_request(
         self,
@@ -149,30 +170,27 @@ class SchedulerManager:
         detok = self.engine._make_detok()
         detok.start_prompt(token_ids)
         with self._lock:
-            request_id = self.scheduler.add_request(
+            if not self._running:
+                raise RuntimeError("SchedulerManager is closed")
+            request_id = self._next_request_id
+            self._next_request_id += 1
+            q: "queue.Queue[Optional[str]]" = queue.Queue()
+            self._queues[request_id] = q
+            self._detoks[request_id] = detok
+        self._pending.put(
+            _PendingRequest(
+                request_id=request_id,
                 prompt=prompt,
+                prompt_token_ids=list(token_ids),
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_k=top_k,
                 top_p=top_p,
                 stop_on_eos=stop_on_eos,
                 do_sample=do_sample,
-                prompt_token_ids=token_ids,
             )
-            q: "queue.Queue[Optional[str]]" = queue.Queue()
-            self._queues[request_id] = q
-            self._detoks[request_id] = detok
-            for tid in self.scheduler.get_generated_ids(request_id):
-                piece = detok.on_token(int(tid))
-                if piece:
-                    q.put(piece)
-            if self.scheduler.is_finished(request_id):
-                tail = detok.flush()
-                if tail:
-                    q.put(tail)
-                q.put(None)
-            else:
-                self._wakeup.set()
+        )
+        self._wakeup.set()
         return request_id
 
     def stream_text(self, request_id: int) -> Iterator[str]:
@@ -190,43 +208,97 @@ class SchedulerManager:
             with self._lock:
                 self._queues.pop(request_id, None)
                 self._detoks.pop(request_id, None)
-                self.scheduler.discard_request(request_id)
 
     def _worker_loop(self) -> None:
-        while True:
-            with self._lock:
-                if not self._running:
-                    break
-                has_work = self.scheduler.has_unfinished()
-                if has_work:
+        try:
+            while True:
+                with self._lock:
+                    if not self._running:
+                        break
+                    max_new = self.scheduler.max_batch_size
+                pending: list[_PendingRequest] = []
+                for _ in range(max_new):
+                    try:
+                        pending.append(self._pending.get_nowait())
+                    except queue.Empty:
+                        break
+                for req in pending:
+                    with self._lock:
+                        if not self._running:
+                            break
+                        q = self._queues.get(req.request_id)
+                        detok = self._detoks.get(req.request_id)
+                    if q is None or detok is None:
+                        continue
+                    rid = self.scheduler.add_request(
+                        prompt=req.prompt,
+                        max_new_tokens=req.max_new_tokens,
+                        temperature=req.temperature,
+                        top_k=req.top_k,
+                        top_p=req.top_p,
+                        stop_on_eos=req.stop_on_eos,
+                        do_sample=req.do_sample,
+                        prompt_token_ids=req.prompt_token_ids,
+                        request_id=req.request_id,
+                    )
+                    with self._lock:
+                        q = self._queues.get(rid)
+                        detok = self._detoks.get(rid)
+                    if q is None or detok is None:
+                        self.scheduler.discard_request(rid)
+                        continue
+                    for tid in self.scheduler.get_generated_ids(rid):
+                        piece = detok.on_token(int(tid))
+                        if piece:
+                            q.put(piece)
+                    if self.scheduler.is_finished(rid):
+                        tail = detok.flush()
+                        if tail:
+                            q.put(tail)
+                        q.put(None)
+                        self.scheduler.discard_request(rid)
+
+                if self.scheduler.has_unfinished():
                     step_tokens = self.scheduler.step()
                     finished_ids = self.scheduler.pop_finished_ids()
                 else:
                     step_tokens = {}
                     finished_ids = []
-                    self._wakeup.clear()
-            if not has_work:
-                self._wakeup.wait()
-                continue
-            for rid, token_id in step_tokens.items():
-                detok = self._detoks.get(rid)
-                q = self._queues.get(rid)
-                if detok is None or q is None:
-                    continue
-                piece = detok.on_token(int(token_id))
-                if piece:
-                    q.put(piece)
-            for rid in finished_ids:
-                with self._lock:
-                    detok = self._detoks.pop(rid, None)
-                    q = self._queues.get(rid)
+
+                for rid, token_id in step_tokens.items():
+                    with self._lock:
+                        q = self._queues.get(rid)
+                        detok = self._detoks.get(rid)
+                    if q is None or detok is None:
+                        self.scheduler.discard_request(rid)
+                        continue
+                    piece = detok.on_token(int(token_id))
+                    if piece:
+                        q.put(piece)
+
+                for rid in finished_ids:
+                    with self._lock:
+                        q = self._queues.get(rid)
+                        detok = self._detoks.get(rid)
                     self.scheduler.discard_request(rid)
-                if q is None:
-                    continue
-                if detok is not None:
-                    tail = detok.flush()
-                    if tail:
-                        q.put(tail)
+                    if q is None:
+                        continue
+                    if detok is not None:
+                        tail = detok.flush()
+                        if tail:
+                            q.put(tail)
+                    q.put(None)
+
+                if not pending and not self.scheduler.has_unfinished():
+                    self._wakeup.wait()
+                    self._wakeup.clear()
+        except Exception:
+            traceback.print_exc()
+            with self._lock:
+                queues = list(self._queues.values())
+                self._running = False
+                self._wakeup.set()
+            for q in queues:
                 q.put(None)
 
 

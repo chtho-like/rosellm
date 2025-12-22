@@ -1,0 +1,285 @@
+import argparse
+import math
+import statistics
+import threading
+import time
+from dataclasses import dataclass
+from typing import List
+
+import torch
+
+from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
+
+from .engine import InferenceEngine
+from .server import SchedulerManager
+
+
+@dataclass(frozen=True)
+class StreamResult:
+    request_id: int
+    submit_start: float
+    submit_end: float
+    first_token_ts: float
+    finish_ts: float
+    completion_text: str
+    completion_tokens: int
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Benchmark SchedulerManager streaming admission/latency.",
+    )
+    parser.add_argument(
+        "--hf-model-id",
+        type=str,
+        default="gpt2",
+        help="HF model ID",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="Device to use (cpu/cuda)",
+    )
+    parser.add_argument(
+        "--no-amp",
+        action="store_true",
+        help="Disable automatic mixed precision",
+    )
+    parser.add_argument(
+        "--bf16",
+        action="store_true",
+        help="Use bfloat16 AMP on CUDA instead of float16.",
+    )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        required=True,
+        help="Prompt to generate text from",
+    )
+    parser.add_argument(
+        "--unique-prompts",
+        action="store_true",
+        help="Append an index suffix to each prompt to avoid prefix cache hits.",
+    )
+    parser.add_argument(
+        "--num-requests",
+        type=int,
+        default=16,
+        help="Number of streaming requests",
+    )
+    parser.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=8,
+        help="Online scheduler max batch size (decode step)",
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=16,
+        help="Maximum number of new tokens to generate per request",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for sampling",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=0,
+        help="Top-k sampling",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=1.0,
+        help="Top-p sampling",
+    )
+    parser.add_argument(
+        "--do-sample",
+        action="store_true",
+        help="Use sampling to generate text (or else greedy)",
+    )
+    parser.add_argument(
+        "--no-stop-on-eos",
+        action="store_true",
+        help="Do not stop when EOS is generated",
+    )
+    parser.add_argument(
+        "--no-prefix-cache",
+        action="store_true",
+        help="Disable prefix cache inside OnlineScheduler",
+    )
+    return parser.parse_args()
+
+
+def count_tokens(tokenizer, text: str) -> int:
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    return len(ids)
+
+
+def percentile(values: List[float], p: float) -> float:
+    if not values:
+        return 0.0
+    vs = sorted(values)
+    if len(vs) == 1:
+        return vs[0]
+    pos = (len(vs) - 1) * (p / 100.0)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return vs[lo]
+    w = pos - lo
+    return vs[lo] * (1.0 - w) + vs[hi] * w
+
+
+def main() -> None:
+    args = parse_args()
+    if args.device == "cuda":
+        dtype = torch.bfloat16 if args.bf16 else torch.float16
+    else:
+        dtype = torch.float32
+    prompts = [
+        (f"{args.prompt} [{i}]" if args.unique_prompts else args.prompt)
+        for i in range(int(args.num_requests))
+    ]
+    model, cfg, tokenizer = load_gpt2_from_hf_pretrained(
+        args.hf_model_id,
+        device=torch.device(args.device),
+        dtype=dtype,
+    )
+    prompt_lens = [count_tokens(tokenizer, p) for p in prompts]
+    block_size = 64
+    blocks_per_request = [
+        math.ceil((l + int(args.max_new_tokens)) / block_size) for l in prompt_lens
+    ]
+    required_blocks_per_layer = sum(blocks_per_request)
+    if not args.no_prefix_cache and int(args.max_new_tokens) > 0:
+        unique_prompt_lens = {p: count_tokens(tokenizer, p) for p in set(prompts)}
+        prefix_extra_blocks = sum(
+            1 for l in unique_prompt_lens.values() if (l % block_size) != 0
+        )
+        required_blocks_per_layer += prefix_extra_blocks
+    max_context = cfg.max_position_embeddings
+    kv_cache_max_concurrency = max(
+        1,
+        math.ceil(required_blocks_per_layer * block_size / max_context),
+    )
+    engine = InferenceEngine(
+        model=model,
+        config=cfg,
+        tokenizer=tokenizer,
+        device=args.device,
+        use_amp=not args.no_amp,
+        bf16=args.bf16,
+        kv_cache_max_concurrency=kv_cache_max_concurrency,
+        prefix_cache_max_entries=len(set(prompts)),
+    )
+    mgr = SchedulerManager(engine, max_batch_size=int(args.max_batch_size))
+    if args.no_prefix_cache:
+        mgr.scheduler.use_prefix_cache = False
+
+    stop_on_eos = not args.no_stop_on_eos
+    results: list[StreamResult] = []
+    results_lock = threading.Lock()
+
+    def consume_stream(
+        request_id: int,
+        submit_start: float,
+        submit_end: float,
+    ) -> None:
+        first_token_ts: float | None = None
+        pieces: list[str] = []
+        for piece in mgr.stream_text(request_id):
+            if first_token_ts is None:
+                first_token_ts = time.perf_counter()
+            pieces.append(piece)
+        finish_ts = time.perf_counter()
+        if first_token_ts is None:
+            first_token_ts = finish_ts
+        completion_text = "".join(pieces)
+        completion_tokens = count_tokens(engine.tokenizer, completion_text)
+        with results_lock:
+            results.append(
+                StreamResult(
+                    request_id=request_id,
+                    submit_start=submit_start,
+                    submit_end=submit_end,
+                    first_token_ts=first_token_ts,
+                    finish_ts=finish_ts,
+                    completion_text=completion_text,
+                    completion_tokens=completion_tokens,
+                )
+            )
+
+    threads: list[threading.Thread] = []
+    try:
+        t_global0 = time.perf_counter()
+        for p in prompts:
+            submit_start = time.perf_counter()
+            request_id = mgr.add_request(
+                prompt=p,
+                max_new_tokens=int(args.max_new_tokens),
+                temperature=float(args.temperature),
+                top_k=int(args.top_k),
+                top_p=float(args.top_p),
+                stop_on_eos=stop_on_eos,
+                do_sample=bool(args.do_sample),
+            )
+            submit_end = time.perf_counter()
+            th = threading.Thread(
+                target=consume_stream,
+                args=(request_id, submit_start, submit_end),
+                daemon=True,
+            )
+            threads.append(th)
+            th.start()
+        submit_wall = time.perf_counter() - t_global0
+        for th in threads:
+            th.join()
+
+        add_lats = [r.submit_end - r.submit_start for r in results]
+        ttfts = [r.first_token_ts - r.submit_start for r in results]
+        totals = [r.finish_ts - r.submit_start for r in results]
+        completion_tokens = [r.completion_tokens for r in results]
+        sum_tokens = sum(completion_tokens)
+
+        start0 = min(r.submit_start for r in results) if results else 0.0
+        end0 = max(r.finish_ts for r in results) if results else 0.0
+        wall = max(1e-9, end0 - start0)
+
+        print("=== streaming benchmark ===")
+        print(f"Model: {args.hf_model_id}")
+        print(f"Device: {args.device}")
+        print(f"Requests: {len(results)}")
+        print(f"Prompt tokens (total): {sum(prompt_lens)}")
+        print(f"Completion tokens (total): {sum_tokens}")
+        print(f"Submit wall: {submit_wall:.6f} s")
+        print(
+            f"add_request latency p50/p95/p99: "
+            f"{statistics.median(add_lats)*1e3:.2f}/"
+            f"{percentile(add_lats, 95)*1e3:.2f}/"
+            f"{percentile(add_lats, 99)*1e3:.2f} ms"
+        )
+        print(
+            f"TTFT p50/p95/p99: "
+            f"{statistics.median(ttfts)*1e3:.2f}/"
+            f"{percentile(ttfts, 95)*1e3:.2f}/"
+            f"{percentile(ttfts, 99)*1e3:.2f} ms"
+        )
+        print(
+            f"Latency p50/p95/p99: "
+            f"{statistics.median(totals)*1e3:.2f}/"
+            f"{percentile(totals, 95)*1e3:.2f}/"
+            f"{percentile(totals, 99)*1e3:.2f} ms"
+        )
+        print(f"Throughput (completion,total): {sum_tokens / wall:.2f} tokens/s")
+    finally:
+        mgr.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -1419,6 +1419,7 @@ class OnlineScheduler:
         stop_on_eos: bool = True,
         do_sample: bool = False,
         prompt_token_ids: Optional[list[int]] = None,
+        request_id: Optional[int] = None,
     ) -> int:
         eng = self.engine
         eng.model.eval()
@@ -1437,12 +1438,19 @@ class OnlineScheduler:
         )
         if session.finished:
             session.release_kv_blocks()
-        request_id = self._next_request_id
-        self._next_request_id += 1
-        self._sessions[request_id] = session
+        if request_id is None:
+            rid = self._next_request_id
+            self._next_request_id += 1
+        else:
+            rid = int(request_id)
+            if rid in self._sessions:
+                raise ValueError(f"request_id {rid} already exists")
+            if rid >= self._next_request_id:
+                self._next_request_id = rid + 1
+        self._sessions[rid] = session
         if not session.finished:
-            self._active_rids.append(request_id)
-        return request_id
+            self._active_rids.append(rid)
+        return rid
 
     def has_unfinished(self) -> bool:
         while self._active_rids:
