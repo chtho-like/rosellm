@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from rosellm.roseinfer.engine import InferenceEngine
@@ -26,7 +27,8 @@ class _DummyTokenizer:
         return " ".join(str(i) for i in ids)
 
 
-def test_server_streaming_emits_tokens() -> None:
+@pytest.mark.parametrize("decode_first", [False, True])
+def test_server_streaming_emits_tokens(decode_first: bool) -> None:
     torch.manual_seed(0)
     cfg = GPTConfig(
         vocab_size=128,
@@ -50,7 +52,7 @@ def test_server_streaming_emits_tokens() -> None:
         prefix_cache_max_entries=0,
     )
 
-    mgr = SchedulerManager(engine, max_batch_size=2)
+    mgr = SchedulerManager(engine, max_batch_size=2, decode_first=decode_first)
     try:
         mgr.scheduler.use_prefix_cache = False
         rid = mgr.add_request(

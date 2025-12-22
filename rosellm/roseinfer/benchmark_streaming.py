@@ -108,6 +108,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--decode-first",
+        action="store_true",
+        help="Run one decode step before prefill admission when possible.",
+    )
+    parser.add_argument(
         "--max-new-tokens",
         type=int,
         default=16,
@@ -225,6 +230,7 @@ def main() -> None:
         max_batch_size=int(args.max_batch_size),
         prefill_max_batch_size=args.prefill_max_batch_size,
         prefill_max_tokens=args.prefill_max_tokens,
+        decode_first=args.decode_first,
         record_token_timestamps=True,
     )
     if args.no_prefix_cache:

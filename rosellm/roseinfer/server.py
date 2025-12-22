@@ -155,6 +155,7 @@ class SchedulerManager:
         prefill_max_batch_size: Optional[int] = None,
         prefill_max_tokens: Optional[int] = None,
         record_token_timestamps: bool = False,
+        decode_first: bool = False,
     ) -> None:
         if max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
@@ -168,6 +169,7 @@ class SchedulerManager:
         )
         if self._prefill_max_tokens is not None and self._prefill_max_tokens <= 0:
             raise ValueError("prefill_max_tokens must be positive")
+        self._decode_first = bool(decode_first)
 
         self.engine = engine
         self.scheduler = OnlineScheduler(
@@ -284,12 +286,57 @@ class SchedulerManager:
     def _worker_loop(self) -> None:
         try:
             while True:
+
+                def run_decode_once() -> None:
+                    if not self.scheduler.has_unfinished():
+                        return
+                    step_tokens = self.scheduler.step()
+                    finished_ids = self.scheduler.pop_finished_ids()
+
+                    for rid, token_id in step_tokens.items():
+                        with self._lock:
+                            q = self._queues.get(rid)
+                            detok = self._detoks.get(rid)
+                            token_ts = (
+                                self._token_timestamps.get(rid)
+                                if self._record_token_timestamps
+                                else None
+                            )
+                        if q is None or detok is None:
+                            self.scheduler.discard_request(rid)
+                            continue
+                        if token_ts is not None:
+                            token_ts.append(time.perf_counter())
+                        piece = detok.on_token(int(token_id))
+                        if piece:
+                            q.put(piece)
+
+                    for rid in finished_ids:
+                        with self._lock:
+                            q = self._queues.get(rid)
+                            detok = self._detoks.get(rid)
+                        self.scheduler.discard_request(rid)
+                        if q is None:
+                            continue
+                        if detok is not None:
+                            tail = detok.flush()
+                            if tail:
+                                q.put(tail)
+                        q.put(None)
+
                 with self._lock:
                     if not self._running:
                         break
                     max_new = self._prefill_max_batch_size
                     max_tokens = self._prefill_max_tokens
                     max_context = int(self.engine.config.max_position_embeddings)
+                    decode_first = self._decode_first
+
+                did_decode = False
+                if decode_first and self.scheduler.has_unfinished():
+                    run_decode_once()
+                    did_decode = True
+
                 pending = _take_pending_for_prefill(
                     self._pending_buf,
                     self._pending,
@@ -345,43 +392,8 @@ class SchedulerManager:
                         q.put(None)
                         self.scheduler.discard_request(rid)
 
-                if self.scheduler.has_unfinished():
-                    step_tokens = self.scheduler.step()
-                    finished_ids = self.scheduler.pop_finished_ids()
-                else:
-                    step_tokens = {}
-                    finished_ids = []
-
-                for rid, token_id in step_tokens.items():
-                    with self._lock:
-                        q = self._queues.get(rid)
-                        detok = self._detoks.get(rid)
-                        token_ts = (
-                            self._token_timestamps.get(rid)
-                            if self._record_token_timestamps
-                            else None
-                        )
-                    if q is None or detok is None:
-                        self.scheduler.discard_request(rid)
-                        continue
-                    if token_ts is not None:
-                        token_ts.append(time.perf_counter())
-                    piece = detok.on_token(int(token_id))
-                    if piece:
-                        q.put(piece)
-
-                for rid in finished_ids:
-                    with self._lock:
-                        q = self._queues.get(rid)
-                        detok = self._detoks.get(rid)
-                    self.scheduler.discard_request(rid)
-                    if q is None:
-                        continue
-                    if detok is not None:
-                        tail = detok.flush()
-                        if tail:
-                            q.put(tail)
-                    q.put(None)
+                if not did_decode:
+                    run_decode_once()
 
                 if (
                     not pending
