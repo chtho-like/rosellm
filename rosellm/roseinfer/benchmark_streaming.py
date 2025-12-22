@@ -108,6 +108,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--prefill-admission-policy",
+        type=str,
+        default="fifo",
+        choices=["fifo", "pack"],
+        help="Prefill admission policy (default: fifo).",
+    )
+    parser.add_argument(
+        "--prefill-admission-lookahead",
+        type=int,
+        default=64,
+        help="Pending lookahead window for pack admission.",
+    )
+    parser.add_argument(
+        "--prefill-force-fifo-every",
+        type=int,
+        default=0,
+        help="Force FIFO admission every N iterations (0: disable).",
+    )
+    parser.add_argument(
         "--decode-first",
         action="store_true",
         help="Run one decode step before prefill admission when possible.",
@@ -231,6 +250,9 @@ def main() -> None:
         prefill_max_batch_size=args.prefill_max_batch_size,
         prefill_max_tokens=args.prefill_max_tokens,
         decode_first=args.decode_first,
+        prefill_admission_policy=args.prefill_admission_policy,
+        prefill_admission_lookahead=int(args.prefill_admission_lookahead),
+        prefill_force_fifo_every=int(args.prefill_force_fifo_every),
         record_token_timestamps=True,
     )
     if args.no_prefix_cache:

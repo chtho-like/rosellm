@@ -33,6 +33,9 @@ def test_take_pending_for_prefill_respects_max_tokens_fifo() -> None:
         max_reqs=8,
         max_tokens=4,
         max_context=1024,
+        admission_policy="fifo",
+        lookahead=64,
+        force_fifo=False,
     )
     assert [r.request_id for r in out] == [0, 1]
     assert list(buf)[0].request_id == 2
@@ -50,6 +53,9 @@ def test_take_pending_for_prefill_allows_single_oversize_request() -> None:
         max_reqs=8,
         max_tokens=4,
         max_context=1024,
+        admission_policy="fifo",
+        lookahead=64,
+        force_fifo=False,
     )
     assert [r.request_id for r in out] == [0]
     assert q.get_nowait().request_id == 1
@@ -67,6 +73,9 @@ def test_take_pending_for_prefill_uses_max_context_for_cost() -> None:
         max_reqs=8,
         max_tokens=16,
         max_context=8,
+        admission_policy="fifo",
+        lookahead=64,
+        force_fifo=False,
     )
     assert [r.request_id for r in out] == [0, 1]
 
@@ -75,4 +84,13 @@ def test_take_pending_for_prefill_validates_args() -> None:
     buf: deque[_PendingRequest] = deque()
     q: "queue.Queue[_PendingRequest]" = queue.Queue()
     with pytest.raises(ValueError, match="max_tokens must be positive"):
-        _take_pending_for_prefill(buf, q, max_reqs=1, max_tokens=0, max_context=1)
+        _take_pending_for_prefill(
+            buf,
+            q,
+            max_reqs=1,
+            max_tokens=0,
+            max_context=1,
+            admission_policy="fifo",
+            lookahead=1,
+            force_fifo=False,
+        )

@@ -107,6 +107,9 @@ class _PendingRequest:
     do_sample: bool
 
 
+PrefillAdmissionPolicy = Literal["fifo", "pack"]
+
+
 def _take_pending_for_prefill(
     pending_buf: "deque[_PendingRequest]",
     pending_q: "queue.Queue[_PendingRequest]",
@@ -114,6 +117,9 @@ def _take_pending_for_prefill(
     max_reqs: int,
     max_tokens: Optional[int],
     max_context: int,
+    admission_policy: PrefillAdmissionPolicy,
+    lookahead: int,
+    force_fifo: bool,
 ) -> list[_PendingRequest]:
     if max_reqs <= 0:
         raise ValueError("max_reqs must be positive")
@@ -121,29 +127,75 @@ def _take_pending_for_prefill(
         raise ValueError("max_context must be positive")
     if max_tokens is not None and max_tokens <= 0:
         raise ValueError("max_tokens must be positive")
+    if lookahead <= 0:
+        raise ValueError("lookahead must be positive")
+
+    if force_fifo or admission_policy == "fifo" or max_tokens is None:
+        out: list[_PendingRequest] = []
+        tokens_used = 0
+        while len(out) < max_reqs:
+            if pending_buf:
+                req = pending_buf.popleft()
+            else:
+                try:
+                    req = pending_q.get_nowait()
+                except queue.Empty:
+                    break
+
+            cost = min(len(req.prompt_token_ids), max_context)
+            if max_tokens is not None:
+                if not out and cost > max_tokens:
+                    out.append(req)
+                    break
+                if out and tokens_used + cost > max_tokens:
+                    pending_buf.appendleft(req)
+                    break
+
+            out.append(req)
+            tokens_used += cost
+        return out
+
+    # admission_policy == "pack" and max_tokens is not None.
+    window: list[_PendingRequest] = []
+    while len(window) < lookahead:
+        if pending_buf:
+            window.append(pending_buf.popleft())
+            continue
+        try:
+            window.append(pending_q.get_nowait())
+        except queue.Empty:
+            break
+    if not window:
+        return []
+
+    costs = [min(len(req.prompt_token_ids), max_context) for req in window]
+    order = sorted(range(len(window)), key=lambda i: (costs[i], i))
+    selected = [False for _ in window]
+    tokens_used = 0
+    selected_count = 0
+    for idx in order:
+        if selected_count >= max_reqs:
+            break
+        cost = costs[idx]
+        if cost > max_tokens:
+            continue
+        if tokens_used + cost > max_tokens:
+            continue
+        selected[idx] = True
+        tokens_used += cost
+        selected_count += 1
+    if selected_count == 0:
+        selected[0] = True
 
     out: list[_PendingRequest] = []
-    tokens_used = 0
-    while len(out) < max_reqs:
-        if pending_buf:
-            req = pending_buf.popleft()
-        else:
-            try:
-                req = pending_q.get_nowait()
-            except queue.Empty:
+    for idx, req in enumerate(window):
+        if selected[idx]:
+            out.append(req)
+            if len(out) >= max_reqs:
                 break
-
-        cost = min(len(req.prompt_token_ids), max_context)
-        if max_tokens is not None:
-            if not out and cost > max_tokens:
-                out.append(req)
-                break
-            if out and tokens_used + cost > max_tokens:
-                pending_buf.appendleft(req)
-                break
-
-        out.append(req)
-        tokens_used += cost
+    for idx in range(len(window) - 1, -1, -1):
+        if not selected[idx]:
+            pending_buf.appendleft(window[idx])
     return out
 
 
@@ -156,6 +208,9 @@ class SchedulerManager:
         prefill_max_tokens: Optional[int] = None,
         record_token_timestamps: bool = False,
         decode_first: bool = False,
+        prefill_admission_policy: PrefillAdmissionPolicy = "fifo",
+        prefill_admission_lookahead: int = 64,
+        prefill_force_fifo_every: int = 0,
     ) -> None:
         if max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
@@ -170,6 +225,16 @@ class SchedulerManager:
         if self._prefill_max_tokens is not None and self._prefill_max_tokens <= 0:
             raise ValueError("prefill_max_tokens must be positive")
         self._decode_first = bool(decode_first)
+        if prefill_admission_policy not in ("fifo", "pack"):
+            raise ValueError("prefill_admission_policy must be fifo|pack")
+        self._prefill_admission_policy = prefill_admission_policy
+        self._prefill_admission_lookahead = int(prefill_admission_lookahead)
+        if self._prefill_admission_lookahead <= 0:
+            raise ValueError("prefill_admission_lookahead must be positive")
+        self._prefill_force_fifo_every = int(prefill_force_fifo_every)
+        if self._prefill_force_fifo_every < 0:
+            raise ValueError("prefill_force_fifo_every must be non-negative")
+        self._prefill_iter = 0
 
         self.engine = engine
         self.scheduler = OnlineScheduler(
@@ -331,6 +396,14 @@ class SchedulerManager:
                     max_tokens = self._prefill_max_tokens
                     max_context = int(self.engine.config.max_position_embeddings)
                     decode_first = self._decode_first
+                    admission_policy = self._prefill_admission_policy
+                    lookahead = self._prefill_admission_lookahead
+                    force_fifo_every = self._prefill_force_fifo_every
+
+                self._prefill_iter += 1
+                force_fifo = force_fifo_every > 0 and (
+                    self._prefill_iter % force_fifo_every == 0
+                )
 
                 did_decode = False
                 if decode_first and self.scheduler.has_unfinished():
@@ -343,6 +416,9 @@ class SchedulerManager:
                     max_reqs=max_new,
                     max_tokens=max_tokens,
                     max_context=max_context,
+                    admission_policy=admission_policy,
+                    lookahead=lookahead,
+                    force_fifo=force_fifo,
                 )
                 batch: list[OnlineRequest] = []
                 for req in pending:
