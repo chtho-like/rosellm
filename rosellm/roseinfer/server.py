@@ -110,6 +110,26 @@ class _PendingRequest:
 PrefillAdmissionPolicy = Literal["fifo", "pack"]
 
 
+def _cap_prefill_max_reqs(
+    max_reqs: int,
+    *,
+    max_active_requests: Optional[int],
+    active_unfinished: int,
+) -> int:
+    if max_reqs <= 0:
+        raise ValueError("max_reqs must be positive")
+    if active_unfinished < 0:
+        raise ValueError("active_unfinished must be non-negative")
+    if max_active_requests is None:
+        return max_reqs
+    if max_active_requests <= 0:
+        raise ValueError("max_active_requests must be positive")
+    slots = max_active_requests - active_unfinished
+    if slots <= 0:
+        return 0
+    return min(max_reqs, slots)
+
+
 def _take_pending_for_prefill(
     pending_buf: "deque[_PendingRequest]",
     pending_q: "queue.Queue[_PendingRequest]",
@@ -211,6 +231,7 @@ class SchedulerManager:
         prefill_admission_policy: PrefillAdmissionPolicy = "fifo",
         prefill_admission_lookahead: int = 64,
         prefill_force_fifo_every: int = 0,
+        max_active_requests: Optional[int] = None,
     ) -> None:
         if max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
@@ -235,6 +256,11 @@ class SchedulerManager:
         if self._prefill_force_fifo_every < 0:
             raise ValueError("prefill_force_fifo_every must be non-negative")
         self._prefill_iter = 0
+        self._max_active_requests = (
+            int(max_active_requests) if max_active_requests is not None else None
+        )
+        if self._max_active_requests is not None and self._max_active_requests <= 0:
+            raise ValueError("max_active_requests must be positive")
 
         self.engine = engine
         self.scheduler = OnlineScheduler(
@@ -399,6 +425,7 @@ class SchedulerManager:
                     admission_policy = self._prefill_admission_policy
                     lookahead = self._prefill_admission_lookahead
                     force_fifo_every = self._prefill_force_fifo_every
+                    max_active = self._max_active_requests
 
                 self._prefill_iter += 1
                 force_fifo = force_fifo_every > 0 and (
@@ -410,16 +437,24 @@ class SchedulerManager:
                     run_decode_once()
                     did_decode = True
 
-                pending = _take_pending_for_prefill(
-                    self._pending_buf,
-                    self._pending,
-                    max_reqs=max_new,
-                    max_tokens=max_tokens,
-                    max_context=max_context,
-                    admission_policy=admission_policy,
-                    lookahead=lookahead,
-                    force_fifo=force_fifo,
+                admit_cap = _cap_prefill_max_reqs(
+                    max_new,
+                    max_active_requests=max_active,
+                    active_unfinished=self.scheduler.num_unfinished(),
                 )
+                if admit_cap > 0:
+                    pending = _take_pending_for_prefill(
+                        self._pending_buf,
+                        self._pending,
+                        max_reqs=admit_cap,
+                        max_tokens=max_tokens,
+                        max_context=max_context,
+                        admission_policy=admission_policy,
+                        lookahead=lookahead,
+                        force_fifo=force_fifo,
+                    )
+                else:
+                    pending = []
                 batch: list[OnlineRequest] = []
                 for req in pending:
                     with self._lock:

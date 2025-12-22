@@ -1743,6 +1743,9 @@ class OnlineScheduler:
             return True
         return False
 
+    def num_unfinished(self) -> int:
+        return sum(1 for sess in self._sessions.values() if not sess.finished)
+
     def is_finished(self, request_id: int) -> bool:
         session = self._sessions.get(request_id)
         if session is None:

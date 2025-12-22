@@ -127,6 +127,12 @@ def parse_args() -> argparse.Namespace:
         help="Force FIFO admission every N iterations (0: disable).",
     )
     parser.add_argument(
+        "--max-active-requests",
+        type=int,
+        default=None,
+        help="Max unfinished requests allowed in scheduler (default: unlimited).",
+    )
+    parser.add_argument(
         "--decode-first",
         action="store_true",
         help="Run one decode step before prefill admission when possible.",
@@ -253,6 +259,7 @@ def main() -> None:
         prefill_admission_policy=args.prefill_admission_policy,
         prefill_admission_lookahead=int(args.prefill_admission_lookahead),
         prefill_force_fifo_every=int(args.prefill_force_fifo_every),
+        max_active_requests=args.max_active_requests,
         record_token_timestamps=True,
     )
     if args.no_prefix_cache:
