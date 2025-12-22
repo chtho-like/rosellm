@@ -4,6 +4,7 @@ import threading
 import time
 import traceback
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from typing import Dict, Iterator, List, Literal, Optional
 
@@ -106,12 +107,53 @@ class _PendingRequest:
     do_sample: bool
 
 
+def _take_pending_for_prefill(
+    pending_buf: "deque[_PendingRequest]",
+    pending_q: "queue.Queue[_PendingRequest]",
+    *,
+    max_reqs: int,
+    max_tokens: Optional[int],
+    max_context: int,
+) -> list[_PendingRequest]:
+    if max_reqs <= 0:
+        raise ValueError("max_reqs must be positive")
+    if max_context <= 0:
+        raise ValueError("max_context must be positive")
+    if max_tokens is not None and max_tokens <= 0:
+        raise ValueError("max_tokens must be positive")
+
+    out: list[_PendingRequest] = []
+    tokens_used = 0
+    while len(out) < max_reqs:
+        if pending_buf:
+            req = pending_buf.popleft()
+        else:
+            try:
+                req = pending_q.get_nowait()
+            except queue.Empty:
+                break
+
+        cost = min(len(req.prompt_token_ids), max_context)
+        if max_tokens is not None:
+            if not out and cost > max_tokens:
+                out.append(req)
+                break
+            if out and tokens_used + cost > max_tokens:
+                pending_buf.appendleft(req)
+                break
+
+        out.append(req)
+        tokens_used += cost
+    return out
+
+
 class SchedulerManager:
     def __init__(
         self,
         engine: InferenceEngine,
         max_batch_size: int = 8,
         prefill_max_batch_size: Optional[int] = None,
+        prefill_max_tokens: Optional[int] = None,
         record_token_timestamps: bool = False,
     ) -> None:
         if max_batch_size <= 0:
@@ -121,6 +163,11 @@ class SchedulerManager:
         self._prefill_max_batch_size = int(prefill_max_batch_size)
         if self._prefill_max_batch_size <= 0:
             raise ValueError("prefill_max_batch_size must be positive")
+        self._prefill_max_tokens = (
+            int(prefill_max_tokens) if prefill_max_tokens is not None else None
+        )
+        if self._prefill_max_tokens is not None and self._prefill_max_tokens <= 0:
+            raise ValueError("prefill_max_tokens must be positive")
 
         self.engine = engine
         self.scheduler = OnlineScheduler(
@@ -134,6 +181,7 @@ class SchedulerManager:
         self._record_token_timestamps = bool(record_token_timestamps)
         self._token_timestamps: Dict[int, list[float]] = {}
         self._pending: "queue.Queue[_PendingRequest]" = queue.Queue()
+        self._pending_buf: "deque[_PendingRequest]" = deque()
         self._next_request_id: int = 0
         self._running = True
         self._worker = threading.Thread(
@@ -158,6 +206,7 @@ class SchedulerManager:
             self._queues.clear()
             self._detoks.clear()
             self._token_timestamps.clear()
+            self._pending_buf.clear()
         worker.join(timeout=1.0)
         if worker.is_alive():
             return
@@ -239,12 +288,15 @@ class SchedulerManager:
                     if not self._running:
                         break
                     max_new = self._prefill_max_batch_size
-                pending: list[_PendingRequest] = []
-                for _ in range(max_new):
-                    try:
-                        pending.append(self._pending.get_nowait())
-                    except queue.Empty:
-                        break
+                    max_tokens = self._prefill_max_tokens
+                    max_context = int(self.engine.config.max_position_embeddings)
+                pending = _take_pending_for_prefill(
+                    self._pending_buf,
+                    self._pending,
+                    max_reqs=max_new,
+                    max_tokens=max_tokens,
+                    max_context=max_context,
+                )
                 batch: list[OnlineRequest] = []
                 for req in pending:
                     with self._lock:
@@ -331,7 +383,11 @@ class SchedulerManager:
                             q.put(tail)
                     q.put(None)
 
-                if not pending and not self.scheduler.has_unfinished():
+                if (
+                    not pending
+                    and not self._pending_buf
+                    and not self.scheduler.has_unfinished()
+                ):
                     self._wakeup.wait()
                     self._wakeup.clear()
         except Exception:

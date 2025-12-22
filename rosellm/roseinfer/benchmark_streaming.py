@@ -59,6 +59,15 @@ def parse_args() -> argparse.Namespace:
         help="Prompt to generate text from",
     )
     parser.add_argument(
+        "--prompt-repeats",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated repeat counts for base prompt, cycled per request. "
+            'Example: "1,1,1,64" produces a 3-short+1-long mix.'
+        ),
+    )
+    parser.add_argument(
         "--unique-prompts",
         action="store_true",
         help="Append an index suffix to each prompt to avoid prefix cache hits.",
@@ -68,6 +77,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=16,
         help="Number of streaming requests",
+    )
+    parser.add_argument(
+        "--submit-interval-ms",
+        type=float,
+        default=0.0,
+        help="Sleep this many milliseconds between request submissions.",
     )
     parser.add_argument(
         "--max-batch-size",
@@ -82,6 +97,14 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Max pending requests to prefill per worker iteration "
             "(default: same as --max-batch-size)."
+        ),
+    )
+    parser.add_argument(
+        "--prefill-max-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Max prompt tokens to prefill per worker iteration " "(default: unlimited)."
         ),
     )
     parser.add_argument(
@@ -152,10 +175,19 @@ def main() -> None:
         dtype = torch.bfloat16 if args.bf16 else torch.float16
     else:
         dtype = torch.float32
-    prompts = [
-        (f"{args.prompt} [{i}]" if args.unique_prompts else args.prompt)
-        for i in range(int(args.num_requests))
-    ]
+    repeats: list[int] | None = None
+    if args.prompt_repeats is not None:
+        repeats = [int(x.strip()) for x in str(args.prompt_repeats).split(",") if x]
+        if not repeats or any(r <= 0 for r in repeats):
+            raise ValueError("--prompt-repeats must contain positive integers")
+
+    prompts: list[str] = []
+    for i in range(int(args.num_requests)):
+        rep = repeats[i % len(repeats)] if repeats is not None else 1
+        p = " ".join([args.prompt] * rep) if rep > 1 else args.prompt
+        if args.unique_prompts:
+            p = f"{p} [{i}]"
+        prompts.append(p)
     model, cfg, tokenizer = load_gpt2_from_hf_pretrained(
         args.hf_model_id,
         device=torch.device(args.device),
@@ -192,6 +224,7 @@ def main() -> None:
         engine,
         max_batch_size=int(args.max_batch_size),
         prefill_max_batch_size=args.prefill_max_batch_size,
+        prefill_max_tokens=args.prefill_max_tokens,
         record_token_timestamps=True,
     )
     if args.no_prefix_cache:
@@ -254,6 +287,8 @@ def main() -> None:
             )
             threads.append(th)
             th.start()
+            if args.submit_interval_ms > 0:
+                time.sleep(float(args.submit_interval_ms) / 1e3)
         submit_wall = time.perf_counter() - t_global0
         for th in threads:
             th.join()
