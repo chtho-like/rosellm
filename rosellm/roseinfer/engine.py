@@ -1,4 +1,5 @@
 from collections import OrderedDict, deque
+from dataclasses import dataclass
 from typing import Iterator, NamedTuple, Optional
 
 import torch
@@ -145,6 +146,49 @@ class InferenceEngine:
         input_ids = torch.tensor([ids], dtype=torch.long, device=self.device)
         return input_ids  # [1, T0]
 
+    def _encode_prompt_token_ids_batch(
+        self,
+        token_ids_list: list[list[int]],
+    ) -> tuple[torch.Tensor, torch.Tensor, list[int], list[list[int]]]:
+        if not token_ids_list:
+            raise ValueError("token_ids_list must be non-empty")
+        max_pos = int(self.config.max_position_embeddings)
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.eos_token_id
+
+        truncated: list[list[int]] = []
+        lengths: list[int] = []
+        max_len = 0
+        for ids0 in token_ids_list:
+            ids = list(ids0)
+            if not ids:
+                ids = [self.eos_token_id]
+            if len(ids) > max_pos:
+                ids = ids[-max_pos:]
+            truncated.append(ids)
+            lengths.append(len(ids))
+            max_len = max(max_len, len(ids))
+
+        batch: list[list[int]] = []
+        masks: list[list[int]] = []
+        for ids in truncated:
+            pad_len = max_len - len(ids)
+            batch.append([pad_id] * pad_len + ids)
+            masks.append([0] * pad_len + [1] * len(ids))
+
+        input_ids = torch.tensor(
+            batch,
+            dtype=torch.long,
+            device=self.device,
+        )
+        attention_mask = torch.tensor(
+            masks,
+            dtype=torch.long,
+            device=self.device,
+        )
+        return input_ids, attention_mask, lengths, truncated
+
     def _encode_prompts_batch(
         self,
         prompts: list[str],
@@ -264,6 +308,64 @@ class InferenceEngine:
                 session.finished = True
         if max_new_tokens > 0 and session.step_count >= max_new_tokens:
             session.finished = True
+
+    @torch.no_grad()
+    def _prefill_register_kv_batch(
+        self,
+        sessions: list["InferenceSession"],
+        input_ids: torch.Tensor,  # [B, T]
+        attention_mask: torch.Tensor,  # [B, T]
+        lengths: list[int],  # [B]
+    ) -> torch.Tensor:
+        if len(sessions) != input_ids.size(0) or len(lengths) != input_ids.size(0):
+            raise ValueError("batch size mismatch")
+        from torch.amp import autocast
+
+        position_ids = attention_mask.to(dtype=torch.long).cumsum(-1) - 1
+        position_ids.masked_fill_(attention_mask == 0, 0)
+
+        with record_function("roseinfer.prefill_batch.model_forward"):
+            if self.use_amp:
+                with autocast(
+                    device_type=self.device.type,
+                    dtype=self.amp_dtype,
+                ):
+                    logits, _, presents = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        position_ids=position_ids,
+                    )
+            else:
+                logits, _, presents = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=None,
+                    past_key_values=None,
+                    use_cache=True,
+                    position_ids=position_ids,
+                )
+        kvm = self.kv_manager
+        with record_function("roseinfer.prefill_batch.register_kv"):
+            for layer_idx, layer_past in enumerate(presents):
+                if layer_idx >= kvm.num_layers:
+                    break
+                k_layer, v_layer = layer_past  # [B, H, T, D]
+                for b, sess in enumerate(sessions):
+                    seq_len = int(lengths[b])
+                    sess.prompt_length = seq_len
+                    k = k_layer[b : b + 1, :, -seq_len:, :]
+                    v = v_layer[b : b + 1, :, -seq_len:, :]
+                    block_ids = kvm.register_prefill_layer(
+                        layer_idx,
+                        k,
+                        v,
+                    )
+                    sess.block_ids_per_layer[layer_idx] = block_ids
+        last_logits = logits[:, -1, :]  # [B, V]
+        return last_logits
 
     def _top_k_logits(
         self,
@@ -1393,6 +1495,19 @@ class OfflineScheduler:
         return outputs
 
 
+@dataclass(frozen=True)
+class OnlineRequest:
+    prompt: str
+    max_new_tokens: int = 64
+    temperature: float = 1.0
+    top_k: int = 0
+    top_p: float = 1.0
+    stop_on_eos: bool = True
+    do_sample: bool = False
+    prompt_token_ids: Optional[list[int]] = None
+    request_id: Optional[int] = None
+
+
 class OnlineScheduler:
     def __init__(
         self,
@@ -1451,6 +1566,135 @@ class OnlineScheduler:
         if not session.finished:
             self._active_rids.append(rid)
         return rid
+
+    @torch.no_grad()
+    def add_requests(
+        self,
+        requests: list[OnlineRequest],
+    ) -> list[int]:
+        if not requests:
+            return []
+        if self.use_prefix_cache:
+            return [
+                self.add_request(
+                    prompt=req.prompt,
+                    max_new_tokens=req.max_new_tokens,
+                    temperature=req.temperature,
+                    top_k=req.top_k,
+                    top_p=req.top_p,
+                    stop_on_eos=req.stop_on_eos,
+                    do_sample=req.do_sample,
+                    prompt_token_ids=req.prompt_token_ids,
+                    request_id=req.request_id,
+                )
+                for req in requests
+            ]
+
+        eng = self.engine
+        eng.model.eval()
+
+        used: set[int] = set()
+        next_rid = self._next_request_id
+        rids: list[int] = []
+
+        def alloc_rid(desired: Optional[int]) -> int:
+            nonlocal next_rid
+            if desired is None:
+                while next_rid in used or next_rid in self._sessions:
+                    next_rid += 1
+                rid = next_rid
+                next_rid += 1
+                used.add(rid)
+                return rid
+            rid = int(desired)
+            if rid in used or rid in self._sessions:
+                raise ValueError(f"request_id {rid} already exists")
+            used.add(rid)
+            if rid >= next_rid:
+                next_rid = rid + 1
+            return rid
+
+        sessions: list[InferenceSession] = []
+        token_ids_list: list[list[int]] = []
+        for req in requests:
+            rid = alloc_rid(req.request_id)
+            rids.append(rid)
+
+            if req.prompt_token_ids is None:
+                ids = eng.tokenizer.encode(
+                    req.prompt,
+                    add_special_tokens=False,
+                )
+            else:
+                ids = list(req.prompt_token_ids)
+            if not ids:
+                ids = [eng.eos_token_id]
+            max_pos = int(eng.config.max_position_embeddings)
+            if len(ids) > max_pos:
+                ids = ids[-max_pos:]
+            token_ids_list.append(ids)
+
+            sess = InferenceSession(eng)
+            sess.input_ids = eng._encode_prompt_token_ids(ids)
+
+            max_new_tokens = int(req.max_new_tokens)
+            if max_new_tokens > 0:
+                available = max_pos - len(ids)
+                if available <= 0:
+                    sess.finished = True
+                    sessions.append(sess)
+                    continue
+                if max_new_tokens > available:
+                    max_new_tokens = available
+            sess.set_generation_config(
+                max_new_tokens=max_new_tokens,
+                temperature=req.temperature,
+                top_k=req.top_k,
+                top_p=req.top_p,
+                do_sample=req.do_sample,
+                stop_on_eos=req.stop_on_eos,
+            )
+            sessions.append(sess)
+
+        batch_idx = [i for i, s in enumerate(sessions) if not s.finished]
+        if batch_idx:
+            batch_token_ids = [token_ids_list[i] for i in batch_idx]
+            input_ids, attn_mask, lengths, _ = eng._encode_prompt_token_ids_batch(
+                batch_token_ids
+            )
+            batch_sessions = [sessions[i] for i in batch_idx]
+            last_logits = eng._prefill_register_kv_batch(
+                sessions=batch_sessions,
+                input_ids=input_ids,
+                attention_mask=attn_mask,
+                lengths=lengths,
+            )
+            for b, sess in enumerate(batch_sessions):
+                token_id = eng._sample_next_token(
+                    logits=last_logits[b : b + 1],
+                    temperature=sess.temperature,
+                    top_k=sess.top_k,
+                    top_p=sess.top_p,
+                    do_sample=sess.do_sample,
+                )
+                sess.generated_ids.append(int(token_id))
+                sess.step_count = 1
+                if sess.stop_on_eos:
+                    eos_id = eng.eos_token_id
+                    if eos_id is not None and int(token_id) == eos_id:
+                        sess.finished = True
+                if sess.max_new_tokens > 0 and sess.step_count >= sess.max_new_tokens:
+                    sess.finished = True
+                if sess.finished:
+                    sess.release_kv_blocks()
+
+        for rid, sess in zip(rids, sessions):
+            self._sessions[rid] = sess
+            if not sess.finished:
+                self._active_rids.append(rid)
+
+        self._next_request_id = next_rid
+        return rids
 
     def has_unfinished(self) -> bool:
         while self._active_rids:

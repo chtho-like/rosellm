@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .detokenizer import BaseDetokenizer
-from .engine import InferenceEngine, OnlineScheduler
+from .engine import InferenceEngine, OnlineRequest, OnlineScheduler
 
 
 class GenerateRequest(BaseModel):
@@ -222,6 +222,7 @@ class SchedulerManager:
                         pending.append(self._pending.get_nowait())
                     except queue.Empty:
                         break
+                batch: list[OnlineRequest] = []
                 for req in pending:
                     with self._lock:
                         if not self._running:
@@ -230,17 +231,21 @@ class SchedulerManager:
                         detok = self._detoks.get(req.request_id)
                     if q is None or detok is None:
                         continue
-                    rid = self.scheduler.add_request(
-                        prompt=req.prompt,
-                        max_new_tokens=req.max_new_tokens,
-                        temperature=req.temperature,
-                        top_k=req.top_k,
-                        top_p=req.top_p,
-                        stop_on_eos=req.stop_on_eos,
-                        do_sample=req.do_sample,
-                        prompt_token_ids=req.prompt_token_ids,
-                        request_id=req.request_id,
+                    batch.append(
+                        OnlineRequest(
+                            prompt=req.prompt,
+                            max_new_tokens=req.max_new_tokens,
+                            temperature=req.temperature,
+                            top_k=req.top_k,
+                            top_p=req.top_p,
+                            stop_on_eos=req.stop_on_eos,
+                            do_sample=req.do_sample,
+                            prompt_token_ids=req.prompt_token_ids,
+                            request_id=req.request_id,
+                        )
                     )
+                rids = self.scheduler.add_requests(batch) if batch else []
+                for rid in rids:
                     with self._lock:
                         q = self._queues.get(rid)
                         detok = self._detoks.get(rid)
