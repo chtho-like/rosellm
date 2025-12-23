@@ -188,3 +188,4 @@ checkpoints
 *.diff
 profiles*
 *.nsys-rep
+*.ncu-rep
