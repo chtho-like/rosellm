@@ -75,6 +75,11 @@ def parse_args() -> argparse.Namespace:
         help="Append an index suffix to each prompt to avoid prefix cache hits.",
     )
     parser.add_argument(
+        "--pretok",
+        action="store_true",
+        help="Pre-tokenize prompts and pass prompt_token_ids to SchedulerManager.add_request().",
+    )
+    parser.add_argument(
         "--num-requests",
         type=int,
         default=16,
@@ -233,6 +238,7 @@ def run_once(
     engine: InferenceEngine,
     prompts: list[str],
     prompt_lens: list[int],
+    prompt_token_ids_list: list[list[int]] | None,
     args: argparse.Namespace,
     record_token_timestamps: bool,
     print_summary: bool,
@@ -294,10 +300,14 @@ def run_once(
     threads: list[threading.Thread] = []
     try:
         t_global0 = time.perf_counter()
-        for p in prompts:
+        for i, p in enumerate(prompts):
+            prompt_token_ids = (
+                prompt_token_ids_list[i] if prompt_token_ids_list is not None else None
+            )
             submit_start = time.perf_counter()
             request_id = mgr.add_request(
                 prompt=p,
+                prompt_token_ids=prompt_token_ids,
                 max_new_tokens=int(args.max_new_tokens),
                 temperature=float(args.temperature),
                 top_k=int(args.top_k),
@@ -347,6 +357,7 @@ def run_once(
         print("=== streaming benchmark ===")
         print(f"Model: {args.hf_model_id}")
         print(f"Device: {args.device}")
+        print(f"Pretok: {bool(args.pretok)}")
         print(f"Paged attention: {bool(args.paged_attn)}")
         print(f"CUDA Graph: {bool(args.cuda_graph)}")
         print(f"NVTX: {bool(args.nvtx)}")
@@ -435,14 +446,34 @@ def main() -> None:
         device=torch.device(args.device),
         dtype=dtype,
     )
-    prompt_lens = [count_tokens(tokenizer, p) for p in prompts]
+    prompt_token_ids_list: list[list[int]] | None = None
+    if args.pretok:
+        max_pos = int(cfg.max_position_embeddings)
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        eos_id = int(eos_id) if eos_id is not None else 0
+        prompt_token_ids_list = []
+        for p in prompts:
+            ids = tokenizer.encode(p, add_special_tokens=False)
+            if not ids:
+                ids = [eos_id]
+            if len(ids) > max_pos:
+                ids = ids[-max_pos:]
+            prompt_token_ids_list.append(ids)
+        prompt_lens = [len(ids) for ids in prompt_token_ids_list]
+    else:
+        prompt_lens = [count_tokens(tokenizer, p) for p in prompts]
     block_size = 64
     blocks_per_request = [
         math.ceil((l + int(args.max_new_tokens)) / block_size) for l in prompt_lens
     ]
     required_blocks_per_layer = sum(blocks_per_request)
     if not args.no_prefix_cache and int(args.max_new_tokens) > 0:
-        unique_prompt_lens = {p: count_tokens(tokenizer, p) for p in set(prompts)}
+        if prompt_token_ids_list is None:
+            unique_prompt_lens = {p: count_tokens(tokenizer, p) for p in set(prompts)}
+        else:
+            unique_prompt_lens = {}
+            for p, ids in zip(prompts, prompt_token_ids_list):
+                unique_prompt_lens.setdefault(p, len(ids))
         prefix_extra_blocks = sum(
             1 for l in unique_prompt_lens.values() if (l % block_size) != 0
         )
@@ -470,6 +501,7 @@ def main() -> None:
             engine=engine,
             prompts=prompts,
             prompt_lens=prompt_lens,
+            prompt_token_ids_list=prompt_token_ids_list,
             args=args,
             record_token_timestamps=False,
             print_summary=False,
@@ -481,6 +513,7 @@ def main() -> None:
             engine=engine,
             prompts=prompts,
             prompt_lens=prompt_lens,
+            prompt_token_ids_list=prompt_token_ids_list,
             args=args,
             record_token_timestamps=True,
             print_summary=True,
