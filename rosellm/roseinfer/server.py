@@ -273,6 +273,7 @@ class SchedulerManager:
         self._detoks: Dict[int, BaseDetokenizer] = {}
         self._record_token_timestamps = bool(record_token_timestamps)
         self._token_timestamps: Dict[int, list[float]] = {}
+        self._admit_timestamps: Dict[int, float] = {}
         self._pending: "queue.Queue[_PendingRequest]" = queue.Queue()
         self._pending_buf: "deque[_PendingRequest]" = deque()
         self._next_request_id: int = 0
@@ -299,6 +300,7 @@ class SchedulerManager:
             self._queues.clear()
             self._detoks.clear()
             self._token_timestamps.clear()
+            self._admit_timestamps.clear()
             self._pending_buf.clear()
         worker.join(timeout=1.0)
         if worker.is_alive():
@@ -357,6 +359,14 @@ class SchedulerManager:
         with self._lock:
             out = self._token_timestamps.pop(request_id, None)
         return list(out) if out is not None else []
+
+    def pop_admit_timestamp(
+        self,
+        request_id: int,
+    ) -> float | None:
+        with self._lock:
+            out = self._admit_timestamps.pop(request_id, None)
+        return float(out) if out is not None else None
 
     def stream_text(self, request_id: int) -> Iterator[str]:
         with self._lock:
@@ -477,7 +487,16 @@ class SchedulerManager:
                             request_id=req.request_id,
                         )
                     )
+                admit_ts = (
+                    time.perf_counter()
+                    if (batch and self._record_token_timestamps)
+                    else 0.0
+                )
                 rids = self.scheduler.add_requests(batch) if batch else []
+                if rids and self._record_token_timestamps:
+                    with self._lock:
+                        for rid in rids:
+                            self._admit_timestamps[rid] = admit_ts
                 for rid in rids:
                     with self._lock:
                         q = self._queues.get(rid)

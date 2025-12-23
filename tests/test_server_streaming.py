@@ -65,3 +65,52 @@ def test_server_streaming_emits_tokens(decode_first: bool) -> None:
         assert "".join(pieces) != ""
     finally:
         mgr.close()
+
+
+def test_server_records_admit_timestamp() -> None:
+    torch.manual_seed(0)
+    cfg = GPTConfig(
+        vocab_size=128,
+        max_position_embeddings=32,
+        n_layers=2,
+        n_heads=2,
+        d_model=32,
+        d_ff=64,
+        dropout=0.0,
+    )
+    tok = _DummyTokenizer(vocab_size=128)
+    model = GPTModel(cfg)
+    engine = InferenceEngine(
+        model=model,
+        config=cfg,
+        tokenizer=tok,
+        tokenizer_name="dummy",
+        device="cpu",
+        use_amp=False,
+        kv_cache_max_concurrency=4,
+        prefix_cache_max_entries=0,
+    )
+
+    mgr = SchedulerManager(
+        engine,
+        max_batch_size=2,
+        record_token_timestamps=True,
+        decode_first=False,
+    )
+    try:
+        mgr.scheduler.use_prefix_cache = False
+        rid = mgr.add_request(
+            "hello",
+            max_new_tokens=2,
+            stop_on_eos=False,
+            do_sample=False,
+        )
+        pieces = list(mgr.stream_text(rid))
+        assert "".join(pieces) != ""
+        admit_ts = mgr.pop_admit_timestamp(rid)
+        token_ts = mgr.pop_token_timestamps(rid)
+        assert admit_ts is not None
+        assert token_ts
+        assert admit_ts <= token_ts[0]
+    finally:
+        mgr.close()
