@@ -80,6 +80,18 @@ def parse_args() -> argparse.Namespace:
         help="Number of streaming requests",
     )
     parser.add_argument(
+        "--warmup-runs",
+        type=int,
+        default=0,
+        help="Warmup runs before measurement (for JIT / CUDA graph capture).",
+    )
+    parser.add_argument(
+        "--repeat-runs",
+        type=int,
+        default=1,
+        help="Number of measured runs.",
+    )
+    parser.add_argument(
         "--submit-interval-ms",
         type=float,
         default=0.0,
@@ -215,63 +227,15 @@ def percentile(values: List[float], p: float) -> float:
     return vs[lo] * (1.0 - w) + vs[hi] * w
 
 
-def main() -> None:
-    args = parse_args()
-    if args.nvtx and args.device == "cuda":
-        os.environ["ROSEINFER_NVTX"] = "1"
-    if args.cuda_graph and not args.paged_attn:
-        print("[warn] --cuda-graph is most effective with --paged-attn (decode(T=1))")
-    if args.device == "cuda":
-        dtype = torch.bfloat16 if args.bf16 else torch.float16
-    else:
-        dtype = torch.float32
-    repeats: list[int] | None = None
-    if args.prompt_repeats is not None:
-        repeats = [int(x.strip()) for x in str(args.prompt_repeats).split(",") if x]
-        if not repeats or any(r <= 0 for r in repeats):
-            raise ValueError("--prompt-repeats must contain positive integers")
-
-    prompts: list[str] = []
-    for i in range(int(args.num_requests)):
-        rep = repeats[i % len(repeats)] if repeats is not None else 1
-        p = " ".join([args.prompt] * rep) if rep > 1 else args.prompt
-        if args.unique_prompts:
-            p = f"{p} [{i}]"
-        prompts.append(p)
-    model, cfg, tokenizer = load_gpt2_from_hf_pretrained(
-        args.hf_model_id,
-        device=torch.device(args.device),
-        dtype=dtype,
-    )
-    prompt_lens = [count_tokens(tokenizer, p) for p in prompts]
-    block_size = 64
-    blocks_per_request = [
-        math.ceil((l + int(args.max_new_tokens)) / block_size) for l in prompt_lens
-    ]
-    required_blocks_per_layer = sum(blocks_per_request)
-    if not args.no_prefix_cache and int(args.max_new_tokens) > 0:
-        unique_prompt_lens = {p: count_tokens(tokenizer, p) for p in set(prompts)}
-        prefix_extra_blocks = sum(
-            1 for l in unique_prompt_lens.values() if (l % block_size) != 0
-        )
-        required_blocks_per_layer += prefix_extra_blocks
-    max_context = cfg.max_position_embeddings
-    kv_cache_max_concurrency = max(
-        1,
-        math.ceil(required_blocks_per_layer * block_size / max_context),
-    )
-    engine = InferenceEngine(
-        model=model,
-        config=cfg,
-        tokenizer=tokenizer,
-        device=args.device,
-        use_amp=not args.no_amp,
-        bf16=args.bf16,
-        kv_cache_max_concurrency=kv_cache_max_concurrency,
-        prefix_cache_max_entries=len(set(prompts)),
-        use_paged_attention=bool(args.paged_attn),
-        use_cuda_graph=bool(args.cuda_graph),
-    )
+def run_once(
+    *,
+    engine: InferenceEngine,
+    prompts: list[str],
+    prompt_lens: list[int],
+    args: argparse.Namespace,
+    record_token_timestamps: bool,
+    print_summary: bool,
+) -> None:
     mgr = SchedulerManager(
         engine,
         max_batch_size=int(args.max_batch_size),
@@ -282,7 +246,7 @@ def main() -> None:
         prefill_admission_lookahead=int(args.prefill_admission_lookahead),
         prefill_force_fifo_every=int(args.prefill_force_fifo_every),
         max_active_requests=args.max_active_requests,
-        record_token_timestamps=True,
+        record_token_timestamps=record_token_timestamps,
     )
     if args.no_prefix_cache:
         mgr.scheduler.use_prefix_cache = False
@@ -350,6 +314,9 @@ def main() -> None:
         for th in threads:
             th.join()
 
+        if not print_summary:
+            return
+
         add_lats = [r.submit_end - r.submit_start for r in results]
         ttfts = [r.first_token_ts - r.submit_start for r in results]
         totals = [r.finish_ts - r.submit_start for r in results]
@@ -415,6 +382,90 @@ def main() -> None:
         print(f"Throughput (completion,total): {sum_tokens / wall:.2f} tokens/s")
     finally:
         mgr.close()
+
+
+def main() -> None:
+    args = parse_args()
+    if args.warmup_runs < 0:
+        raise ValueError("--warmup-runs must be >= 0")
+    if args.repeat_runs <= 0:
+        raise ValueError("--repeat-runs must be >= 1")
+    if args.nvtx and args.device == "cuda":
+        os.environ["ROSEINFER_NVTX"] = "1"
+    if args.cuda_graph and not args.paged_attn:
+        print("[warn] --cuda-graph is most effective with --paged-attn (decode(T=1))")
+    if args.device == "cuda":
+        dtype = torch.bfloat16 if args.bf16 else torch.float16
+    else:
+        dtype = torch.float32
+    repeats: list[int] | None = None
+    if args.prompt_repeats is not None:
+        repeats = [int(x.strip()) for x in str(args.prompt_repeats).split(",") if x]
+        if not repeats or any(r <= 0 for r in repeats):
+            raise ValueError("--prompt-repeats must contain positive integers")
+
+    prompts: list[str] = []
+    for i in range(int(args.num_requests)):
+        rep = repeats[i % len(repeats)] if repeats is not None else 1
+        p = " ".join([args.prompt] * rep) if rep > 1 else args.prompt
+        if args.unique_prompts:
+            p = f"{p} [{i}]"
+        prompts.append(p)
+    model, cfg, tokenizer = load_gpt2_from_hf_pretrained(
+        args.hf_model_id,
+        device=torch.device(args.device),
+        dtype=dtype,
+    )
+    prompt_lens = [count_tokens(tokenizer, p) for p in prompts]
+    block_size = 64
+    blocks_per_request = [
+        math.ceil((l + int(args.max_new_tokens)) / block_size) for l in prompt_lens
+    ]
+    required_blocks_per_layer = sum(blocks_per_request)
+    if not args.no_prefix_cache and int(args.max_new_tokens) > 0:
+        unique_prompt_lens = {p: count_tokens(tokenizer, p) for p in set(prompts)}
+        prefix_extra_blocks = sum(
+            1 for l in unique_prompt_lens.values() if (l % block_size) != 0
+        )
+        required_blocks_per_layer += prefix_extra_blocks
+    max_context = cfg.max_position_embeddings
+    kv_cache_max_concurrency = max(
+        1,
+        math.ceil(required_blocks_per_layer * block_size / max_context),
+    )
+    engine = InferenceEngine(
+        model=model,
+        config=cfg,
+        tokenizer=tokenizer,
+        device=args.device,
+        use_amp=not args.no_amp,
+        bf16=args.bf16,
+        kv_cache_max_concurrency=kv_cache_max_concurrency,
+        prefix_cache_max_entries=len(set(prompts)),
+        use_paged_attention=bool(args.paged_attn),
+        use_cuda_graph=bool(args.cuda_graph),
+    )
+    for i in range(int(args.warmup_runs)):
+        print(f"=== warmup {i + 1}/{int(args.warmup_runs)} ===")
+        run_once(
+            engine=engine,
+            prompts=prompts,
+            prompt_lens=prompt_lens,
+            args=args,
+            record_token_timestamps=False,
+            print_summary=False,
+        )
+    for i in range(int(args.repeat_runs)):
+        if int(args.repeat_runs) > 1:
+            print(f"=== run {i + 1}/{int(args.repeat_runs)} ===")
+        run_once(
+            engine=engine,
+            prompts=prompts,
+            prompt_lens=prompt_lens,
+            args=args,
+            record_token_timestamps=True,
+            print_summary=True,
+        )
 
 
 if __name__ == "__main__":
