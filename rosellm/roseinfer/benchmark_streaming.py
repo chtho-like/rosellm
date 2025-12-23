@@ -20,6 +20,7 @@ class StreamResult:
     request_id: int
     submit_start: float
     submit_end: float
+    admit_ts: float
     first_token_ts: float
     finish_ts: float
     completion_text: str
@@ -265,6 +266,9 @@ def run_once(
         for piece in mgr.stream_text(request_id):
             pieces.append(piece)
         finish_ts = time.perf_counter()
+        admit_ts = mgr.pop_admit_timestamp(request_id)
+        if admit_ts is None:
+            admit_ts = submit_end
         token_ts = mgr.pop_token_timestamps(request_id)
         if token_ts:
             first_token_ts = token_ts[0]
@@ -278,6 +282,7 @@ def run_once(
                     request_id=request_id,
                     submit_start=submit_start,
                     submit_end=submit_end,
+                    admit_ts=admit_ts,
                     first_token_ts=first_token_ts,
                     finish_ts=finish_ts,
                     completion_text=completion_text,
@@ -318,6 +323,8 @@ def run_once(
             return
 
         add_lats = [r.submit_end - r.submit_start for r in results]
+        queue_waits = [max(0.0, r.admit_ts - r.submit_end) for r in results]
+        prefill_first = [max(0.0, r.first_token_ts - r.admit_ts) for r in results]
         ttfts = [r.first_token_ts - r.submit_start for r in results]
         totals = [r.finish_ts - r.submit_start for r in results]
         completion_tokens = [int(r.completion_tokens) for r in results]
@@ -352,6 +359,18 @@ def run_once(
             f"{statistics.median(add_lats)*1e3:.2f}/"
             f"{percentile(add_lats, 95)*1e3:.2f}/"
             f"{percentile(add_lats, 99)*1e3:.2f} ms"
+        )
+        print(
+            f"Queue wait p50/p95/p99: "
+            f"{statistics.median(queue_waits)*1e3:.2f}/"
+            f"{percentile(queue_waits, 95)*1e3:.2f}/"
+            f"{percentile(queue_waits, 99)*1e3:.2f} ms"
+        )
+        print(
+            f"Prefill->first token p50/p95/p99: "
+            f"{statistics.median(prefill_first)*1e3:.2f}/"
+            f"{percentile(prefill_first, 95)*1e3:.2f}/"
+            f"{percentile(prefill_first, 99)*1e3:.2f} ms"
         )
         print(
             f"TTFT p50/p95/p99: "
