@@ -20,6 +20,7 @@ class StreamResult:
     request_id: int
     submit_start: float
     submit_end: float
+    tokenize_ts: float
     admit_ts: float
     first_token_ts: float
     finish_ts: float
@@ -78,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         "--pretok",
         action="store_true",
         help="Pre-tokenize prompts and pass prompt_token_ids to SchedulerManager.add_request().",
+    )
+    parser.add_argument(
+        "--tokenize-workers",
+        type=int,
+        default=0,
+        help="Number of background tokenization worker threads in SchedulerManager (0: tokenize in add_request).",
     )
     parser.add_argument(
         "--num-requests",
@@ -254,6 +261,7 @@ def run_once(
         prefill_force_fifo_every=int(args.prefill_force_fifo_every),
         max_active_requests=args.max_active_requests,
         record_token_timestamps=record_token_timestamps,
+        tokenize_workers=int(args.tokenize_workers),
     )
     if args.no_prefix_cache:
         mgr.scheduler.use_prefix_cache = False
@@ -272,9 +280,12 @@ def run_once(
         for piece in mgr.stream_text(request_id):
             pieces.append(piece)
         finish_ts = time.perf_counter()
+        tokenize_ts = mgr.pop_tokenize_timestamp(request_id)
+        if tokenize_ts is None:
+            tokenize_ts = submit_end
         admit_ts = mgr.pop_admit_timestamp(request_id)
         if admit_ts is None:
-            admit_ts = submit_end
+            admit_ts = tokenize_ts
         token_ts = mgr.pop_token_timestamps(request_id)
         if token_ts:
             first_token_ts = token_ts[0]
@@ -288,6 +299,7 @@ def run_once(
                     request_id=request_id,
                     submit_start=submit_start,
                     submit_end=submit_end,
+                    tokenize_ts=tokenize_ts,
                     admit_ts=admit_ts,
                     first_token_ts=first_token_ts,
                     finish_ts=finish_ts,
@@ -333,7 +345,8 @@ def run_once(
             return
 
         add_lats = [r.submit_end - r.submit_start for r in results]
-        queue_waits = [max(0.0, r.admit_ts - r.submit_end) for r in results]
+        tokenize_lats = [max(0.0, r.tokenize_ts - r.submit_end) for r in results]
+        queue_waits = [max(0.0, r.admit_ts - r.tokenize_ts) for r in results]
         prefill_first = [max(0.0, r.first_token_ts - r.admit_ts) for r in results]
         ttfts = [r.first_token_ts - r.submit_start for r in results]
         totals = [r.finish_ts - r.submit_start for r in results]
@@ -358,6 +371,7 @@ def run_once(
         print(f"Model: {args.hf_model_id}")
         print(f"Device: {args.device}")
         print(f"Pretok: {bool(args.pretok)}")
+        print(f"Tokenize workers: {int(args.tokenize_workers)}")
         print(f"Paged attention: {bool(args.paged_attn)}")
         print(f"CUDA Graph: {bool(args.cuda_graph)}")
         print(f"NVTX: {bool(args.nvtx)}")
@@ -372,7 +386,13 @@ def run_once(
             f"{percentile(add_lats, 99)*1e3:.2f} ms"
         )
         print(
-            f"Queue wait p50/p95/p99: "
+            f"Tokenize p50/p95/p99: "
+            f"{statistics.median(tokenize_lats)*1e3:.2f}/"
+            f"{percentile(tokenize_lats, 95)*1e3:.2f}/"
+            f"{percentile(tokenize_lats, 99)*1e3:.2f} ms"
+        )
+        print(
+            f"Queue wait (post-tok) p50/p95/p99: "
             f"{statistics.median(queue_waits)*1e3:.2f}/"
             f"{percentile(queue_waits, 95)*1e3:.2f}/"
             f"{percentile(queue_waits, 99)*1e3:.2f} ms"
@@ -420,6 +440,8 @@ def main() -> None:
         raise ValueError("--warmup-runs must be >= 0")
     if args.repeat_runs <= 0:
         raise ValueError("--repeat-runs must be >= 1")
+    if int(args.tokenize_workers) < 0:
+        raise ValueError("--tokenize-workers must be >= 0")
     if args.nvtx and args.device == "cuda":
         os.environ["ROSEINFER_NVTX"] = "1"
     if args.cuda_graph and not args.paged_attn:

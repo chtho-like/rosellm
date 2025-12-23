@@ -107,6 +107,18 @@ class _PendingRequest:
     do_sample: bool
 
 
+@dataclass(frozen=True)
+class _TokenizeTask:
+    request_id: int
+    prompt: str
+    max_new_tokens: int
+    temperature: float
+    top_k: int
+    top_p: float
+    stop_on_eos: bool
+    do_sample: bool
+
+
 PrefillAdmissionPolicy = Literal["fifo", "pack"]
 
 
@@ -227,6 +239,7 @@ class SchedulerManager:
         prefill_max_batch_size: Optional[int] = None,
         prefill_max_tokens: Optional[int] = None,
         record_token_timestamps: bool = False,
+        tokenize_workers: int = 0,
         decode_first: bool = False,
         prefill_admission_policy: PrefillAdmissionPolicy = "fifo",
         prefill_admission_lookahead: int = 64,
@@ -245,6 +258,9 @@ class SchedulerManager:
         )
         if self._prefill_max_tokens is not None and self._prefill_max_tokens <= 0:
             raise ValueError("prefill_max_tokens must be positive")
+        self._tokenize_workers = int(tokenize_workers)
+        if self._tokenize_workers < 0:
+            raise ValueError("tokenize_workers must be non-negative")
         self._decode_first = bool(decode_first)
         if prefill_admission_policy not in ("fifo", "pack"):
             raise ValueError("prefill_admission_policy must be fifo|pack")
@@ -274,10 +290,24 @@ class SchedulerManager:
         self._record_token_timestamps = bool(record_token_timestamps)
         self._token_timestamps: Dict[int, list[float]] = {}
         self._admit_timestamps: Dict[int, float] = {}
+        self._tokenize_timestamps: Dict[int, float] = {}
         self._pending: "queue.Queue[_PendingRequest]" = queue.Queue()
         self._pending_buf: "deque[_PendingRequest]" = deque()
+        self._tokenize_q: "queue.Queue[_TokenizeTask | None]" | None = (
+            queue.Queue() if self._tokenize_workers > 0 else None
+        )
+        self._tokenize_threads: list[threading.Thread] = []
         self._next_request_id: int = 0
         self._running = True
+        if self._tokenize_q is not None:
+            for i in range(self._tokenize_workers):
+                th = threading.Thread(
+                    target=self._tokenize_loop,
+                    name=f"roseinfer-tokenize-{i}",
+                    daemon=True,
+                )
+                self._tokenize_threads.append(th)
+                th.start()
         self._worker = threading.Thread(
             target=self._worker_loop,
             daemon=True,
@@ -286,12 +316,16 @@ class SchedulerManager:
 
     def close(self) -> None:
         worker = self._worker
+        tok_q: "queue.Queue[_TokenizeTask | None] | None" = None
+        tok_threads: list[threading.Thread] = []
         request_ids: list[int] = []
         with self._lock:
             if not self._running:
                 return
             self._running = False
             self._wakeup.set()
+            tok_q = self._tokenize_q
+            tok_threads = list(self._tokenize_threads)
             request_ids = list(self._queues.keys())
             for rid in request_ids:
                 q = self._queues.get(rid)
@@ -301,7 +335,15 @@ class SchedulerManager:
             self._detoks.clear()
             self._token_timestamps.clear()
             self._admit_timestamps.clear()
+            self._tokenize_timestamps.clear()
             self._pending_buf.clear()
+            self._tokenize_q = None
+            self._tokenize_threads.clear()
+        if tok_q is not None:
+            for _ in tok_threads:
+                tok_q.put(None)
+            for th in tok_threads:
+                th.join(timeout=1.0)
         worker.join(timeout=1.0)
         if worker.is_alive():
             return
@@ -319,6 +361,35 @@ class SchedulerManager:
         stop_on_eos: bool = True,
         do_sample: bool = False,
     ) -> int:
+        with self._lock:
+            if not self._running:
+                raise RuntimeError("SchedulerManager is closed")
+            detok = self.engine._make_detok()
+            request_id = self._next_request_id
+            self._next_request_id += 1
+            q: "queue.Queue[Optional[str]]" = queue.Queue()
+            self._queues[request_id] = q
+            self._detoks[request_id] = detok
+            if self._record_token_timestamps:
+                self._token_timestamps[request_id] = []
+
+        tok_q = self._tokenize_q
+        if prompt_token_ids is None and tok_q is not None:
+            tok_q.put(
+                _TokenizeTask(
+                    request_id=request_id,
+                    prompt=prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    stop_on_eos=stop_on_eos,
+                    do_sample=do_sample,
+                )
+            )
+            self._wakeup.set()
+            return request_id
+
         if prompt_token_ids is None:
             token_ids = self.engine.tokenizer.encode(
                 prompt,
@@ -331,18 +402,10 @@ class SchedulerManager:
         max_pos = int(self.engine.config.max_position_embeddings)
         if len(token_ids) > max_pos:
             token_ids = token_ids[-max_pos:]
-        detok = self.engine._make_detok()
         detok.start_prompt(token_ids)
-        with self._lock:
-            if not self._running:
-                raise RuntimeError("SchedulerManager is closed")
-            request_id = self._next_request_id
-            self._next_request_id += 1
-            q: "queue.Queue[Optional[str]]" = queue.Queue()
-            self._queues[request_id] = q
-            self._detoks[request_id] = detok
-            if self._record_token_timestamps:
-                self._token_timestamps[request_id] = []
+        if self._record_token_timestamps:
+            with self._lock:
+                self._tokenize_timestamps[request_id] = time.perf_counter()
         self._pending.put(
             _PendingRequest(
                 request_id=request_id,
@@ -374,6 +437,67 @@ class SchedulerManager:
         with self._lock:
             out = self._admit_timestamps.pop(request_id, None)
         return float(out) if out is not None else None
+
+    def pop_tokenize_timestamp(
+        self,
+        request_id: int,
+    ) -> float | None:
+        with self._lock:
+            out = self._tokenize_timestamps.pop(request_id, None)
+        return float(out) if out is not None else None
+
+    def _tokenize_loop(self) -> None:
+        tok_q = self._tokenize_q
+        if tok_q is None:
+            return
+        try:
+            while True:
+                task = tok_q.get()
+                if task is None:
+                    return
+                with self._lock:
+                    if not self._running:
+                        return
+                    detok = self._detoks.get(task.request_id)
+                    out_q = self._queues.get(task.request_id)
+                if detok is None or out_q is None:
+                    continue
+
+                try:
+                    token_ids = self.engine.tokenizer.encode(
+                        task.prompt,
+                        add_special_tokens=False,
+                    )
+                    if not token_ids:
+                        token_ids = [self.engine.eos_token_id]
+                    max_pos = int(self.engine.config.max_position_embeddings)
+                    if len(token_ids) > max_pos:
+                        token_ids = token_ids[-max_pos:]
+                    detok.start_prompt(token_ids)
+                    if self._record_token_timestamps:
+                        with self._lock:
+                            self._tokenize_timestamps[
+                                task.request_id
+                            ] = time.perf_counter()
+                    self._pending.put(
+                        _PendingRequest(
+                            request_id=task.request_id,
+                            prompt=task.prompt,
+                            prompt_token_ids=list(token_ids),
+                            max_new_tokens=task.max_new_tokens,
+                            temperature=task.temperature,
+                            top_k=task.top_k,
+                            top_p=task.top_p,
+                            stop_on_eos=task.stop_on_eos,
+                            do_sample=task.do_sample,
+                        )
+                    )
+                    self._wakeup.set()
+                except Exception:
+                    traceback.print_exc()
+                    out_q.put(None)
+        except Exception:
+            traceback.print_exc()
 
     def stream_text(self, request_id: int) -> Iterator[str]:
         with self._lock:
