@@ -2531,28 +2531,76 @@ class KVBlockManager:
 
         if fast_batch_idx:
             device = self.device
-            idx_t = torch.tensor(
-                fast_batch_idx,
-                device=device,
-                dtype=torch.long,
-            )
-            blk_t = torch.tensor(
-                fast_block_idx,
-                device=device,
-                dtype=torch.long,
-            )
-            pos_t = torch.tensor(
-                fast_pos,
-                device=device,
-                dtype=torch.long,
-            )
-
-            k_src = key_new.index_select(0, idx_t)
-            v_src = value_new.index_select(0, idx_t)
             k_layer = self._k_cache[layer_idx]
             v_layer = self._v_cache[layer_idx]
-            k_layer[blk_t, :, pos_t, :] = k_src
-            v_layer[blk_t, :, pos_t, :] = v_src
+            use_triton = False
+            kv_append_triton = None
+            if device.type == "cuda":
+                try:
+                    from rosellm.roseinfer.kv_append_triton import (
+                        TRITON_AVAILABLE,
+                        TRITON_KV_APPEND_MIN_BATCH,
+                        USE_TRITON_KV_APPEND,
+                    )
+                    from rosellm.roseinfer.kv_append_triton import (
+                        kv_append_triton as _kv_append_triton,
+                    )
+
+                    use_triton = (
+                        TRITON_AVAILABLE
+                        and USE_TRITON_KV_APPEND
+                        and len(fast_batch_idx) >= TRITON_KV_APPEND_MIN_BATCH
+                    )
+                    kv_append_triton = _kv_append_triton
+                except Exception:
+                    use_triton = False
+                    kv_append_triton = None
+
+            if use_triton and kv_append_triton is not None:
+                idx_t = torch.tensor(
+                    fast_batch_idx,
+                    device=device,
+                    dtype=torch.int32,
+                )
+                blk_t = torch.tensor(
+                    fast_block_idx,
+                    device=device,
+                    dtype=torch.int32,
+                )
+                pos_t = torch.tensor(
+                    fast_pos,
+                    device=device,
+                    dtype=torch.int32,
+                )
+                kv_append_triton(
+                    k_cache_layer=k_layer,
+                    v_cache_layer=v_layer,
+                    key_new=key_new,
+                    value_new=value_new,
+                    batch_idx=idx_t,
+                    block_idx=blk_t,
+                    pos=pos_t,
+                )
+            else:
+                idx_t = torch.tensor(
+                    fast_batch_idx,
+                    device=device,
+                    dtype=torch.long,
+                )
+                blk_t = torch.tensor(
+                    fast_block_idx,
+                    device=device,
+                    dtype=torch.long,
+                )
+                pos_t = torch.tensor(
+                    fast_pos,
+                    device=device,
+                    dtype=torch.long,
+                )
+                k_src = key_new.index_select(0, idx_t)
+                v_src = value_new.index_select(0, idx_t)
+                k_layer[blk_t, :, pos_t, :] = k_src
+                v_layer[blk_t, :, pos_t, :] = v_src
 
             for gid in fast_last_gid:
                 info = self._block_infos[gid]
