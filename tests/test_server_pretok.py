@@ -55,3 +55,40 @@ def test_server_add_request_reuses_tokenization() -> None:
         assert tok.encode_calls == 1
     finally:
         mgr.close()
+
+
+def test_server_add_request_accepts_prompt_token_ids() -> None:
+    torch.manual_seed(0)
+    cfg = GPTConfig(
+        vocab_size=128,
+        max_position_embeddings=32,
+        n_layers=2,
+        n_heads=2,
+        d_model=32,
+        d_ff=64,
+        dropout=0.0,
+    )
+    tok = _CountingTokenizer(vocab_size=128)
+    model = GPTModel(cfg)
+    engine = InferenceEngine(
+        model=model,
+        config=cfg,
+        tokenizer=tok,
+        tokenizer_name="dummy",
+        device="cpu",
+        use_amp=False,
+        kv_cache_max_concurrency=1,
+        prefix_cache_max_entries=0,
+    )
+
+    mgr = SchedulerManager(engine, max_batch_size=1)
+    try:
+        _ = mgr.add_request(
+            "hello",
+            prompt_token_ids=[1, 2, 3],
+            max_new_tokens=1,
+            stop_on_eos=False,
+        )
+        assert tok.encode_calls == 0
+    finally:
+        mgr.close()

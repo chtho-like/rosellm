@@ -311,6 +311,7 @@ class SchedulerManager:
     def add_request(
         self,
         prompt: str,
+        prompt_token_ids: Optional[list[int]] = None,
         max_new_tokens: int = 64,
         temperature: float = 1.0,
         top_k: int = 0,
@@ -318,12 +319,18 @@ class SchedulerManager:
         stop_on_eos: bool = True,
         do_sample: bool = False,
     ) -> int:
-        token_ids = self.engine.tokenizer.encode(
-            prompt,
-            add_special_tokens=False,
-        )
+        if prompt_token_ids is None:
+            token_ids = self.engine.tokenizer.encode(
+                prompt,
+                add_special_tokens=False,
+            )
+        else:
+            token_ids = list(prompt_token_ids)
         if not token_ids:
             token_ids = [self.engine.eos_token_id]
+        max_pos = int(self.engine.config.max_position_embeddings)
+        if len(token_ids) > max_pos:
+            token_ids = token_ids[-max_pos:]
         detok = self.engine._make_detok()
         detok.start_prompt(token_ids)
         with self._lock:
