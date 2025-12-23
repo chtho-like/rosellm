@@ -1,3 +1,5 @@
+import threading
+
 import torch
 
 from rosellm.roseinfer.engine import InferenceEngine
@@ -23,6 +25,16 @@ class _CountingTokenizer:
     def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
         del ids, skip_special_tokens
         return ""
+
+
+class _BlockingTokenizer(_CountingTokenizer):
+    def __init__(self, *, gate: threading.Event, vocab_size: int = 128) -> None:
+        super().__init__(vocab_size=vocab_size)
+        self._gate = gate
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        self._gate.wait(timeout=1.0)
+        return super().encode(text, add_special_tokens=add_special_tokens)
 
 
 def test_server_add_request_reuses_tokenization() -> None:
@@ -90,5 +102,41 @@ def test_server_add_request_accepts_prompt_token_ids() -> None:
             stop_on_eos=False,
         )
         assert tok.encode_calls == 0
+    finally:
+        mgr.close()
+
+
+def test_server_tokenize_workers_does_not_block_add_request() -> None:
+    torch.manual_seed(0)
+    cfg = GPTConfig(
+        vocab_size=128,
+        max_position_embeddings=32,
+        n_layers=2,
+        n_heads=2,
+        d_model=32,
+        d_ff=64,
+        dropout=0.0,
+    )
+    gate = threading.Event()
+    tok = _BlockingTokenizer(gate=gate, vocab_size=128)
+    model = GPTModel(cfg)
+    engine = InferenceEngine(
+        model=model,
+        config=cfg,
+        tokenizer=tok,
+        tokenizer_name="dummy",
+        device="cpu",
+        use_amp=False,
+        kv_cache_max_concurrency=1,
+        prefix_cache_max_entries=0,
+    )
+
+    mgr = SchedulerManager(engine, max_batch_size=1, tokenize_workers=1)
+    try:
+        rid = mgr.add_request("hello", max_new_tokens=1, stop_on_eos=False)
+        assert tok.encode_calls == 0
+        gate.set()
+        _ = list(mgr.stream_text(rid))
+        assert tok.encode_calls == 1
     finally:
         mgr.close()
