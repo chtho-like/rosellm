@@ -1,5 +1,6 @@
 import argparse
 import math
+import os
 import statistics
 import threading
 import time
@@ -176,6 +177,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable prefix cache inside OnlineScheduler",
     )
+    parser.add_argument(
+        "--paged-attn",
+        action="store_true",
+        help="Use paged attention for decode(T=1).",
+    )
+    parser.add_argument(
+        "--cuda-graph",
+        action="store_true",
+        help="Use CUDA Graph for decode(T=1) when possible (CUDA only).",
+    )
+    parser.add_argument(
+        "--nvtx",
+        action="store_true",
+        help="Enable NVTX ranges (sets ROSEINFER_NVTX=1).",
+    )
     return parser.parse_args()
 
 
@@ -201,6 +217,10 @@ def percentile(values: List[float], p: float) -> float:
 
 def main() -> None:
     args = parse_args()
+    if args.nvtx and args.device == "cuda":
+        os.environ["ROSEINFER_NVTX"] = "1"
+    if args.cuda_graph and not args.paged_attn:
+        print("[warn] --cuda-graph is most effective with --paged-attn (decode(T=1))")
     if args.device == "cuda":
         dtype = torch.bfloat16 if args.bf16 else torch.float16
     else:
@@ -249,6 +269,8 @@ def main() -> None:
         bf16=args.bf16,
         kv_cache_max_concurrency=kv_cache_max_concurrency,
         prefix_cache_max_entries=len(set(prompts)),
+        use_paged_attention=bool(args.paged_attn),
+        use_cuda_graph=bool(args.cuda_graph),
     )
     mgr = SchedulerManager(
         engine,
@@ -351,6 +373,9 @@ def main() -> None:
         print("=== streaming benchmark ===")
         print(f"Model: {args.hf_model_id}")
         print(f"Device: {args.device}")
+        print(f"Paged attention: {bool(args.paged_attn)}")
+        print(f"CUDA Graph: {bool(args.cuda_graph)}")
+        print(f"NVTX: {bool(args.nvtx)}")
         print(f"Requests: {len(results)}")
         print(f"Prompt tokens (total): {sum(prompt_lens)}")
         print(f"Completion tokens (total): {sum_tokens}")
