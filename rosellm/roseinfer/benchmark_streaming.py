@@ -108,7 +108,18 @@ def parse_args() -> argparse.Namespace:
         "--submit-interval-ms",
         type=float,
         default=0.0,
-        help="Sleep this many milliseconds between request submissions.",
+        help="Submit interval in milliseconds (0: burst).",
+    )
+    parser.add_argument(
+        "--submit-schedule",
+        type=str,
+        default="relative",
+        choices=["relative", "absolute"],
+        help=(
+            "How to apply submit interval: "
+            "'relative' sleeps after each submission; "
+            "'absolute' targets t0 + i*interval (less sensitive to add_request overhead)."
+        ),
     )
     parser.add_argument(
         "--max-batch-size",
@@ -312,11 +323,22 @@ def run_once(
     threads: list[threading.Thread] = []
     try:
         t_global0 = time.perf_counter()
+        submit_interval_s = float(args.submit_interval_ms) / 1e3
+        submit_schedule = str(args.submit_schedule)
+        submit_lags: list[float] = []
         for i, p in enumerate(prompts):
+            if submit_interval_s > 0 and submit_schedule == "absolute":
+                target = t_global0 + float(i) * submit_interval_s
+                now = time.perf_counter()
+                if now < target:
+                    time.sleep(target - now)
             prompt_token_ids = (
                 prompt_token_ids_list[i] if prompt_token_ids_list is not None else None
             )
             submit_start = time.perf_counter()
+            if submit_interval_s > 0 and submit_schedule == "absolute":
+                target = t_global0 + float(i) * submit_interval_s
+                submit_lags.append(max(0.0, submit_start - target))
             request_id = mgr.add_request(
                 prompt=p,
                 prompt_token_ids=prompt_token_ids,
@@ -335,8 +357,8 @@ def run_once(
             )
             threads.append(th)
             th.start()
-            if args.submit_interval_ms > 0:
-                time.sleep(float(args.submit_interval_ms) / 1e3)
+            if submit_interval_s > 0 and submit_schedule == "relative":
+                time.sleep(submit_interval_s)
         submit_wall = time.perf_counter() - t_global0
         for th in threads:
             th.join()
@@ -379,6 +401,17 @@ def run_once(
         print(f"Prompt tokens (total): {sum(prompt_lens)}")
         print(f"Completion tokens (total): {sum_tokens}")
         print(f"Submit wall: {submit_wall:.6f} s")
+        if submit_interval_s > 0:
+            print(
+                f"Submit interval/schedule: {float(args.submit_interval_ms):.3f} ms / {submit_schedule}"
+            )
+        if submit_lags:
+            print(
+                f"Submit lag p50/p95/p99: "
+                f"{statistics.median(submit_lags)*1e3:.2f}/"
+                f"{percentile(submit_lags, 95)*1e3:.2f}/"
+                f"{percentile(submit_lags, 99)*1e3:.2f} ms"
+            )
         print(
             f"add_request latency p50/p95/p99: "
             f"{statistics.median(add_lats)*1e3:.2f}/"
@@ -440,6 +473,8 @@ def main() -> None:
         raise ValueError("--warmup-runs must be >= 0")
     if args.repeat_runs <= 0:
         raise ValueError("--repeat-runs must be >= 1")
+    if float(args.submit_interval_ms) < 0:
+        raise ValueError("--submit-interval-ms must be >= 0")
     if int(args.tokenize_workers) < 0:
         raise ValueError("--tokenize-workers must be >= 0")
     if args.nvtx and args.device == "cuda":
