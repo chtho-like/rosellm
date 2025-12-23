@@ -187,3 +187,4 @@ datasets
 checkpoints
 *.diff
 profiles*
+*.nsys-rep

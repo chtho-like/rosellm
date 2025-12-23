@@ -1,4 +1,6 @@
+import os
 from collections import OrderedDict, deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, NamedTuple, Optional
 
@@ -18,6 +20,18 @@ try:
     import tiktoken
 except ImportError:
     tiktoken = None
+
+
+@contextmanager
+def _maybe_nvtx_range(name: str, enabled: bool) -> Iterator[None]:
+    if enabled:
+        torch.cuda.nvtx.range_push(name)
+        try:
+            yield
+        finally:
+            torch.cuda.nvtx.range_pop()
+    else:
+        yield
 
 
 class InferenceEngine:
@@ -930,34 +944,33 @@ class InferenceEngine:
             if self.use_paged_attention:
                 from rosellm.rosetrainer.paged_attention import PagedKVCache
 
+                nvtx = device.type == "cuda" and os.environ.get("ROSEINFER_NVTX") == "1"
                 block_size = kvm.block_size
-                num_blocks_max = self.max_blocks_per_seq
                 max_blocks_per_layer = kvm.max_blocks_per_layer
                 block_tables_buf = self._get_paged_block_tables_buf(batch_size)
                 block_tables_cpu = self._get_paged_block_tables_cpu_buf(batch_size)
-                with record_function(
+                with _maybe_nvtx_range(
                     "roseinfer.decode_step_sessions.build_block_tables",
-                ):
+                    nvtx,
+                ), record_function("roseinfer.decode_step_sessions.build_block_tables"):
                     for layer_idx in range(num_layers):
                         offset = layer_idx * max_blocks_per_layer
-                        rows: list[list[int]] = []
-                        for idx, sess in enumerate(sessions):
-                            ids = sess.block_ids_per_layer[layer_idx]
-                            physical = [gid - offset for gid in ids]
-                            if not physical:
-                                physical = [0]
-                            if len(physical) < num_blocks_max:
-                                physical = physical + [0] * (
-                                    num_blocks_max - len(physical)
-                                )
-                            else:
-                                physical = physical[:num_blocks_max]
-                            rows.append(physical)
-                        tmp = torch.tensor(rows, dtype=torch.int32)
-                        block_tables_cpu[layer_idx, :batch_size].copy_(tmp)
-                with record_function(
+                        rows = [
+                            sess.get_paged_block_table_row_cpu(
+                                layer_idx=layer_idx,
+                                offset=offset,
+                            )
+                            for sess in sessions
+                        ]
+                        torch.stack(
+                            rows,
+                            dim=0,
+                            out=block_tables_cpu[layer_idx, :batch_size],
+                        )
+                with _maybe_nvtx_range(
                     "roseinfer.decode_step_sessions.h2d_block_tables",
-                ):
+                    nvtx,
+                ), record_function("roseinfer.decode_step_sessions.h2d_block_tables"):
                     block_tables_buf[:, :batch_size].copy_(
                         block_tables_cpu[:, :batch_size],
                         non_blocking=True,
@@ -973,7 +986,9 @@ class InferenceEngine:
                     context_lens=lens.to(torch.int32),
                     block_size=block_size,
                 )
-                with record_function(
+                with _maybe_nvtx_range(
+                    "roseinfer.model.forward", nvtx
+                ), record_function(
                     "roseinfer.model.forward",
                 ):
                     if self.use_amp:
@@ -998,7 +1013,9 @@ class InferenceEngine:
                             paged_kv_cache=paged,
                         )
                 last_logits = logits[:, -1, :]  # [B, V]
-                with record_function("roseinfer.kv.append_token"):
+                with _maybe_nvtx_range(
+                    "roseinfer.kv.append_token", nvtx
+                ), record_function("roseinfer.kv.append_token"):
                     for layer_idx in range(num_layers):
                         k_step, v_step = presents[layer_idx]  # [B, H, 1, D]
                         k_step = k_step.squeeze(2)  # [B, H, D]
@@ -1110,6 +1127,40 @@ class InferenceSession:
             [] for _ in range(self.kv_manager.num_layers)
         ]
         self.prompt_length: int = 0
+        self._paged_block_table_rows_cpu: list[torch.Tensor] | None = None
+        self._paged_block_table_sig: list[tuple[int, int]] | None = None
+
+    def get_paged_block_table_row_cpu(
+        self,
+        *,
+        layer_idx: int,
+        offset: int,
+    ) -> torch.Tensor:
+        max_blocks = int(self.engine.max_blocks_per_seq)
+        if self._paged_block_table_rows_cpu is None:
+            num_layers = int(self.kv_manager.num_layers)
+            self._paged_block_table_rows_cpu = [
+                torch.zeros((max_blocks,), dtype=torch.int32, device="cpu")
+                for _ in range(num_layers)
+            ]
+            self._paged_block_table_sig = [(-1, -1) for _ in range(num_layers)]
+        assert self._paged_block_table_sig is not None
+
+        ids = self.block_ids_per_layer[layer_idx]
+        sig = (len(ids), int(ids[-1]) if ids else -1)
+        if sig != self._paged_block_table_sig[layer_idx]:
+            row = self._paged_block_table_rows_cpu[layer_idx]
+            row.zero_()
+            if ids:
+                n = min(len(ids), max_blocks)
+                row[:n].copy_(
+                    torch.tensor(
+                        [gid - offset for gid in ids[:n]],
+                        dtype=torch.int32,
+                    )
+                )
+            self._paged_block_table_sig[layer_idx] = sig
+        return self._paged_block_table_rows_cpu[layer_idx]
 
     def set_generation_config(
         self,
