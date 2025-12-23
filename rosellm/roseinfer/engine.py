@@ -485,22 +485,17 @@ class InferenceEngine:
         top_p: float,
         do_sample: bool,
     ) -> torch.Tensor:
-        batch_size = logits.size(0)
-        next_ids = []
-        for i in range(batch_size):
-            next_id = self._sample_next_token(
-                logits=logits[i : i + 1],
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                do_sample=do_sample,
+        if logits.dim() != 2:
+            raise ValueError(
+                f"logits must be 2D [B, V], got shape={tuple(logits.shape)}"
             )
-            next_ids.append(next_id)
-        return torch.tensor(
-            next_ids,
-            dtype=torch.long,
-            device=self.device,
-        )
+        if not do_sample or temperature <= 0.0:
+            return torch.argmax(logits, dim=-1)
+        scaled = logits / float(temperature)
+        filtered = self._top_k_logits(scaled, top_k)
+        filtered = self._top_p_logits(filtered, top_p)
+        probs = torch.softmax(filtered, dim=-1).clamp_min(1e-9)
+        return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
     @torch.no_grad()
     def generate(
@@ -627,8 +622,9 @@ class InferenceEngine:
                 do_sample=do_sample,
             )
             eos_positions: list[Optional[int]] = [None for _ in range(batch_size)]
+            next_list = next_ids.tolist()
             for b in range(batch_size):
-                token_id = int(next_ids[b].item())
+                token_id = int(next_list[b])
                 generated_ids[b].append(token_id)
                 if (
                     stop_on_eos
@@ -653,8 +649,9 @@ class InferenceEngine:
                     top_p=top_p,
                     do_sample=do_sample,
                 )
+                next_list = next_ids.tolist()
                 for b in range(batch_size):
-                    token_id = int(next_ids[b].item())
+                    token_id = int(next_list[b])
                     if (
                         stop_on_eos
                         and self.eos_token_id is not None
@@ -1630,7 +1627,13 @@ class InferenceSession:
             top_p=self.top_p,
             do_sample=self.do_sample,
         )
-        token_id = int(next_token)
+        return self.apply_token_id(int(next_token))
+
+    def apply_token_id(self, token_id: int) -> int | None:
+        if self.finished:
+            return None
+        eng = self.engine
+        token_id = int(token_id)
         self.generated_ids.append(token_id)
         self.step_count += 1
         if self.stop_on_eos:
@@ -1657,16 +1660,7 @@ class InferenceSession:
             top_p=self.top_p,
             do_sample=self.do_sample,
         )
-        token_id = int(next_token)
-        self.generated_ids.append(token_id)
-        self.step_count += 1
-        if self.stop_on_eos:
-            eos_id = eng.eos_token_id
-            if eos_id is not None and token_id == eos_id:
-                self.finished = True
-        if self.max_new_tokens > 0 and self.step_count >= self.max_new_tokens:
-            self.finished = True
-        return token_id
+        return self.apply_token_id(int(next_token))
 
     def release_kv_blocks(self) -> None:
         if self.paged_slot_id is not None:
@@ -1866,9 +1860,50 @@ class OfflineScheduler:
         sessions = [pair[1] for pair in active_pairs]
         last_logits = self.engine.decode_step_sessions(sessions)
         step_tokens: dict[int, int] = {}
-        for idx, (rid, sess) in enumerate(active_pairs):
-            logits_row = last_logits[idx]
-            token_id = sess.apply_batch_logits(logits_row)
+
+        groups: dict[tuple[float, int, float, bool], list[int]] = {}
+        for i, (_, sess) in enumerate(active_pairs):
+            key = (
+                float(sess.temperature),
+                int(sess.top_k),
+                float(sess.top_p),
+                bool(sess.do_sample),
+            )
+            groups.setdefault(key, []).append(i)
+
+        next_token_ids: list[int] = [0 for _ in range(len(active_pairs))]
+        for (temp, top_k, top_p, do_sample), idxs in groups.items():
+            if len(idxs) == len(active_pairs) and idxs == list(
+                range(len(active_pairs))
+            ):
+                next_ids = self.engine._sample_next_token_batch(
+                    logits=last_logits,
+                    temperature=temp,
+                    top_k=top_k,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                )
+                next_token_ids = [int(x) for x in next_ids.tolist()]
+                break
+            idx_t = torch.tensor(
+                idxs,
+                device=self.engine.device,
+                dtype=torch.long,
+            )
+            logits_g = last_logits.index_select(0, idx_t)
+            next_ids = self.engine._sample_next_token_batch(
+                logits=logits_g,
+                temperature=temp,
+                top_k=top_k,
+                top_p=top_p,
+                do_sample=do_sample,
+            )
+            next_list = next_ids.tolist()
+            for pos, i in enumerate(idxs):
+                next_token_ids[i] = int(next_list[pos])
+
+        for i, (rid, sess) in enumerate(active_pairs):
+            token_id = sess.apply_token_id(next_token_ids[i])
             if token_id is not None:
                 step_tokens[rid] = token_id
         return step_tokens
@@ -2177,9 +2212,50 @@ class OnlineScheduler:
         last_logits = self.engine.decode_step_sessions(sessions)
         step_tokens: dict[int, int] = {}
         just_finished: list[int] = []
-        for idx, (rid, sess) in enumerate(selected_pairs):
-            logits_row = last_logits[idx]
-            token_id = sess.apply_batch_logits(logits_row)
+
+        groups: dict[tuple[float, int, float, bool], list[int]] = {}
+        for i, (_, sess) in enumerate(selected_pairs):
+            key = (
+                float(sess.temperature),
+                int(sess.top_k),
+                float(sess.top_p),
+                bool(sess.do_sample),
+            )
+            groups.setdefault(key, []).append(i)
+
+        next_token_ids: list[int] = [0 for _ in range(len(selected_pairs))]
+        for (temp, top_k, top_p, do_sample), idxs in groups.items():
+            if len(idxs) == len(selected_pairs) and idxs == list(
+                range(len(selected_pairs))
+            ):
+                next_ids = self.engine._sample_next_token_batch(
+                    logits=last_logits,
+                    temperature=temp,
+                    top_k=top_k,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                )
+                next_token_ids = [int(x) for x in next_ids.tolist()]
+                break
+            idx_t = torch.tensor(
+                idxs,
+                device=self.engine.device,
+                dtype=torch.long,
+            )
+            logits_g = last_logits.index_select(0, idx_t)
+            next_ids = self.engine._sample_next_token_batch(
+                logits=logits_g,
+                temperature=temp,
+                top_k=top_k,
+                top_p=top_p,
+                do_sample=do_sample,
+            )
+            next_list = next_ids.tolist()
+            for pos, i in enumerate(idxs):
+                next_token_ids[i] = int(next_list[pos])
+
+        for i, (rid, sess) in enumerate(selected_pairs):
+            token_id = sess.apply_token_id(next_token_ids[i])
             if token_id is not None:
                 step_tokens[rid] = token_id
                 if sess.finished:
