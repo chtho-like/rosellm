@@ -1130,13 +1130,15 @@ class InferenceEngine:
                         k_step, v_step = presents[layer_idx]  # [B, H, 1, D]
                         k_step = k_step.squeeze(2)  # [B, H, D]
                         v_step = v_step.squeeze(2)
-                        for idx, sess in enumerate(sessions):
-                            kvm.append_token(
-                                layer_idx,
-                                sess.block_ids_per_layer[layer_idx],
-                                k_step[idx],
-                                v_step[idx],
-                            )
+                        block_ids_list = [
+                            sess.block_ids_per_layer[layer_idx] for sess in sessions
+                        ]
+                        kvm.append_token_batch(
+                            layer_idx,
+                            block_ids_list,
+                            k_step,
+                            v_step,
+                        )
                 return last_logits
 
             max_len = max(seq_lens)
@@ -1206,15 +1208,15 @@ class InferenceEngine:
                     k_b, v_b = presents[layer_idx]  # [B, H, max_len+1, D]
                     k_step = k_b.select(2, max_len)  # [B, H, D]
                     v_step = v_b.select(2, max_len)  # [B, H, D]
-                    for idx, sess in enumerate(sessions):
-                        if sess.finished:
-                            continue
-                        kvm.append_token(
-                            layer_idx,
-                            sess.block_ids_per_layer[layer_idx],
-                            k_step[idx],  # [H, D]
-                            v_step[idx],  # [H, D]
-                        )
+                    block_ids_list = [
+                        sess.block_ids_per_layer[layer_idx] for sess in sessions
+                    ]
+                    kvm.append_token_batch(
+                        layer_idx,
+                        block_ids_list,
+                        k_step,
+                        v_step,
+                    )
             return last_logits
 
 
@@ -2243,6 +2245,89 @@ class KVBlockManager:
             length=info.length + 1,
         )
         self._block_infos[last_id] = new_info
+
+    def append_token_batch(
+        self,
+        layer_idx: int,
+        block_ids_list: list[list[int]],
+        key_new: torch.Tensor,  # [B, H, D]
+        value_new: torch.Tensor,  # [B, H, D]
+    ) -> None:
+        assert 0 <= layer_idx < self.num_layers
+        assert key_new.dim() == 3 and value_new.dim() == 3
+        assert key_new.shape == value_new.shape
+        assert key_new.size(1) == self.num_heads and key_new.size(2) == self.head_dim
+
+        batch_size = int(key_new.size(0))
+        if batch_size == 0:
+            return
+        if len(block_ids_list) != batch_size:
+            raise ValueError(
+                f"block_ids_list size mismatch ({len(block_ids_list)} != {batch_size})"
+            )
+
+        fast_batch_idx: list[int] = []
+        fast_block_idx: list[int] = []
+        fast_pos: list[int] = []
+        fast_last_gid: list[int] = []
+        slow_batch_idx: list[int] = []
+
+        for b, block_ids in enumerate(block_ids_list):
+            if not block_ids:
+                slow_batch_idx.append(b)
+                continue
+            last_gid = block_ids[-1]
+            info = self._block_infos[last_gid]
+            ref = self._block_refcounts.get(last_gid, 1)
+            if ref != 1 or info.length >= self.block_size:
+                slow_batch_idx.append(b)
+                continue
+            fast_batch_idx.append(b)
+            fast_block_idx.append(info.block_index)
+            fast_pos.append(info.length)
+            fast_last_gid.append(last_gid)
+
+        if fast_batch_idx:
+            device = self.device
+            idx_t = torch.tensor(
+                fast_batch_idx,
+                device=device,
+                dtype=torch.long,
+            )
+            blk_t = torch.tensor(
+                fast_block_idx,
+                device=device,
+                dtype=torch.long,
+            )
+            pos_t = torch.tensor(
+                fast_pos,
+                device=device,
+                dtype=torch.long,
+            )
+
+            k_src = key_new.index_select(0, idx_t)
+            v_src = value_new.index_select(0, idx_t)
+            k_layer = self._k_cache[layer_idx]
+            v_layer = self._v_cache[layer_idx]
+            k_layer[blk_t, :, pos_t, :] = k_src
+            v_layer[blk_t, :, pos_t, :] = v_src
+
+            for gid in fast_last_gid:
+                info = self._block_infos[gid]
+                self._block_infos[gid] = KVBlockInfo(
+                    layer=info.layer,
+                    block_index=info.block_index,
+                    start=info.start,
+                    length=info.length + 1,
+                )
+
+        for b in slow_batch_idx:
+            self.append_token(
+                layer_idx,
+                block_ids_list[b],
+                key_new[b],
+                value_new[b],
+            )
 
     def gather_sequence_into(
         self,
