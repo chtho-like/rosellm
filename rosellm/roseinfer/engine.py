@@ -34,6 +34,19 @@ def _maybe_nvtx_range(name: str, enabled: bool) -> Iterator[None]:
         yield
 
 
+@dataclass
+class _PagedDecodeCudaGraph:
+    batch_size: int
+    global_block_tables_ptr: int
+    graph: torch.cuda.CUDAGraph
+    input_ids: torch.Tensor  # [B, 1] int64 cuda
+    position_ids: torch.Tensor  # [B, 1] int64 cuda
+    slot_mapping: torch.Tensor  # [B] int32 cuda
+    context_lens: torch.Tensor  # [B] int32 cuda
+    logits: torch.Tensor  # [B, 1, vocab]
+    presents: list[tuple[torch.Tensor, torch.Tensor]]
+
+
 class InferenceEngine:
     def __init__(
         self,
@@ -46,6 +59,7 @@ class InferenceEngine:
         kv_cache_max_concurrency: int = 256,
         prefix_cache_max_entries: int = 256,
         use_paged_attention: bool = False,
+        use_cuda_graph: bool = False,
         model: GPTModel | None = None,
         config: GPTConfig | None = None,
         tokenizer=None,
@@ -55,6 +69,11 @@ class InferenceEngine:
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
+        self.use_cuda_graph = (
+            bool(use_cuda_graph)
+            and self.device.type == "cuda"
+            and torch.cuda.is_available()
+        )
         self.use_amp = use_amp and self.device.type == "cuda"
         if self.use_amp and self.device.type == "cuda":
             if bf16:
@@ -151,6 +170,10 @@ class InferenceEngine:
         self._paged_dirty_rows_capacity: int = 0
         self._paged_dirty_rows_cpu_buf: torch.Tensor | None = None
         self._paged_dirty_rows_cpu_capacity: int = 0
+        self._paged_decode_cuda_graphs: dict[int, _PagedDecodeCudaGraph] = {}
+        self._cuda_graph_pool = (
+            torch.cuda.graphs.graph_pool_handle() if self.use_cuda_graph else None
+        )
 
         if self.config.vocab_size < self.tokenizer.vocab_size:
             raise ValueError("the model vocab_size is less than tokenizer vocab_size")
@@ -990,6 +1013,111 @@ class InferenceEngine:
             self._paged_dirty_rows_cpu_capacity = cap
         return self._paged_dirty_rows_cpu_buf
 
+    def _get_or_create_paged_decode_cuda_graph(
+        self,
+        *,
+        batch_size: int,
+        global_block_tables: torch.Tensor,
+    ) -> _PagedDecodeCudaGraph:
+        if not self.use_cuda_graph:
+            raise RuntimeError("use_cuda_graph is disabled")
+        if self.device.type != "cuda":
+            raise RuntimeError("CUDA graph requires CUDA device")
+        if not self.use_paged_attention:
+            raise RuntimeError("CUDA graph path only supports paged attention decode")
+
+        batch_size = int(batch_size)
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+
+        global_ptr = int(global_block_tables.data_ptr())
+        if self._paged_decode_cuda_graphs:
+            any_graph = next(iter(self._paged_decode_cuda_graphs.values()))
+            if any_graph.global_block_tables_ptr != global_ptr:
+                self._paged_decode_cuda_graphs.clear()
+
+        cached = self._paged_decode_cuda_graphs.get(batch_size)
+        if cached is not None:
+            return cached
+
+        from torch.amp import autocast
+
+        from rosellm.rosetrainer.paged_attention import PagedKVCache
+
+        num_layers = int(self.kv_manager.num_layers)
+        block_tables = [
+            global_block_tables[layer_idx] for layer_idx in range(num_layers)
+        ]
+
+        input_ids = torch.zeros(
+            (batch_size, 1),
+            device=self.device,
+            dtype=torch.long,
+        )
+        position_ids = torch.zeros_like(input_ids)
+        slot_mapping = torch.zeros(
+            (batch_size,),
+            device=self.device,
+            dtype=torch.int32,
+        )
+        context_lens = torch.zeros_like(slot_mapping)
+
+        paged = PagedKVCache(
+            k_cache=self.kv_manager._k_cache,
+            v_cache=self.kv_manager._v_cache,
+            block_tables=block_tables,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            block_size=int(self.kv_manager.block_size),
+        )
+
+        def run_model():
+            return self.model(
+                input_ids=input_ids,
+                attention_mask=None,
+                labels=None,
+                past_key_values=None,
+                use_cache=True,
+                position_ids=position_ids,
+                paged_kv_cache=paged,
+            )
+
+        # Warm up: compile kernels / populate allocator cache before capture.
+        for _ in range(3):
+            if self.use_amp:
+                with autocast(device_type=self.device.type, dtype=self.amp_dtype):
+                    run_model()
+            else:
+                run_model()
+        torch.cuda.synchronize(device=self.device)
+
+        graph = torch.cuda.CUDAGraph()
+        pool = self._cuda_graph_pool
+        torch.cuda.synchronize(device=self.device)
+        with torch.cuda.graph(graph, pool=pool):
+            if self.use_amp:
+                with autocast(device_type=self.device.type, dtype=self.amp_dtype):
+                    logits, _, presents = run_model()
+            else:
+                logits, _, presents = run_model()
+
+        if not isinstance(presents, list):
+            raise TypeError("expected presents to be a list of (k, v) tuples")
+
+        captured = _PagedDecodeCudaGraph(
+            batch_size=batch_size,
+            global_block_tables_ptr=global_ptr,
+            graph=graph,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            logits=logits,
+            presents=presents,
+        )
+        self._paged_decode_cuda_graphs[batch_size] = captured
+        return captured
+
     @torch.no_grad()
     def decode_step_sessions(
         self,
@@ -1013,20 +1141,10 @@ class InferenceEngine:
                 seq_len = sess.prompt_length + sess.step_count - 1
                 seq_lens.append(seq_len)
             assert len(last_ids) == batch_size
-            lens = torch.tensor(seq_lens, device=device, dtype=torch.long)
-
-            input_ids = torch.tensor(  # [B, 1]
-                last_ids,
-                dtype=torch.long,
-                device=device,
-            ).view(batch_size, 1)
-            position_ids = lens.view(batch_size, 1)
             num_layers = kvm.num_layers
             num_heads = kvm.num_heads
             head_dim = kvm.head_dim
             if self.use_paged_attention:
-                from rosellm.rosetrainer.paged_attention import PagedKVCache
-
                 nvtx = device.type == "cuda" and os.environ.get("ROSEINFER_NVTX") == "1"
                 block_size = kvm.block_size
                 max_blocks_per_layer = kvm.max_blocks_per_layer
@@ -1080,29 +1198,80 @@ class InferenceEngine:
                                 rows_buf,
                             )
 
-                slot_mapping = torch.tensor(
-                    slot_ids,
-                    device=device,
-                    dtype=torch.int32,
-                )
-                block_tables = [
-                    global_block_tables[layer_idx] for layer_idx in range(num_layers)
-                ]
-                paged = PagedKVCache(
-                    k_cache=kvm._k_cache,
-                    v_cache=kvm._v_cache,
-                    block_tables=block_tables,
-                    slot_mapping=slot_mapping,
-                    context_lens=lens.to(torch.int32),
-                    block_size=block_size,
-                )
-                with _maybe_nvtx_range(
-                    "roseinfer.model.forward", nvtx
-                ), record_function(
-                    "roseinfer.model.forward",
-                ):
-                    if self.use_amp:
-                        with autocast(device_type=device.type, dtype=self.amp_dtype):
+                if self.use_cuda_graph:
+                    graph = self._get_or_create_paged_decode_cuda_graph(
+                        batch_size=batch_size,
+                        global_block_tables=global_block_tables,
+                    )
+                    graph.input_ids[:, 0].copy_(
+                        torch.tensor(last_ids, dtype=torch.long),
+                        non_blocking=True,
+                    )
+                    graph.position_ids[:, 0].copy_(
+                        torch.tensor(seq_lens, dtype=torch.long),
+                        non_blocking=True,
+                    )
+                    graph.slot_mapping.copy_(
+                        torch.tensor(slot_ids, dtype=torch.int32),
+                        non_blocking=True,
+                    )
+                    graph.context_lens.copy_(
+                        torch.tensor(seq_lens, dtype=torch.int32),
+                        non_blocking=True,
+                    )
+                    with _maybe_nvtx_range(
+                        "roseinfer.model.forward.cuda_graph_replay", nvtx
+                    ), record_function("roseinfer.model.forward.cuda_graph_replay"):
+                        graph.graph.replay()
+                    logits = graph.logits
+                    presents = graph.presents
+                else:
+                    from rosellm.rosetrainer.paged_attention import PagedKVCache
+
+                    lens = torch.tensor(seq_lens, device=device, dtype=torch.long)
+                    input_ids = torch.tensor(  # [B, 1]
+                        last_ids,
+                        dtype=torch.long,
+                        device=device,
+                    ).view(batch_size, 1)
+                    position_ids = lens.view(batch_size, 1)
+                    slot_mapping = torch.tensor(
+                        slot_ids,
+                        device=device,
+                        dtype=torch.int32,
+                    )
+                    block_tables = [
+                        global_block_tables[layer_idx]
+                        for layer_idx in range(num_layers)
+                    ]
+                    paged = PagedKVCache(
+                        k_cache=kvm._k_cache,
+                        v_cache=kvm._v_cache,
+                        block_tables=block_tables,
+                        slot_mapping=slot_mapping,
+                        context_lens=lens.to(torch.int32),
+                        block_size=block_size,
+                    )
+                    with _maybe_nvtx_range(
+                        "roseinfer.model.forward", nvtx
+                    ), record_function(
+                        "roseinfer.model.forward",
+                    ):
+                        if self.use_amp:
+                            with autocast(
+                                device_type=device.type,
+                                dtype=self.amp_dtype,
+                            ):
+                                logits, _, presents = self.model(
+                                    input_ids=input_ids,
+                                    attention_mask=None,
+                                    labels=None,
+                                    past_key_values=None,
+                                    use_cache=True,
+                                    position_ids=position_ids,
+                                    paged_kv_cache=paged,
+                                )
+                        else:
                             logits, _, presents = self.model(
                                 input_ids=input_ids,
                                 attention_mask=None,
@@ -1112,16 +1281,6 @@ class InferenceEngine:
                                 position_ids=position_ids,
                                 paged_kv_cache=paged,
                             )
-                    else:
-                        logits, _, presents = self.model(
-                            input_ids=input_ids,
-                            attention_mask=None,
-                            labels=None,
-                            past_key_values=None,
-                            use_cache=True,
-                            position_ids=position_ids,
-                            paged_kv_cache=paged,
-                        )
                 last_logits = logits[:, -1, :]  # [B, V]
                 with _maybe_nvtx_range(
                     "roseinfer.kv.append_token", nvtx
@@ -1141,6 +1300,13 @@ class InferenceEngine:
                         )
                 return last_logits
 
+            lens = torch.tensor(seq_lens, device=device, dtype=torch.long)
+            input_ids = torch.tensor(  # [B, 1]
+                last_ids,
+                dtype=torch.long,
+                device=device,
+            ).view(batch_size, 1)
+            position_ids = lens.view(batch_size, 1)
             max_len = max(seq_lens)
             past_mask = torch.arange(
                 max_len,

@@ -164,6 +164,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use paged attention",
     )
+    parser.add_argument(
+        "--cuda-graph",
+        action="store_true",
+        help="Use CUDA Graph for decode(T=1) when possible (CUDA only).",
+    )
     return parser.parse_args()
 
 
@@ -748,6 +753,7 @@ def main() -> None:
             kv_cache_max_concurrency=kv_cache_max_concurrency,
             prefix_cache_max_entries=len(set(prompts)),
             use_paged_attention=args.paged_attn,
+            use_cuda_graph=args.cuda_graph,
         )
     else:
         if args.tokenizer_name is None:
@@ -786,6 +792,7 @@ def main() -> None:
             kv_cache_max_concurrency=kv_cache_max_concurrency,
             prefix_cache_max_entries=len(set(prompts)),
             use_paged_attention=args.paged_attn,
+            use_cuda_graph=args.cuda_graph,
         )
     if args.mode in ("naive", "all"):
         benchmark_naive(engine, prompts, prompt_lens, args)
