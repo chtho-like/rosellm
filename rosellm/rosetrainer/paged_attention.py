@@ -83,7 +83,17 @@ def paged_attention_decode_ref(
 
 
 if TRITON_AVAILABLE:
+    _PAGED_ATTN_AUTOTUNE_CONFIGS = [
+        triton.Config({}, num_warps=2, num_stages=2),
+        triton.Config({}, num_warps=4, num_stages=2),
+        triton.Config({}, num_warps=4, num_stages=4),
+        triton.Config({}, num_warps=8, num_stages=2),
+    ]
 
+    @triton.autotune(
+        configs=_PAGED_ATTN_AUTOTUNE_CONFIGS,
+        key=["H", "D", "BLOCK_SIZE", "MAX_BLOCKS"],
+    )
     @triton.jit
     def _paged_attn_decode_kernel(
         out_ptr,
@@ -225,6 +235,5 @@ def paged_attention_decode_triton(
         D=D,
         BLOCK_SIZE=block_size,
         MAX_BLOCKS=block_table.size(1),
-        num_warps=4,
     )
     return out
