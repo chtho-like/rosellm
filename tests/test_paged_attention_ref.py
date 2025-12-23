@@ -71,6 +71,7 @@ def test_paged_attention_decode_ref_matches_dense() -> None:
     k_new = torch.randn_like(q)
     v_new = torch.randn_like(q)
     scale = 1.0 / math.sqrt(float(head_dim))
+    slot_mapping = torch.arange(bsz, dtype=torch.int32)
 
     out_ref = paged_attention_decode_ref(
         q=q,
@@ -79,6 +80,7 @@ def test_paged_attention_decode_ref_matches_dense() -> None:
         k_cache_layer=k_cache,
         v_cache_layer=v_cache,
         block_table=block_table,
+        slot_mapping=slot_mapping,
         context_lens=context_lens,
         scale=scale,
         block_size=block_size,

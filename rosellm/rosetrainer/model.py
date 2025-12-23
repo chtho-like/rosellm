@@ -98,6 +98,7 @@ class MultiHeadSelfAttention(nn.Module):
                 k_cache_layer=paged_kv_cache.k_cache[layer_idx],
                 v_cache_layer=paged_kv_cache.v_cache[layer_idx],
                 block_table=paged_kv_cache.block_tables[layer_idx],
+                slot_mapping=paged_kv_cache.slot_mapping,
                 context_lens=paged_kv_cache.context_lens,
                 scale=self.d_head**-0.5,
                 block_size=paged_kv_cache.block_size,

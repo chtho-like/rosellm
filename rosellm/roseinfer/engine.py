@@ -144,6 +144,13 @@ class InferenceEngine:
         self._paged_block_tables_capacity: int = 0
         self._paged_block_tables_cpu_buf: torch.Tensor | None = None
         self._paged_block_tables_cpu_capacity: int = 0
+        self._paged_global_block_tables: torch.Tensor | None = None
+        self._paged_slot_capacity: int = 0
+        self._paged_free_slots: list[int] = []
+        self._paged_dirty_rows_buf: torch.Tensor | None = None
+        self._paged_dirty_rows_capacity: int = 0
+        self._paged_dirty_rows_cpu_buf: torch.Tensor | None = None
+        self._paged_dirty_rows_cpu_capacity: int = 0
 
         if self.config.vocab_size < self.tokenizer.vocab_size:
             raise ValueError("the model vocab_size is less than tokenizer vocab_size")
@@ -907,6 +914,82 @@ class InferenceEngine:
             self._paged_block_tables_cpu_capacity = cap
         return self._paged_block_tables_cpu_buf
 
+    def _ensure_paged_slot_capacity(
+        self,
+        min_capacity: int,
+    ) -> None:
+        if (
+            self._paged_global_block_tables is not None
+            and self._paged_slot_capacity >= min_capacity
+        ):
+            return
+        min_capacity = max(1, int(min_capacity))
+        new_cap = max(min_capacity, self._paged_slot_capacity * 2, 128)
+        new_tables = torch.zeros(
+            (self.config.n_layers, new_cap, self.max_blocks_per_seq),
+            device=self.device,
+            dtype=torch.int32,
+        )
+        if (
+            self._paged_global_block_tables is not None
+            and self._paged_slot_capacity > 0
+        ):
+            new_tables[:, : self._paged_slot_capacity].copy_(
+                self._paged_global_block_tables
+            )
+        self._paged_global_block_tables = new_tables
+        self._paged_free_slots.extend(range(self._paged_slot_capacity, new_cap))
+        self._paged_slot_capacity = new_cap
+
+    def _alloc_paged_slot(self) -> int:
+        if not self._paged_free_slots:
+            self._ensure_paged_slot_capacity(self._paged_slot_capacity + 1)
+        return int(self._paged_free_slots.pop())
+
+    def _free_paged_slot(self, slot_id: int) -> None:
+        self._paged_free_slots.append(int(slot_id))
+
+    def _get_paged_global_block_tables(self) -> torch.Tensor:
+        if self._paged_global_block_tables is None:
+            self._ensure_paged_slot_capacity(128)
+        assert self._paged_global_block_tables is not None
+        return self._paged_global_block_tables
+
+    def _get_paged_dirty_rows_buf(
+        self,
+        n_rows: int,
+    ) -> torch.Tensor:
+        if (
+            self._paged_dirty_rows_buf is None
+            or self._paged_dirty_rows_capacity < n_rows
+        ):
+            cap = max(n_rows, self._paged_dirty_rows_capacity * 2, 16)
+            self._paged_dirty_rows_buf = torch.empty(
+                (cap, self.max_blocks_per_seq),
+                device=self.device,
+                dtype=torch.int32,
+            )
+            self._paged_dirty_rows_capacity = cap
+        return self._paged_dirty_rows_buf
+
+    def _get_paged_dirty_rows_cpu_buf(
+        self,
+        n_rows: int,
+    ) -> torch.Tensor:
+        if (
+            self._paged_dirty_rows_cpu_buf is None
+            or self._paged_dirty_rows_cpu_capacity < n_rows
+        ):
+            cap = max(n_rows, self._paged_dirty_rows_cpu_capacity * 2, 16)
+            self._paged_dirty_rows_cpu_buf = torch.empty(
+                (cap, self.max_blocks_per_seq),
+                device="cpu",
+                dtype=torch.int32,
+                pin_memory=(self.device.type == "cuda"),
+            )
+            self._paged_dirty_rows_cpu_capacity = cap
+        return self._paged_dirty_rows_cpu_buf
+
     @torch.no_grad()
     def decode_step_sessions(
         self,
@@ -947,42 +1030,69 @@ class InferenceEngine:
                 nvtx = device.type == "cuda" and os.environ.get("ROSEINFER_NVTX") == "1"
                 block_size = kvm.block_size
                 max_blocks_per_layer = kvm.max_blocks_per_layer
-                block_tables_buf = self._get_paged_block_tables_buf(batch_size)
-                block_tables_cpu = self._get_paged_block_tables_cpu_buf(batch_size)
+                slot_ids: list[int] = []
+                for sess in sessions:
+                    if sess.paged_slot_id is None:
+                        sess.paged_slot_id = self._alloc_paged_slot()
+                        sess.clear_paged_block_table_cache()
+                    assert sess.paged_slot_id is not None
+                    slot_ids.append(sess.paged_slot_id)
+                global_block_tables = self._get_paged_global_block_tables()
+
                 with _maybe_nvtx_range(
-                    "roseinfer.decode_step_sessions.build_block_tables",
+                    "roseinfer.decode_step_sessions.sync_global_block_tables",
                     nvtx,
-                ), record_function("roseinfer.decode_step_sessions.build_block_tables"):
-                    for layer_idx in range(num_layers):
-                        offset = layer_idx * max_blocks_per_layer
-                        rows = [
-                            sess.get_paged_block_table_row_cpu(
-                                layer_idx=layer_idx,
-                                offset=offset,
-                            )
-                            for sess in sessions
-                        ]
-                        torch.stack(
-                            rows,
-                            dim=0,
-                            out=block_tables_cpu[layer_idx, :batch_size],
+                ), record_function(
+                    "roseinfer.decode_step_sessions.sync_global_block_tables"
+                ):
+                    dirty_idx: list[int] = []
+                    for idx, sess in enumerate(sessions):
+                        _, dirty = sess.get_paged_block_table_row_cpu_and_dirty(
+                            layer_idx=0,
+                            offset=0,
                         )
-                with _maybe_nvtx_range(
-                    "roseinfer.decode_step_sessions.h2d_block_tables",
-                    nvtx,
-                ), record_function("roseinfer.decode_step_sessions.h2d_block_tables"):
-                    block_tables_buf[:, :batch_size].copy_(
-                        block_tables_cpu[:, :batch_size],
-                        non_blocking=True,
-                    )
+                        if dirty:
+                            dirty_idx.append(idx)
+                    if dirty_idx:
+                        dirty_slot_ids = [slot_ids[idx] for idx in dirty_idx]
+                        dirty_slot_ids_t = torch.tensor(
+                            dirty_slot_ids,
+                            device=device,
+                            dtype=torch.long,
+                        )
+                        n_dirty = len(dirty_idx)
+                        rows_cpu = self._get_paged_dirty_rows_cpu_buf(n_dirty)[:n_dirty]
+                        rows_buf = self._get_paged_dirty_rows_buf(n_dirty)[:n_dirty]
+                        for layer_idx in range(num_layers):
+                            offset = layer_idx * max_blocks_per_layer
+                            rows = [
+                                sessions[idx].get_paged_block_table_row_cpu(
+                                    layer_idx=layer_idx,
+                                    offset=offset,
+                                )
+                                for idx in dirty_idx
+                            ]
+                            torch.stack(rows, dim=0, out=rows_cpu)
+                            rows_buf.copy_(rows_cpu, non_blocking=True)
+                            global_block_tables[layer_idx].index_copy_(
+                                0,
+                                dirty_slot_ids_t,
+                                rows_buf,
+                            )
+
+                slot_mapping = torch.tensor(
+                    slot_ids,
+                    device=device,
+                    dtype=torch.int32,
+                )
                 block_tables = [
-                    block_tables_buf[layer_idx, :batch_size]
-                    for layer_idx in range(num_layers)
+                    global_block_tables[layer_idx] for layer_idx in range(num_layers)
                 ]
                 paged = PagedKVCache(
                     k_cache=kvm._k_cache,
                     v_cache=kvm._v_cache,
                     block_tables=block_tables,
+                    slot_mapping=slot_mapping,
                     context_lens=lens.to(torch.int32),
                     block_size=block_size,
                 )
@@ -1127,20 +1237,30 @@ class InferenceSession:
             [] for _ in range(self.kv_manager.num_layers)
         ]
         self.prompt_length: int = 0
+        self.paged_slot_id: int | None = None
         self._paged_block_table_rows_cpu: list[torch.Tensor] | None = None
         self._paged_block_table_sig: list[tuple[int, int]] | None = None
 
-    def get_paged_block_table_row_cpu(
+    def clear_paged_block_table_cache(self) -> None:
+        self._paged_block_table_rows_cpu = None
+        self._paged_block_table_sig = None
+
+    def get_paged_block_table_row_cpu_and_dirty(
         self,
         *,
         layer_idx: int,
         offset: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, bool]:
         max_blocks = int(self.engine.max_blocks_per_seq)
         if self._paged_block_table_rows_cpu is None:
             num_layers = int(self.kv_manager.num_layers)
             self._paged_block_table_rows_cpu = [
-                torch.zeros((max_blocks,), dtype=torch.int32, device="cpu")
+                torch.empty(
+                    (max_blocks,),
+                    dtype=torch.int32,
+                    device="cpu",
+                    pin_memory=(self.engine.device.type == "cuda"),
+                ).zero_()
                 for _ in range(num_layers)
             ]
             self._paged_block_table_sig = [(-1, -1) for _ in range(num_layers)]
@@ -1160,7 +1280,20 @@ class InferenceSession:
                     )
                 )
             self._paged_block_table_sig[layer_idx] = sig
-        return self._paged_block_table_rows_cpu[layer_idx]
+            return row, True
+        return self._paged_block_table_rows_cpu[layer_idx], False
+
+    def get_paged_block_table_row_cpu(
+        self,
+        *,
+        layer_idx: int,
+        offset: int,
+    ) -> torch.Tensor:
+        row, _ = self.get_paged_block_table_row_cpu_and_dirty(
+            layer_idx=layer_idx,
+            offset=offset,
+        )
+        return row
 
     def set_generation_config(
         self,
@@ -1368,6 +1501,10 @@ class InferenceSession:
         return token_id
 
     def release_kv_blocks(self) -> None:
+        if self.paged_slot_id is not None:
+            self.engine._free_paged_slot(self.paged_slot_id)
+            self.paged_slot_id = None
+            self.clear_paged_block_table_cache()
         self.kv_cache = None
         if self.kv_manager is None:
             return
