@@ -1809,6 +1809,80 @@ class PrefixCacheEntry:
         self.last_logits = last_logits.detach().to("cpu")
 
 
+class _TokenTrieNode:
+    __slots__ = ("children", "entry", "count")
+
+    def __init__(self) -> None:
+        self.children: dict[int, "_TokenTrieNode"] = {}
+        self.entry: PrefixCacheEntry | None = None
+        self.count: int = 0
+
+
+class _TokenTrie:
+    def __init__(self) -> None:
+        self.root = _TokenTrieNode()
+
+    def insert(
+        self,
+        key: tuple[int, ...],
+        entry: PrefixCacheEntry,
+    ) -> None:
+        node = self.root
+        node.count += 1
+        for tok in key:
+            nxt = node.children.get(tok)
+            if nxt is None:
+                nxt = _TokenTrieNode()
+                node.children[tok] = nxt
+            node = nxt
+            node.count += 1
+        node.entry = entry
+
+    def remove(
+        self,
+        key: tuple[int, ...],
+        entry: PrefixCacheEntry | None = None,
+    ) -> None:
+        node = self.root
+        stack: list[tuple[_TokenTrieNode, int, _TokenTrieNode]] = []
+        for tok in key:
+            nxt = node.children.get(tok)
+            if nxt is None:
+                return
+            stack.append((node, tok, nxt))
+            node = nxt
+
+        if node.entry is None:
+            return
+        if entry is not None and node.entry is not entry:
+            return
+
+        node.entry = None
+        self.root.count -= 1
+        for _, _, child in stack:
+            child.count -= 1
+
+        for parent, tok, child in reversed(stack):
+            if child.count > 0:
+                break
+            parent.children.pop(tok, None)
+
+    def longest_prefix(
+        self,
+        key: tuple[int, ...],
+    ) -> PrefixCacheEntry | None:
+        node = self.root
+        best: PrefixCacheEntry | None = None
+        for tok in key:
+            nxt = node.children.get(tok)
+            if nxt is None:
+                break
+            node = nxt
+            if node.entry is not None:
+                best = node.entry
+        return best
+
+
 class PrefixCache:
     def __init__(
         self,
@@ -1818,6 +1892,7 @@ class PrefixCache:
         self.kv_manager = kv_manager
         self.max_entries = max(0, int(max_entries))
         self._entries: OrderedDict[PrefixCacheKey, PrefixCacheEntry] = OrderedDict()
+        self._token_trie = _TokenTrie()
 
     def _release_entry(self, entry: PrefixCacheEntry) -> None:
         for layer_idx, block_ids in enumerate(entry.blocks_ids_per_layer):
@@ -1828,11 +1903,15 @@ class PrefixCache:
         if not self._entries:
             return
         _, entry = self._entries.popitem(last=False)
+        if isinstance(entry.key, tuple):
+            self._token_trie.remove(entry.key, entry)
         self._release_entry(entry)
 
     def clear(self) -> None:
         while self._entries:
             _, entry = self._entries.popitem(last=False)
+            if isinstance(entry.key, tuple):
+                self._token_trie.remove(entry.key, entry)
             self._release_entry(entry)
 
     def get(self, key: PrefixCacheKey) -> PrefixCacheEntry | None:
@@ -1842,45 +1921,11 @@ class PrefixCache:
         self,
         key: tuple[int, ...],
     ) -> PrefixCacheEntry | None:
-        if not self._entries:
-            return None
         key_len = len(key)
         if key_len <= 0:
             return None
-
-        block_size = int(self.kv_manager.block_size)
-        best_entry: PrefixCacheEntry | None = None
-        best_len = 0
-        for entry in reversed(self._entries.values()):  # MRU first
-            if not isinstance(entry.key, tuple):
-                continue
-            entry_len = int(entry.prompt_length)
-            if entry_len <= best_len or entry_len >= key_len:
-                continue
-
-            full_blocks = entry_len // block_size
-            ok = True
-            for b in range(full_blocks):
-                start = b * block_size
-                end = start + block_size
-                if entry.key[start:end] != key[start:end]:
-                    ok = False
-                    break
-            if not ok:
-                continue
-            rem = entry_len - full_blocks * block_size
-            if rem > 0:
-                start = full_blocks * block_size
-                end = start + rem
-                if entry.key[start:end] != key[start:end]:
-                    continue
-
-            best_entry = entry
-            best_len = entry_len
-            if best_len >= key_len - 1:
-                break
-
-        if best_entry is None:
+        best_entry = self._token_trie.longest_prefix(key)
+        if best_entry is None or int(best_entry.prompt_length) >= key_len:
             return None
         self._entries.move_to_end(best_entry.key)
         return best_entry
@@ -1911,6 +1956,8 @@ class PrefixCache:
         while self.max_entries > 0 and len(self._entries) >= self.max_entries:
             self._evict_one()
         self._entries[key] = entry
+        if isinstance(key, tuple):
+            self._token_trie.insert(key, entry)
         self._entries.move_to_end(key)
 
     def attach(
