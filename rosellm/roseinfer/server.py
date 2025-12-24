@@ -306,6 +306,7 @@ class SchedulerManager:
             engine,
             max_batch_size=int(max_batch_size),
         )
+        self.engine.warmup_paged_attention_decode()
         self._lock = threading.Lock()
         self._wakeup = threading.Event()
         self._queues: Dict[int, "queue.Queue[Optional[str]]"] = {}
