@@ -189,6 +189,22 @@ class InferenceEngine:
         if self.config.vocab_size < self.tokenizer.vocab_size:
             raise ValueError("the model vocab_size is less than tokenizer vocab_size")
 
+    def warmup_paged_attention_decode(self) -> None:
+        if not self.use_paged_attention:
+            return
+        if self.device.type != "cuda" or not torch.cuda.is_available():
+            return
+        token_id = int(self.eos_token_id or 0)
+        sess = InferenceSession(self)
+        sess.prompt_length = 0
+        sess.generated_ids = [token_id]
+        sess.step_count = 1
+        try:
+            self.decode_step_sessions([sess])
+            torch.cuda.synchronize()
+        finally:
+            sess.release_kv_blocks()
+
     def _encode_prompt(self, prompt: str) -> torch.Tensor:
         ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         if not ids:
@@ -1822,6 +1838,53 @@ class PrefixCache:
     def get(self, key: PrefixCacheKey) -> PrefixCacheEntry | None:
         return self._entries.get(key)
 
+    def find_longest_token_prefix(
+        self,
+        key: tuple[int, ...],
+    ) -> PrefixCacheEntry | None:
+        if not self._entries:
+            return None
+        key_len = len(key)
+        if key_len <= 0:
+            return None
+
+        block_size = int(self.kv_manager.block_size)
+        best_entry: PrefixCacheEntry | None = None
+        best_len = 0
+        for entry in reversed(self._entries.values()):  # MRU first
+            if not isinstance(entry.key, tuple):
+                continue
+            entry_len = int(entry.prompt_length)
+            if entry_len <= best_len or entry_len >= key_len:
+                continue
+
+            full_blocks = entry_len // block_size
+            ok = True
+            for b in range(full_blocks):
+                start = b * block_size
+                end = start + block_size
+                if entry.key[start:end] != key[start:end]:
+                    ok = False
+                    break
+            if not ok:
+                continue
+            rem = entry_len - full_blocks * block_size
+            if rem > 0:
+                start = full_blocks * block_size
+                end = start + rem
+                if entry.key[start:end] != key[start:end]:
+                    continue
+
+            best_entry = entry
+            best_len = entry_len
+            if best_len >= key_len - 1:
+                break
+
+        if best_entry is None:
+            return None
+        self._entries.move_to_end(best_entry.key)
+        return best_entry
+
     def put(
         self,
         key: PrefixCacheKey,
@@ -2096,6 +2159,7 @@ class OnlineScheduler:
         token_ids_list: list[list[int]] = []
         cache_keys: list[PrefixCacheKey] = []
         last_logits_per_req: list[torch.Tensor | None] = [None for _ in requests]
+        prefix_suffix_ids: dict[int, list[int]] = {}
         miss_idx: list[int] = []
         dup_of: dict[int, int] = {}
         first_idx_for_key: dict[PrefixCacheKey, int] = {}
@@ -2155,6 +2219,12 @@ class OnlineScheduler:
                 if cached_logits is not None:
                     last_logits_per_req[i] = cached_logits
                     continue
+                if eng.use_paged_attention and isinstance(cache_key, tuple):
+                    prefix = eng.prefix_cache.find_longest_token_prefix(cache_key)
+                    if prefix is not None and prefix.prompt_length < len(ids):
+                        eng.prefix_cache.attach(prefix.key, sess)
+                        prefix_suffix_ids[i] = ids[prefix.prompt_length :]
+                        continue
 
             miss_idx.append(i)
 
@@ -2177,6 +2247,44 @@ class OnlineScheduler:
                     eng.prefix_cache.put(
                         cache_keys[idx],
                         sessions[idx],
+                        logits,
+                    )
+
+        if prefix_suffix_ids:
+            suffix_pos: dict[int, int] = {idx: 0 for idx in prefix_suffix_ids}
+            while True:
+                active = [
+                    idx
+                    for idx, pos in suffix_pos.items()
+                    if pos < len(prefix_suffix_ids[idx])
+                ]
+                if not active:
+                    break
+                active_sessions = [sessions[idx] for idx in active]
+                for idx, sess in zip(active, active_sessions):
+                    tok = int(prefix_suffix_ids[idx][suffix_pos[idx]])
+                    sess.generated_ids = [tok]
+                    sess.step_count = 1
+                step_logits = eng.decode_step_sessions(active_sessions)
+                for b, idx in enumerate(active):
+                    logits = step_logits[b : b + 1]
+                    last_logits_per_req[idx] = logits
+                    sessions[idx].prompt_length += 1
+                    suffix_pos[idx] += 1
+
+            for idx in prefix_suffix_ids:
+                sess = sessions[idx]
+                sess.generated_ids = []
+                sess.step_count = 0
+                logits = last_logits_per_req[idx]
+                if logits is None:
+                    raise RuntimeError(
+                        f"missing prefix reuse logits for request {rids[idx]}"
+                    )
+                if self.use_prefix_cache:
+                    eng.prefix_cache.put(
+                        cache_keys[idx],
+                        sess,
                         logits,
                     )
 
