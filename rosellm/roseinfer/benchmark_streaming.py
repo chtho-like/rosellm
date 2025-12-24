@@ -81,6 +81,14 @@ def parse_args() -> argparse.Namespace:
         help="Pre-tokenize prompts and pass prompt_token_ids to SchedulerManager.add_request().",
     )
     parser.add_argument(
+        "--pretok-base-token-ids",
+        action="store_true",
+        help=(
+            "When --pretok is enabled, tokenize the base prompt before applying --unique-prompts. "
+            "This keeps prompt_token_ids stable even if prompt text differs."
+        ),
+    )
+    parser.add_argument(
         "--tokenize-workers",
         type=int,
         default=0,
@@ -422,6 +430,7 @@ def run_once(
         print(f"Model: {args.hf_model_id}")
         print(f"Device: {args.device}")
         print(f"Pretok: {bool(args.pretok)}")
+        print(f"Pretok base token ids: {bool(args.pretok_base_token_ids)}")
         print(f"Tokenize workers: {int(args.tokenize_workers)}")
         print(f"Stream interval: {int(args.stream_interval)}")
         print(f"Paged attention: {bool(args.paged_attn)}")
@@ -533,14 +542,19 @@ def main() -> None:
         repeats = [int(x.strip()) for x in str(args.prompt_repeats).split(",") if x]
         if not repeats or any(r <= 0 for r in repeats):
             raise ValueError("--prompt-repeats must contain positive integers")
+    if args.pretok_base_token_ids and not args.pretok:
+        raise ValueError("--pretok-base-token-ids requires --pretok")
 
     prompts: list[str] = []
+    tokenize_prompts: list[str] = []
     for i in range(int(args.num_requests)):
         rep = repeats[i % len(repeats)] if repeats is not None else 1
-        p = " ".join([args.prompt] * rep) if rep > 1 else args.prompt
+        base_prompt = " ".join([args.prompt] * rep) if rep > 1 else args.prompt
+        p = base_prompt
         if args.unique_prompts:
             p = f"{p} [{i}]"
         prompts.append(p)
+        tokenize_prompts.append(base_prompt if args.pretok_base_token_ids else p)
     model, cfg, tokenizer = load_gpt2_from_hf_pretrained(
         args.hf_model_id,
         device=torch.device(args.device),
@@ -552,7 +566,7 @@ def main() -> None:
         eos_id = getattr(tokenizer, "eos_token_id", None)
         eos_id = int(eos_id) if eos_id is not None else 0
         prompt_token_ids_list = []
-        for p in prompts:
+        for p in tokenize_prompts:
             ids = tokenizer.encode(p, add_special_tokens=False)
             if not ids:
                 ids = [eos_id]
