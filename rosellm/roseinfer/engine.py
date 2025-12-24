@@ -1806,7 +1806,7 @@ class PrefixCacheEntry:
         self.key = key
         self.prompt_length = int(prompt_length)
         self.blocks_ids_per_layer = [list(ids) for ids in blocks_ids_per_layer]
-        self.last_logits = last_logits.detach().to("cpu")
+        self.last_logits = last_logits.detach().clone()
 
 
 class _TokenTrieNode:
