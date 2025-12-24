@@ -2744,14 +2744,38 @@ class KVBlockManager:
 
         for b, block_ids in enumerate(block_ids_list):
             if not block_ids:
-                slow_batch_idx.append(b)
-                continue
-            last_gid = block_ids[-1]
-            info = self._block_infos[last_gid]
-            ref = self._block_refcounts.get(last_gid, 1)
+                block_idx = self._alloc_block_index(layer_idx)
+                last_gid = self._to_global_block_id(layer_idx, block_idx)
+                info = KVBlockInfo(
+                    layer=layer_idx,
+                    block_index=block_idx,
+                    start=0,
+                    length=0,
+                )
+                self._block_infos[last_gid] = info
+                self._block_refcounts[last_gid] = 1
+                block_ids.append(last_gid)
+                ref = 1
+            else:
+                last_gid = block_ids[-1]
+                info = self._block_infos[last_gid]
+                ref = self._block_refcounts.get(last_gid, 1)
+
             if info.length >= self.block_size:
-                slow_batch_idx.append(b)
-                continue
+                block_idx = self._alloc_block_index(layer_idx)
+                new_gid = self._to_global_block_id(layer_idx, block_idx)
+                info = KVBlockInfo(
+                    layer=info.layer,
+                    block_index=block_idx,
+                    start=info.start + info.length,
+                    length=0,
+                )
+                self._block_infos[new_gid] = info
+                self._block_refcounts[new_gid] = 1
+                block_ids.append(new_gid)
+                last_gid = new_gid
+                ref = 1
+
             if ref != 1:
                 self._block_refcounts[last_gid] = ref - 1
                 block_idx = self._alloc_block_index(layer_idx)
