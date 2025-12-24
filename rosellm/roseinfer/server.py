@@ -556,22 +556,57 @@ class SchedulerManager:
                     step_tokens = self.scheduler.step()
                     finished_ids = self.scheduler.pop_finished_ids()
 
-                    for rid, token_id in step_tokens.items():
-                        with self._lock:
-                            q = self._queues.get(rid)
-                            detok = self._detoks.get(rid)
-                            state = self._stream_states.get(rid)
-                            token_ts = (
-                                self._token_timestamps.get(rid)
-                                if self._record_token_timestamps
-                                else None
+                    step_records: list[
+                        tuple[
+                            int,
+                            int,
+                            "queue.Queue[Optional[str]] | None",
+                            BaseDetokenizer | None,
+                            _StreamState | None,
+                            list[float] | None,
+                        ]
+                    ] = []
+                    finished_records: list[
+                        tuple[
+                            int,
+                            "queue.Queue[Optional[str]] | None",
+                            BaseDetokenizer | None,
+                            _StreamState | None,
+                        ]
+                    ] = []
+                    with self._lock:
+                        for rid, token_id in step_tokens.items():
+                            step_records.append(
+                                (
+                                    rid,
+                                    int(token_id),
+                                    self._queues.get(rid),
+                                    self._detoks.get(rid),
+                                    self._stream_states.get(rid),
+                                    (
+                                        self._token_timestamps.get(rid)
+                                        if self._record_token_timestamps
+                                        else None
+                                    ),
+                                )
                             )
+                        for rid in finished_ids:
+                            finished_records.append(
+                                (
+                                    int(rid),
+                                    self._queues.get(rid),
+                                    self._detoks.get(rid),
+                                    self._stream_states.get(rid),
+                                )
+                            )
+
+                    for rid, token_id, q, detok, state, token_ts in step_records:
                         if q is None or detok is None or state is None:
                             self.scheduler.discard_request(rid)
                             continue
                         if token_ts is not None:
                             token_ts.append(time.perf_counter())
-                        piece = detok.on_token(int(token_id))
+                        piece = detok.on_token(token_id)
                         if piece:
                             state.buf.append(piece)
                         state.tokens_since_flush += 1
@@ -584,11 +619,7 @@ class SchedulerManager:
                             state.tokens_since_flush = 0
                             state.sent_any = True
 
-                    for rid in finished_ids:
-                        with self._lock:
-                            q = self._queues.get(rid)
-                            detok = self._detoks.get(rid)
-                            state = self._stream_states.get(rid)
+                    for rid, q, detok, state in finished_records:
                         self.scheduler.discard_request(rid)
                         if q is None or state is None:
                             continue
