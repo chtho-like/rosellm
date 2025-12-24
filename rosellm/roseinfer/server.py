@@ -8,12 +8,16 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Dict, Iterator, List, Literal, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .detokenizer import BaseDetokenizer
 from .engine import InferenceEngine, OnlineRequest, OnlineScheduler
+
+
+class SchedulerManagerOverloadedError(RuntimeError):
+    pass
 
 
 class GenerateRequest(BaseModel):
@@ -245,6 +249,7 @@ class SchedulerManager:
         prefill_admission_lookahead: int = 64,
         prefill_force_fifo_every: int = 0,
         max_active_requests: Optional[int] = None,
+        max_inflight_requests: Optional[int] = None,
     ) -> None:
         if max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
@@ -277,6 +282,11 @@ class SchedulerManager:
         )
         if self._max_active_requests is not None and self._max_active_requests <= 0:
             raise ValueError("max_active_requests must be positive")
+        self._max_inflight_requests = (
+            int(max_inflight_requests) if max_inflight_requests is not None else None
+        )
+        if self._max_inflight_requests is not None and self._max_inflight_requests <= 0:
+            raise ValueError("max_inflight_requests must be positive")
 
         self.engine = engine
         self.scheduler = OnlineScheduler(
@@ -364,6 +374,10 @@ class SchedulerManager:
         with self._lock:
             if not self._running:
                 raise RuntimeError("SchedulerManager is closed")
+            if self._max_inflight_requests is not None and (
+                len(self._queues) >= self._max_inflight_requests
+            ):
+                raise SchedulerManagerOverloadedError("too many inflight requests")
             detok = self.engine._make_detok()
             request_id = self._next_request_id
             self._next_request_id += 1
@@ -703,9 +717,17 @@ def estimate_usage(
     )
 
 
-def create_app(engine: InferenceEngine) -> FastAPI:
+def create_app(
+    engine: InferenceEngine,
+    *,
+    max_inflight_requests: Optional[int] = None,
+) -> FastAPI:
     app = FastAPI(title="roseinfer", version="0.1.0")
-    sched_manager = SchedulerManager(engine, max_batch_size=8)
+    sched_manager = SchedulerManager(
+        engine,
+        max_batch_size=8,
+        max_inflight_requests=max_inflight_requests,
+    )
     app.add_event_handler("shutdown", sched_manager.close)
 
     @app.get("/health")
@@ -717,15 +739,18 @@ def create_app(engine: InferenceEngine) -> FastAPI:
         body: GenerateRequest,
     ) -> GenerateResponse | StreamingResponse:
         if body.stream:
-            request_id = sched_manager.add_request(
-                prompt=body.prompt,
-                max_new_tokens=body.max_new_tokens,
-                temperature=body.temperature,
-                top_k=body.top_k,
-                top_p=body.top_p,
-                stop_on_eos=body.stop_on_eos,
-                do_sample=body.do_sample,
-            )
+            try:
+                request_id = sched_manager.add_request(
+                    prompt=body.prompt,
+                    max_new_tokens=body.max_new_tokens,
+                    temperature=body.temperature,
+                    top_k=body.top_k,
+                    top_p=body.top_p,
+                    stop_on_eos=body.stop_on_eos,
+                    do_sample=body.do_sample,
+                )
+            except SchedulerManagerOverloadedError as exc:
+                raise HTTPException(status_code=429, detail=str(exc)) from exc
 
             def token_stream() -> Iterator[bytes]:
                 for piece in sched_manager.stream_text(request_id):
@@ -755,15 +780,18 @@ def create_app(engine: InferenceEngine) -> FastAPI:
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         model_name = body.model or "roseinfer"
         if body.stream:
-            request_id = sched_manager.add_request(
-                prompt=prompt,
-                max_new_tokens=body.max_tokens,
-                temperature=body.temperature,
-                top_k=body.top_k,
-                top_p=body.top_p,
-                stop_on_eos=True,
-                do_sample=True,
-            )
+            try:
+                request_id = sched_manager.add_request(
+                    prompt=prompt,
+                    max_new_tokens=body.max_tokens,
+                    temperature=body.temperature,
+                    top_k=body.top_k,
+                    top_p=body.top_p,
+                    stop_on_eos=True,
+                    do_sample=True,
+                )
+            except SchedulerManagerOverloadedError as exc:
+                raise HTTPException(status_code=429, detail=str(exc)) from exc
 
             def event_stream():
                 first_chunk = ChatCompletionChunk(
@@ -917,6 +945,12 @@ def parse_args() -> argparse.Namespace:
         help="Top-p sampling",
     )
     parser.add_argument(
+        "--max-inflight-requests",
+        type=int,
+        default=None,
+        help="Max inflight requests accepted by SchedulerManager (default: unlimited).",
+    )
+    parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
@@ -935,6 +969,8 @@ def main() -> None:
     import uvicorn
 
     args = parse_args()
+    if args.max_inflight_requests is not None and int(args.max_inflight_requests) <= 0:
+        raise ValueError("--max-inflight-requests must be >= 1")
     engine = InferenceEngine(
         checkpoint_path=args.checkpoint_path,
         tokenizer_name=args.tokenizer_name,
@@ -942,7 +978,7 @@ def main() -> None:
         use_amp=not args.no_amp,
         bf16=args.bf16,
     )
-    app = create_app(engine)
+    app = create_app(engine, max_inflight_requests=args.max_inflight_requests)
     uvicorn.run(
         app,
         host=args.host,
