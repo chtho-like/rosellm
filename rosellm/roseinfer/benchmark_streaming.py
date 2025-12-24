@@ -87,6 +87,12 @@ def parse_args() -> argparse.Namespace:
         help="Number of background tokenization worker threads in SchedulerManager (0: tokenize in add_request).",
     )
     parser.add_argument(
+        "--stream-interval",
+        type=int,
+        default=1,
+        help="Flush streaming output every N generated tokens (default: 1).",
+    )
+    parser.add_argument(
         "--num-requests",
         type=int,
         default=16,
@@ -272,6 +278,7 @@ def run_once(
         max_batch_size=int(args.max_batch_size),
         prefill_max_batch_size=args.prefill_max_batch_size,
         prefill_max_tokens=args.prefill_max_tokens,
+        stream_interval=int(args.stream_interval),
         decode_first=args.decode_first,
         prefill_admission_policy=args.prefill_admission_policy,
         prefill_admission_lookahead=int(args.prefill_admission_lookahead),
@@ -416,6 +423,7 @@ def run_once(
         print(f"Device: {args.device}")
         print(f"Pretok: {bool(args.pretok)}")
         print(f"Tokenize workers: {int(args.tokenize_workers)}")
+        print(f"Stream interval: {int(args.stream_interval)}")
         print(f"Paged attention: {bool(args.paged_attn)}")
         print(f"CUDA Graph: {bool(args.cuda_graph)}")
         print(f"NVTX: {bool(args.nvtx)}")
@@ -508,6 +516,8 @@ def main() -> None:
         raise ValueError("--submit-interval-ms must be >= 0")
     if int(args.tokenize_workers) < 0:
         raise ValueError("--tokenize-workers must be >= 0")
+    if int(args.stream_interval) <= 0:
+        raise ValueError("--stream-interval must be >= 1")
     if args.max_inflight_requests is not None and int(args.max_inflight_requests) <= 0:
         raise ValueError("--max-inflight-requests must be >= 1")
     if args.nvtx and args.device == "cuda":
