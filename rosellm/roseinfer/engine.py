@@ -2820,29 +2820,67 @@ class KVBlockManager:
                 k_layer.index_copy_(0, new_blk_t, k_src)
                 v_layer.index_copy_(0, new_blk_t, v_src)
             use_triton = False
+            use_triton_full_batch = False
             kv_append_triton = None
+            kv_append_triton_full_batch = None
+            full_fast = (
+                len(slow_batch_idx) == 0
+                and len(fast_batch_idx) == len(block_ids_list)
+                and fast_batch_idx[0] == 0
+                and fast_batch_idx[-1] == len(block_ids_list) - 1
+            )
+            pos0 = fast_pos[0]
+            const_pos = all(p == pos0 for p in fast_pos)
             if device.type == "cuda":
                 try:
                     from rosellm.roseinfer.kv_append_triton import (
                         TRITON_AVAILABLE,
+                        TRITON_KV_APPEND_FULL_BATCH_MIN_BATCH,
                         TRITON_KV_APPEND_MIN_BATCH,
                         USE_TRITON_KV_APPEND,
                     )
                     from rosellm.roseinfer.kv_append_triton import (
                         kv_append_triton as _kv_append_triton,
                     )
+                    from rosellm.roseinfer.kv_append_triton import (
+                        kv_append_triton_full_batch as _kv_append_triton_full_batch,
+                    )
 
+                    use_triton_full_batch = (
+                        TRITON_AVAILABLE
+                        and USE_TRITON_KV_APPEND
+                        and full_fast
+                        and const_pos
+                        and len(fast_batch_idx) >= TRITON_KV_APPEND_FULL_BATCH_MIN_BATCH
+                    )
                     use_triton = (
                         TRITON_AVAILABLE
                         and USE_TRITON_KV_APPEND
                         and len(fast_batch_idx) >= TRITON_KV_APPEND_MIN_BATCH
                     )
                     kv_append_triton = _kv_append_triton
+                    kv_append_triton_full_batch = _kv_append_triton_full_batch
                 except Exception:
                     use_triton = False
+                    use_triton_full_batch = False
                     kv_append_triton = None
+                    kv_append_triton_full_batch = None
 
-            if use_triton and kv_append_triton is not None:
+            if use_triton_full_batch and kv_append_triton_full_batch is not None:
+                blk_t = torch.tensor(
+                    fast_block_idx,
+                    device=device,
+                    dtype=torch.int32,
+                )
+                kv_append_triton_full_batch(
+                    k_cache_layer=k_layer,
+                    v_cache_layer=v_layer,
+                    key_new=key_new,
+                    value_new=value_new,
+                    block_idx=blk_t,
+                    pos=pos0,
+                )
+            elif use_triton and kv_append_triton is not None:
                 idx_t = torch.tensor(
                     fast_batch_idx,
                     device=device,
@@ -2873,12 +2911,6 @@ class KVBlockManager:
                     device=device,
                     dtype=torch.long,
                 )
-                full_fast = (
-                    len(slow_batch_idx) == 0
-                    and len(fast_batch_idx) == len(block_ids_list)
-                    and fast_batch_idx[0] == 0
-                    and fast_batch_idx[-1] == len(block_ids_list) - 1
-                )
                 if full_fast:
                     k_src = key_new
                     v_src = value_new
@@ -2891,8 +2923,6 @@ class KVBlockManager:
                     k_src = key_new.index_select(0, idx_t)
                     v_src = value_new.index_select(0, idx_t)
 
-                pos0 = fast_pos[0]
-                const_pos = all(p == pos0 for p in fast_pos)
                 if const_pos:
                     k_layer[blk_t, :, pos0, :] = k_src
                     v_layer[blk_t, :, pos0, :] = v_src
