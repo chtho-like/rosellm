@@ -2542,14 +2542,18 @@ class KVBlockManager:
         self.dtype = dtype
         self._next_block_index: list[int] = [0 for _ in range(num_layers)]
         self._free_block_indices: list[list[int]] = [[] for _ in range(num_layers)]
-        self._block_infos: dict[int, KVBlockInfo] = {}
+        self._block_infos: list[KVBlockInfo | None] = [
+            None for _ in range(num_layers * max_blocks_per_layer)
+        ]
         self._k_cache = torch.empty(
             (num_layers, max_blocks_per_layer, num_heads, block_size, head_dim),
             device=device,
             dtype=dtype,
         )
         self._v_cache = torch.empty_like(self._k_cache)
-        self._block_refcounts: dict[int, int] = {}
+        self._block_refcounts: list[int] = [
+            0 for _ in range(num_layers * max_blocks_per_layer)
+        ]
 
     def _alloc_block_index(self, layer_idx: int) -> int:
         free_list = self._free_block_indices[layer_idx]
@@ -2608,13 +2612,7 @@ class KVBlockManager:
         block_ids: list[int],
     ) -> None:
         for global_id in block_ids:
-            self._block_refcounts[global_id] = (
-                self._block_refcounts.get(
-                    global_id,
-                    0,
-                )
-                + 1
-            )
+            self._block_refcounts[global_id] += 1
 
     def free_blocks(
         self,
@@ -2622,15 +2620,15 @@ class KVBlockManager:
         block_ids: list[int],
     ) -> None:
         for global_id in block_ids:
-            ref = self._block_refcounts.get(global_id)
-            if ref is None:
+            ref = self._block_refcounts[global_id]
+            if ref <= 0:
                 continue
             ref -= 1
+            self._block_refcounts[global_id] = ref
             if ref > 0:
-                self._block_refcounts[global_id] = ref
                 continue
-            self._block_refcounts.pop(global_id, None)
-            info = self._block_infos.pop(global_id, None)
+            info = self._block_infos[global_id]
+            self._block_infos[global_id] = None
             if info is None:
                 continue
             assert info.layer == layer_idx
@@ -2663,7 +2661,9 @@ class KVBlockManager:
             block_ids.append(global_id)
         last_id = block_ids[-1]
         info = self._block_infos[last_id]
-        ref = self._block_refcounts.get(last_id, 1)
+        if info is None:
+            raise RuntimeError(f"missing KVBlockInfo for block {last_id}")
+        ref = self._block_refcounts[last_id]
         if ref > 1 and info.length < self.block_size:
             self._block_refcounts[last_id] = ref - 1
             block_idx = self._alloc_block_index(layer_idx)
@@ -2702,6 +2702,8 @@ class KVBlockManager:
             block_ids.append(global_id)
             last_id = global_id
         info = self._block_infos[last_id]
+        if info is None:
+            raise RuntimeError(f"missing KVBlockInfo for block {last_id}")
         k_block = self._k_cache[layer_idx, info.block_index]
         v_block = self._v_cache[layer_idx, info.block_index]
         pos = info.length
@@ -2753,7 +2755,9 @@ class KVBlockManager:
             else:
                 last_gid = block_ids[-1]
                 info = self._block_infos[last_gid]
-                ref = self._block_refcounts.get(last_gid, 1)
+                if info is None:
+                    raise RuntimeError(f"missing KVBlockInfo for block {last_gid}")
+                ref = self._block_refcounts[last_gid]
 
             if info.length >= self.block_size:
                 block_idx = self._alloc_block_index(layer_idx)
