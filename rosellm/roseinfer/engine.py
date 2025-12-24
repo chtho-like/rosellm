@@ -2821,8 +2821,10 @@ class KVBlockManager:
                 v_layer.index_copy_(0, new_blk_t, v_src)
             use_triton = False
             use_triton_full_batch = False
+            use_triton_identity_pos = False
             kv_append_triton = None
             kv_append_triton_full_batch = None
+            kv_append_triton_identity_pos = None
             full_fast = (
                 len(slow_batch_idx) == 0
                 and len(fast_batch_idx) == len(block_ids_list)
@@ -2845,6 +2847,9 @@ class KVBlockManager:
                     from rosellm.roseinfer.kv_append_triton import (
                         kv_append_triton_full_batch as _kv_append_triton_full_batch,
                     )
+                    from rosellm.roseinfer.kv_append_triton import (
+                        kv_append_triton_identity_pos as _kv_append_triton_identity_pos,
+                    )
 
                     use_triton_full_batch = (
                         TRITON_AVAILABLE
@@ -2858,13 +2863,23 @@ class KVBlockManager:
                         and USE_TRITON_KV_APPEND
                         and len(fast_batch_idx) >= TRITON_KV_APPEND_MIN_BATCH
                     )
+                    use_triton_identity_pos = (
+                        TRITON_AVAILABLE
+                        and USE_TRITON_KV_APPEND
+                        and full_fast
+                        and not const_pos
+                        and len(fast_batch_idx) >= TRITON_KV_APPEND_MIN_BATCH
+                    )
                     kv_append_triton = _kv_append_triton
                     kv_append_triton_full_batch = _kv_append_triton_full_batch
+                    kv_append_triton_identity_pos = _kv_append_triton_identity_pos
                 except Exception:
                     use_triton = False
                     use_triton_full_batch = False
+                    use_triton_identity_pos = False
                     kv_append_triton = None
                     kv_append_triton_full_batch = None
+                    kv_append_triton_identity_pos = None
 
             if use_triton_full_batch and kv_append_triton_full_batch is not None:
                 blk_t = torch.tensor(
@@ -2879,6 +2894,25 @@ class KVBlockManager:
                     value_new=value_new,
                     block_idx=blk_t,
                     pos=pos0,
+                )
+            elif use_triton_identity_pos and kv_append_triton_identity_pos is not None:
+                blk_t = torch.tensor(
+                    fast_block_idx,
+                    device=device,
+                    dtype=torch.int32,
+                )
+                pos_t = torch.tensor(
+                    fast_pos,
+                    device=device,
+                    dtype=torch.int32,
+                )
+                kv_append_triton_identity_pos(
+                    k_cache_layer=k_layer,
+                    v_cache_layer=v_layer,
+                    key_new=key_new,
+                    value_new=value_new,
+                    block_idx=blk_t,
+                    pos=pos_t,
                 )
             elif use_triton and kv_append_triton is not None:
                 idx_t = torch.tensor(
