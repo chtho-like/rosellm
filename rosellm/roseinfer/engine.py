@@ -2,7 +2,7 @@ import os
 from collections import OrderedDict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator, NamedTuple, Optional
+from typing import Iterator, Optional
 
 import numpy as np
 import torch
@@ -2514,7 +2514,8 @@ class OnlineScheduler:
             session.release_kv_blocks()
 
 
-class KVBlockInfo(NamedTuple):
+@dataclass(slots=True)
+class KVBlockInfo:
     layer: int
     block_index: int
     start: int
@@ -2706,13 +2707,7 @@ class KVBlockManager:
         pos = info.length
         k_block[:, pos, :].copy_(key_new)
         v_block[:, pos, :].copy_(value_new)
-        new_info = KVBlockInfo(
-            layer=info.layer,
-            block_index=info.block_index,
-            start=info.start,
-            length=info.length + 1,
-        )
-        self._block_infos[last_id] = new_info
+        info.length += 1
 
     def append_token_batch(
         self,
@@ -2737,7 +2732,6 @@ class KVBlockManager:
         fast_batch_idx: list[int] = []
         fast_block_idx: list[int] = []
         fast_pos: list[int] = []
-        fast_last_gid: list[int] = []
         cow_old_block_idx: list[int] = []
         cow_new_block_idx: list[int] = []
         slow_batch_idx: list[int] = []
@@ -2777,28 +2771,27 @@ class KVBlockManager:
                 ref = 1
 
             if ref != 1:
+                old_block_idx = info.block_index
+                old_length = info.length
                 self._block_refcounts[last_gid] = ref - 1
                 block_idx = self._alloc_block_index(layer_idx)
                 new_gid = self._to_global_block_id(layer_idx, block_idx)
-                self._block_infos[new_gid] = KVBlockInfo(
+                info = KVBlockInfo(
                     layer=info.layer,
                     block_index=block_idx,
                     start=info.start,
-                    length=info.length,
+                    length=old_length,
                 )
+                self._block_infos[new_gid] = info
                 self._block_refcounts[new_gid] = 1
                 block_ids[-1] = new_gid
-                cow_old_block_idx.append(info.block_index)
+                cow_old_block_idx.append(old_block_idx)
                 cow_new_block_idx.append(block_idx)
-                fast_batch_idx.append(b)
-                fast_block_idx.append(block_idx)
-                fast_pos.append(info.length)
-                fast_last_gid.append(new_gid)
-                continue
+
             fast_batch_idx.append(b)
             fast_block_idx.append(info.block_index)
             fast_pos.append(info.length)
-            fast_last_gid.append(last_gid)
+            info.length += 1
 
         if fast_batch_idx:
             device = self.device
@@ -3008,15 +3001,6 @@ class KVBlockManager:
                     )
                     k_layer[blk_t, :, pos_t, :] = k_src
                     v_layer[blk_t, :, pos_t, :] = v_src
-
-            for gid in fast_last_gid:
-                info = self._block_infos[gid]
-                self._block_infos[gid] = KVBlockInfo(
-                    layer=info.layer,
-                    block_index=info.block_index,
-                    start=info.start,
-                    length=info.length + 1,
-                )
 
         for b in slow_batch_idx:
             self.append_token(
