@@ -2868,25 +2868,42 @@ class KVBlockManager:
                     pos=pos_t,
                 )
             else:
-                idx_t = torch.tensor(
-                    fast_batch_idx,
-                    device=device,
-                    dtype=torch.long,
-                )
                 blk_t = torch.tensor(
                     fast_block_idx,
                     device=device,
                     dtype=torch.long,
                 )
-                pos_t = torch.tensor(
-                    fast_pos,
-                    device=device,
-                    dtype=torch.long,
+                full_fast = (
+                    len(slow_batch_idx) == 0
+                    and len(fast_batch_idx) == len(block_ids_list)
+                    and fast_batch_idx[0] == 0
+                    and fast_batch_idx[-1] == len(block_ids_list) - 1
                 )
-                k_src = key_new.index_select(0, idx_t)
-                v_src = value_new.index_select(0, idx_t)
-                k_layer[blk_t, :, pos_t, :] = k_src
-                v_layer[blk_t, :, pos_t, :] = v_src
+                if full_fast:
+                    k_src = key_new
+                    v_src = value_new
+                else:
+                    idx_t = torch.tensor(
+                        fast_batch_idx,
+                        device=device,
+                        dtype=torch.long,
+                    )
+                    k_src = key_new.index_select(0, idx_t)
+                    v_src = value_new.index_select(0, idx_t)
+
+                pos0 = fast_pos[0]
+                const_pos = all(p == pos0 for p in fast_pos)
+                if const_pos:
+                    k_layer[blk_t, :, pos0, :] = k_src
+                    v_layer[blk_t, :, pos0, :] = v_src
+                else:
+                    pos_t = torch.tensor(
+                        fast_pos,
+                        device=device,
+                        dtype=torch.long,
+                    )
+                    k_layer[blk_t, :, pos_t, :] = k_src
+                    v_layer[blk_t, :, pos_t, :] = v_src
 
             for gid in fast_last_gid:
                 info = self._block_infos[gid]
