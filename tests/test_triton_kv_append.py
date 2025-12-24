@@ -7,9 +7,17 @@ from rosellm.roseinfer.engine import KVBlockManager
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_kv_append_triton_fast_path_writes_correct_values(monkeypatch) -> None:
+@pytest.mark.parametrize("path", ["full_batch", "generic"])
+def test_kv_append_triton_fast_path_writes_correct_values(
+    monkeypatch, path: str
+) -> None:
     monkeypatch.setenv("ROSELLM_TRITON_KV_APPEND", "1")
-    monkeypatch.setenv("ROSELLM_TRITON_KV_APPEND_MIN_BATCH", "1")
+    if path == "full_batch":
+        monkeypatch.setenv("ROSELLM_TRITON_KV_APPEND_MIN_BATCH", "999999")
+        monkeypatch.setenv("ROSELLM_TRITON_KV_APPEND_FULL_BATCH_MIN_BATCH", "1")
+    else:
+        monkeypatch.setenv("ROSELLM_TRITON_KV_APPEND_MIN_BATCH", "1")
+        monkeypatch.setenv("ROSELLM_TRITON_KV_APPEND_FULL_BATCH_MIN_BATCH", "999999")
     import rosellm.roseinfer.kv_append_triton as kv_mod
 
     importlib.reload(kv_mod)
