@@ -2805,20 +2805,60 @@ class KVBlockManager:
             k_layer = self._k_cache[layer_idx]
             v_layer = self._v_cache[layer_idx]
             if cow_old_block_idx:
-                old_blk_t = torch.tensor(
-                    cow_old_block_idx,
-                    device=device,
-                    dtype=torch.long,
-                )
-                new_blk_t = torch.tensor(
-                    cow_new_block_idx,
-                    device=device,
-                    dtype=torch.long,
-                )
-                k_src = k_layer.index_select(0, old_blk_t)
-                v_src = v_layer.index_select(0, old_blk_t)
-                k_layer.index_copy_(0, new_blk_t, k_src)
-                v_layer.index_copy_(0, new_blk_t, v_src)
+                use_triton_clone = False
+                kv_clone_blocks_triton = None
+                if device.type == "cuda":
+                    try:
+                        from rosellm.roseinfer.kv_clone_triton import (
+                            TRITON_AVAILABLE as TRITON_CLONE_AVAILABLE,
+                        )
+                        from rosellm.roseinfer.kv_clone_triton import (
+                            USE_TRITON_KV_CLONE,
+                        )
+                        from rosellm.roseinfer.kv_clone_triton import (
+                            kv_clone_blocks_triton as _kv_clone_blocks_triton,
+                        )
+
+                        use_triton_clone = (
+                            TRITON_CLONE_AVAILABLE and USE_TRITON_KV_CLONE
+                        )
+                        kv_clone_blocks_triton = _kv_clone_blocks_triton
+                    except Exception:
+                        use_triton_clone = False
+                        kv_clone_blocks_triton = None
+
+                if use_triton_clone and kv_clone_blocks_triton is not None:
+                    old_blk_t = torch.tensor(
+                        cow_old_block_idx,
+                        device=device,
+                        dtype=torch.int32,
+                    )
+                    new_blk_t = torch.tensor(
+                        cow_new_block_idx,
+                        device=device,
+                        dtype=torch.int32,
+                    )
+                    kv_clone_blocks_triton(
+                        k_cache_layer=k_layer,
+                        v_cache_layer=v_layer,
+                        src_block_idx=old_blk_t,
+                        dst_block_idx=new_blk_t,
+                    )
+                else:
+                    old_blk_t = torch.tensor(
+                        cow_old_block_idx,
+                        device=device,
+                        dtype=torch.long,
+                    )
+                    new_blk_t = torch.tensor(
+                        cow_new_block_idx,
+                        device=device,
+                        dtype=torch.long,
+                    )
+                    k_src = k_layer.index_select(0, old_blk_t)
+                    v_src = v_layer.index_select(0, old_blk_t)
+                    k_layer.index_copy_(0, new_blk_t, k_src)
+                    v_layer.index_copy_(0, new_blk_t, v_src)
             use_triton = False
             use_triton_full_batch = False
             use_triton_identity_pos = False
