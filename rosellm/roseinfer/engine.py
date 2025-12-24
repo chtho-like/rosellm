@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, NamedTuple, Optional
 
+import numpy as np
 import torch
 from torch.profiler import record_function
 
@@ -43,6 +44,14 @@ class _PagedDecodeCudaGraph:
     position_ids: torch.Tensor  # [B, 1] int64 cuda
     slot_mapping: torch.Tensor  # [B] int32 cuda
     context_lens: torch.Tensor  # [B] int32 cuda
+    input_ids_host: torch.Tensor  # [B] int64 cpu (pinned)
+    position_ids_host: torch.Tensor  # [B] int64 cpu (pinned)
+    slot_mapping_host: torch.Tensor  # [B] int32 cpu (pinned)
+    context_lens_host: torch.Tensor  # [B] int32 cpu (pinned)
+    input_ids_host_np: np.ndarray
+    position_ids_host_np: np.ndarray
+    slot_mapping_host_np: np.ndarray
+    context_lens_host_np: np.ndarray
     logits: torch.Tensor  # [B, 1, vocab]
     presents: list[tuple[torch.Tensor, torch.Tensor]]
 
@@ -1080,6 +1089,30 @@ class InferenceEngine:
             dtype=torch.int32,
         )
         context_lens = torch.zeros_like(slot_mapping)
+        input_ids_host = torch.empty(
+            (batch_size,),
+            device="cpu",
+            dtype=torch.long,
+            pin_memory=True,
+        )
+        position_ids_host = torch.empty(
+            (batch_size,),
+            device="cpu",
+            dtype=torch.long,
+            pin_memory=True,
+        )
+        slot_mapping_host = torch.empty(
+            (batch_size,),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=True,
+        )
+        context_lens_host = torch.empty(
+            (batch_size,),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=True,
+        )
 
         paged = PagedKVCache(
             k_cache=self.kv_manager._k_cache,
@@ -1131,6 +1164,14 @@ class InferenceEngine:
             position_ids=position_ids,
             slot_mapping=slot_mapping,
             context_lens=context_lens,
+            input_ids_host=input_ids_host,
+            position_ids_host=position_ids_host,
+            slot_mapping_host=slot_mapping_host,
+            context_lens_host=context_lens_host,
+            input_ids_host_np=input_ids_host.numpy(),
+            position_ids_host_np=position_ids_host.numpy(),
+            slot_mapping_host_np=slot_mapping_host.numpy(),
+            context_lens_host_np=context_lens_host.numpy(),
             logits=logits,
             presents=presents,
         )
@@ -1222,22 +1263,16 @@ class InferenceEngine:
                         batch_size=batch_size,
                         global_block_tables=global_block_tables,
                     )
-                    graph.input_ids[:, 0].copy_(
-                        torch.tensor(last_ids, dtype=torch.long),
-                        non_blocking=True,
-                    )
+                    graph.input_ids_host_np[:] = last_ids
+                    graph.position_ids_host_np[:] = seq_lens
+                    graph.slot_mapping_host_np[:] = slot_ids
+                    graph.context_lens_host_np[:] = seq_lens
+                    graph.input_ids[:, 0].copy_(graph.input_ids_host, non_blocking=True)
                     graph.position_ids[:, 0].copy_(
-                        torch.tensor(seq_lens, dtype=torch.long),
-                        non_blocking=True,
+                        graph.position_ids_host, non_blocking=True
                     )
-                    graph.slot_mapping.copy_(
-                        torch.tensor(slot_ids, dtype=torch.int32),
-                        non_blocking=True,
-                    )
-                    graph.context_lens.copy_(
-                        torch.tensor(seq_lens, dtype=torch.int32),
-                        non_blocking=True,
-                    )
+                    graph.slot_mapping.copy_(graph.slot_mapping_host, non_blocking=True)
+                    graph.context_lens.copy_(graph.context_lens_host, non_blocking=True)
                     with _maybe_nvtx_range(
                         "roseinfer.model.forward.cuda_graph_replay", nvtx
                     ), record_function("roseinfer.model.forward.cuda_graph_replay"):
