@@ -2677,14 +2677,12 @@ class KVBlockManager:
                 length=info.length,
             )
             self._block_infos[new_global_id] = new_info
-            self._k_cache[
-                layer_idx,
-                block_idx,
-            ].copy_(self._k_cache[layer_idx, info.block_index])
-            self._v_cache[
-                layer_idx,
-                block_idx,
-            ].copy_(self._v_cache[layer_idx, info.block_index])
+            self._k_cache[layer_idx, block_idx].copy_(
+                self._k_cache[layer_idx, info.block_index]
+            )
+            self._v_cache[layer_idx, block_idx].copy_(
+                self._v_cache[layer_idx, info.block_index]
+            )
             self._block_refcounts[new_global_id] = 1
             block_ids[-1] = new_global_id
             last_id = new_global_id
@@ -2740,6 +2738,8 @@ class KVBlockManager:
         fast_block_idx: list[int] = []
         fast_pos: list[int] = []
         fast_last_gid: list[int] = []
+        cow_old_block_idx: list[int] = []
+        cow_new_block_idx: list[int] = []
         slow_batch_idx: list[int] = []
 
         for b, block_ids in enumerate(block_ids_list):
@@ -2749,8 +2749,27 @@ class KVBlockManager:
             last_gid = block_ids[-1]
             info = self._block_infos[last_gid]
             ref = self._block_refcounts.get(last_gid, 1)
-            if ref != 1 or info.length >= self.block_size:
+            if info.length >= self.block_size:
                 slow_batch_idx.append(b)
+                continue
+            if ref != 1:
+                self._block_refcounts[last_gid] = ref - 1
+                block_idx = self._alloc_block_index(layer_idx)
+                new_gid = self._to_global_block_id(layer_idx, block_idx)
+                self._block_infos[new_gid] = KVBlockInfo(
+                    layer=info.layer,
+                    block_index=block_idx,
+                    start=info.start,
+                    length=info.length,
+                )
+                self._block_refcounts[new_gid] = 1
+                block_ids[-1] = new_gid
+                cow_old_block_idx.append(info.block_index)
+                cow_new_block_idx.append(block_idx)
+                fast_batch_idx.append(b)
+                fast_block_idx.append(block_idx)
+                fast_pos.append(info.length)
+                fast_last_gid.append(new_gid)
                 continue
             fast_batch_idx.append(b)
             fast_block_idx.append(info.block_index)
@@ -2761,6 +2780,21 @@ class KVBlockManager:
             device = self.device
             k_layer = self._k_cache[layer_idx]
             v_layer = self._v_cache[layer_idx]
+            if cow_old_block_idx:
+                old_blk_t = torch.tensor(
+                    cow_old_block_idx,
+                    device=device,
+                    dtype=torch.long,
+                )
+                new_blk_t = torch.tensor(
+                    cow_new_block_idx,
+                    device=device,
+                    dtype=torch.long,
+                )
+                k_src = k_layer.index_select(0, old_blk_t)
+                v_src = v_layer.index_select(0, old_blk_t)
+                k_layer.index_copy_(0, new_blk_t, k_src)
+                v_layer.index_copy_(0, new_blk_t, v_src)
             use_triton = False
             kv_append_triton = None
             if device.type == "cuda":
