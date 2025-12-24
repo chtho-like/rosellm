@@ -12,7 +12,7 @@ import torch
 from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
 
 from .engine import InferenceEngine
-from .server import SchedulerManager
+from .server import SchedulerManager, SchedulerManagerOverloadedError
 
 
 @dataclass(frozen=True)
@@ -170,6 +170,12 @@ def parse_args() -> argparse.Namespace:
         help="Max unfinished requests allowed in scheduler (default: unlimited).",
     )
     parser.add_argument(
+        "--max-inflight-requests",
+        type=int,
+        default=None,
+        help="Max inflight requests accepted by SchedulerManager (default: unlimited).",
+    )
+    parser.add_argument(
         "--decode-first",
         action="store_true",
         help="Run one decode step before prefill admission when possible.",
@@ -271,6 +277,7 @@ def run_once(
         prefill_admission_lookahead=int(args.prefill_admission_lookahead),
         prefill_force_fifo_every=int(args.prefill_force_fifo_every),
         max_active_requests=args.max_active_requests,
+        max_inflight_requests=args.max_inflight_requests,
         record_token_timestamps=record_token_timestamps,
         tokenize_workers=int(args.tokenize_workers),
     )
@@ -280,6 +287,8 @@ def run_once(
     stop_on_eos = not args.no_stop_on_eos
     results: list[StreamResult] = []
     results_lock = threading.Lock()
+    rejected_lats: list[float] = []
+    accepted_prompt_lens: list[int] = []
 
     def consume_stream(
         request_id: int,
@@ -339,16 +348,29 @@ def run_once(
             if submit_interval_s > 0 and submit_schedule == "absolute":
                 target = t_global0 + float(i) * submit_interval_s
                 submit_lags.append(max(0.0, submit_start - target))
-            request_id = mgr.add_request(
-                prompt=p,
-                prompt_token_ids=prompt_token_ids,
-                max_new_tokens=int(args.max_new_tokens),
-                temperature=float(args.temperature),
-                top_k=int(args.top_k),
-                top_p=float(args.top_p),
-                stop_on_eos=stop_on_eos,
-                do_sample=bool(args.do_sample),
+            try:
+                request_id = mgr.add_request(
+                    prompt=p,
+                    prompt_token_ids=prompt_token_ids,
+                    max_new_tokens=int(args.max_new_tokens),
+                    temperature=float(args.temperature),
+                    top_k=int(args.top_k),
+                    top_p=float(args.top_p),
+                    stop_on_eos=stop_on_eos,
+                    do_sample=bool(args.do_sample),
+                )
+            except SchedulerManagerOverloadedError:
+                submit_end = time.perf_counter()
+                rejected_lats.append(submit_end - submit_start)
+                if submit_interval_s > 0 and submit_schedule == "relative":
+                    time.sleep(submit_interval_s)
+                continue
+            prompt_len = (
+                len(prompt_token_ids)
+                if prompt_token_ids is not None
+                else prompt_lens[i]
             )
+            accepted_prompt_lens.append(int(prompt_len))
             submit_end = time.perf_counter()
             th = threading.Thread(
                 target=consume_stream,
@@ -398,7 +420,9 @@ def run_once(
         print(f"CUDA Graph: {bool(args.cuda_graph)}")
         print(f"NVTX: {bool(args.nvtx)}")
         print(f"Requests: {len(results)}")
-        print(f"Prompt tokens (total): {sum(prompt_lens)}")
+        if rejected_lats:
+            print(f"Rejected: {len(rejected_lats)}")
+        print(f"Prompt tokens (total): {sum(accepted_prompt_lens)}")
         print(f"Completion tokens (total): {sum_tokens}")
         print(f"Submit wall: {submit_wall:.6f} s")
         if submit_interval_s > 0:
@@ -418,6 +442,13 @@ def run_once(
             f"{percentile(add_lats, 95)*1e3:.2f}/"
             f"{percentile(add_lats, 99)*1e3:.2f} ms"
         )
+        if rejected_lats:
+            print(
+                f"reject latency p50/p95/p99: "
+                f"{statistics.median(rejected_lats)*1e3:.2f}/"
+                f"{percentile(rejected_lats, 95)*1e3:.2f}/"
+                f"{percentile(rejected_lats, 99)*1e3:.2f} ms"
+            )
         print(
             f"Tokenize p50/p95/p99: "
             f"{statistics.median(tokenize_lats)*1e3:.2f}/"
@@ -477,6 +508,8 @@ def main() -> None:
         raise ValueError("--submit-interval-ms must be >= 0")
     if int(args.tokenize_workers) < 0:
         raise ValueError("--tokenize-workers must be >= 0")
+    if args.max_inflight_requests is not None and int(args.max_inflight_requests) <= 0:
+        raise ValueError("--max-inflight-requests must be >= 1")
     if args.nvtx and args.device == "cuda":
         os.environ["ROSEINFER_NVTX"] = "1"
     if args.cuda_graph and not args.paged_attn:
