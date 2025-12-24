@@ -418,7 +418,9 @@ class InferenceEngine:
         logits: torch.Tensor,  # [..., vocab]
         top_k: int,
     ) -> torch.Tensor:
-        if top_k <= 0:
+        vocab = int(logits.size(-1))
+        top_k = int(top_k)
+        if top_k <= 0 or top_k >= vocab:
             return logits
         values, _ = torch.topk(logits, top_k)  # [..., k]
         min_values = values[..., -1, None]  # [..., 1]
@@ -492,10 +494,30 @@ class InferenceEngine:
         if not do_sample or temperature <= 0.0:
             return torch.argmax(logits, dim=-1)
         scaled = logits / float(temperature)
-        filtered = self._top_k_logits(scaled, top_k)
-        filtered = self._top_p_logits(filtered, top_p)
-        probs = torch.softmax(filtered, dim=-1).clamp_min(1e-9)
-        return torch.multinomial(probs, num_samples=1).squeeze(-1)
+        vocab = int(scaled.size(-1))
+        top_k = int(top_k)
+
+        if top_p <= 0.0 or top_p >= 1.0:
+            if top_k <= 0 or top_k >= vocab:
+                probs = torch.softmax(scaled, dim=-1).clamp_min(1e-9)
+                return torch.multinomial(probs, num_samples=1).squeeze(-1)
+            k = min(top_k, vocab)
+            topk_logits, topk_idx = torch.topk(scaled, k, dim=-1)  # [B, K], [B, K]
+            probs = torch.softmax(topk_logits, dim=-1).clamp_min(1e-9)
+            choice = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
+            return topk_idx.gather(-1, choice.unsqueeze(-1)).squeeze(-1)
+
+        # top_p in (0, 1): sample from sorted logits (top-k or full) without
+        # scattering back to vocab space.
+        k = vocab if top_k <= 0 else min(top_k, vocab)
+        sorted_logits, sorted_idx = torch.topk(scaled, k, dim=-1)  # [B, K], [B, K]
+        probs = torch.softmax(sorted_logits, dim=-1)  # [B, K]
+        cum_probs = torch.cumsum(probs, dim=-1)  # [B, K]
+        mask = cum_probs > float(top_p)
+        mask[..., 0] = False  # keep at least one token
+        probs = probs.masked_fill(mask, 0.0).clamp_min(1e-9)
+        choice = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
+        return sorted_idx.gather(-1, choice.unsqueeze(-1)).squeeze(-1)
 
     @torch.no_grad()
     def generate(
