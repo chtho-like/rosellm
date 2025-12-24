@@ -154,3 +154,70 @@ def test_online_scheduler_add_requests_prefix_cache_dedups_prompts_in_batch() ->
     )
     assert tok.encode_calls == 0
     assert forward_calls == 1
+
+
+def test_online_scheduler_add_requests_prefix_cache_dedups_token_ids_in_batch() -> None:
+    torch.manual_seed(0)
+    cfg = GPTConfig(
+        vocab_size=128,
+        max_position_embeddings=32,
+        n_layers=2,
+        n_heads=2,
+        d_model=32,
+        d_ff=64,
+        dropout=0.0,
+    )
+    tok = _CountingTokenizer(vocab_size=128)
+    model = GPTModel(cfg)
+    forward_calls = 0
+    orig_forward = model.forward
+
+    def counting_forward(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal forward_calls
+        forward_calls += 1
+        return orig_forward(*args, **kwargs)
+
+    model.forward = counting_forward  # type: ignore[method-assign]
+
+    engine = InferenceEngine(
+        model=model,
+        config=cfg,
+        tokenizer=tok,
+        tokenizer_name="dummy",
+        device="cpu",
+        use_amp=False,
+        kv_cache_max_concurrency=8,
+        prefix_cache_max_entries=8,
+    )
+
+    scheduler = OnlineScheduler(engine, max_batch_size=8, use_prefix_cache=True)
+    scheduler.add_requests(
+        [
+            OnlineRequest(
+                prompt="a",
+                prompt_token_ids=[1, 2, 3],
+                max_new_tokens=1,
+                stop_on_eos=False,
+                do_sample=False,
+                request_id=0,
+            ),
+            OnlineRequest(
+                prompt="b",
+                prompt_token_ids=[1, 2, 3],
+                max_new_tokens=1,
+                stop_on_eos=False,
+                do_sample=False,
+                request_id=1,
+            ),
+            OnlineRequest(
+                prompt="c",
+                prompt_token_ids=[1, 2, 3],
+                max_new_tokens=1,
+                stop_on_eos=False,
+                do_sample=False,
+                request_id=2,
+            ),
+        ]
+    )
+    assert tok.encode_calls == 0
+    assert forward_calls == 1

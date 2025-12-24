@@ -22,6 +22,8 @@ try:
 except ImportError:
     tiktoken = None
 
+PrefixCacheKey = str | tuple[int, ...]
+
 
 @contextmanager
 def _maybe_nvtx_range(name: str, enabled: bool) -> Iterator[None]:
@@ -335,15 +337,24 @@ class InferenceEngine:
             do_sample=do_sample,
             stop_on_eos=stop_on_eos,
         )
+        cache_key: PrefixCacheKey = prompt
+        if prompt_token_ids is not None:
+            ids = list(prompt_token_ids)
+            if not ids:
+                ids = [self.eos_token_id]
+            max_pos = int(self.config.max_position_embeddings)
+            if len(ids) > max_pos:
+                ids = ids[-max_pos:]
+            cache_key = tuple(ids)
         cached_logits = None
         if use_prefix_cache:
-            cached_logits = self.prefix_cache.attach(prompt, session)
+            cached_logits = self.prefix_cache.attach(cache_key, session)
         if cached_logits is None:
             logits = session.prefill(input_ids)
             last_logits = logits[:, -1, :]
             session.kv_cache = None
             if use_prefix_cache:
-                self.prefix_cache.put(prompt, session, last_logits)
+                self.prefix_cache.put(cache_key, session, last_logits)
         else:
             last_logits = cached_logits
 
@@ -1771,12 +1782,12 @@ class InferenceSession:
 class PrefixCacheEntry:
     def __init__(
         self,
-        prompt: str,
+        key: PrefixCacheKey,
         prompt_length: int,
         blocks_ids_per_layer: list[list[int]],
         last_logits: torch.Tensor,
     ) -> None:
-        self.prompt = prompt
+        self.key = key
         self.prompt_length = int(prompt_length)
         self.blocks_ids_per_layer = [list(ids) for ids in blocks_ids_per_layer]
         self.last_logits = last_logits.detach().to("cpu")
@@ -1790,7 +1801,7 @@ class PrefixCache:
     ) -> None:
         self.kv_manager = kv_manager
         self.max_entries = max(0, int(max_entries))
-        self._entries: OrderedDict[str, PrefixCacheEntry] = OrderedDict()
+        self._entries: OrderedDict[PrefixCacheKey, PrefixCacheEntry] = OrderedDict()
 
     def _release_entry(self, entry: PrefixCacheEntry) -> None:
         for layer_idx, block_ids in enumerate(entry.blocks_ids_per_layer):
@@ -1808,17 +1819,17 @@ class PrefixCache:
             _, entry = self._entries.popitem(last=False)
             self._release_entry(entry)
 
-    def get(self, prompt: str) -> PrefixCacheEntry | None:
-        return self._entries.get(prompt)
+    def get(self, key: PrefixCacheKey) -> PrefixCacheEntry | None:
+        return self._entries.get(key)
 
     def put(
         self,
-        prompt: str,
+        key: PrefixCacheKey,
         session: "InferenceSession",
         last_logits: torch.Tensor,
     ) -> None:
-        if prompt in self._entries:
-            self._entries.move_to_end(prompt)
+        if key in self._entries:
+            self._entries.move_to_end(key)
             return
         if session.kv_manager is None:
             return
@@ -1829,25 +1840,25 @@ class PrefixCache:
                 continue
             self.kv_manager.incref_blocks(block_ids)
         entry = PrefixCacheEntry(
-            prompt=prompt,
+            key=key,
             prompt_length=prompt_length,
             blocks_ids_per_layer=block_ids_per_layer,
             last_logits=last_logits,
         )
         while self.max_entries > 0 and len(self._entries) >= self.max_entries:
             self._evict_one()
-        self._entries[prompt] = entry
-        self._entries.move_to_end(prompt)
+        self._entries[key] = entry
+        self._entries.move_to_end(key)
 
     def attach(
         self,
-        prompt: str,
+        key: PrefixCacheKey,
         session: "InferenceSession",
     ) -> torch.Tensor | None:
-        entry = self._entries.get(prompt)
+        entry = self._entries.get(key)
         if entry is None:
             return None
-        self._entries.move_to_end(prompt)
+        self._entries.move_to_end(key)
         session.prompt_length = entry.prompt_length
         session.block_ids_per_layer = []
         for block_ids in entry.blocks_ids_per_layer:
@@ -2083,10 +2094,11 @@ class OnlineScheduler:
 
         sessions: list[InferenceSession] = []
         token_ids_list: list[list[int]] = []
+        cache_keys: list[PrefixCacheKey] = []
         last_logits_per_req: list[torch.Tensor | None] = [None for _ in requests]
         miss_idx: list[int] = []
         dup_of: dict[int, int] = {}
-        first_idx_for_prompt: dict[str, int] = {}
+        first_idx_for_key: dict[PrefixCacheKey, int] = {}
 
         for i, req in enumerate(requests):
             rid = alloc_rid(req.request_id)
@@ -2105,6 +2117,10 @@ class OnlineScheduler:
             if len(ids) > max_pos:
                 ids = ids[-max_pos:]
             token_ids_list.append(ids)
+            cache_key: PrefixCacheKey = (
+                req.prompt if req.prompt_token_ids is None else tuple(ids)
+            )
+            cache_keys.append(cache_key)
 
             sess = InferenceSession(eng)
             sess.input_ids = eng._encode_prompt_token_ids(ids)
@@ -2129,13 +2145,13 @@ class OnlineScheduler:
             sessions.append(sess)
 
             if self.use_prefix_cache:
-                src = first_idx_for_prompt.get(req.prompt)
+                src = first_idx_for_key.get(cache_key)
                 if src is not None:
                     dup_of[i] = src
                     continue
-                first_idx_for_prompt[req.prompt] = i
+                first_idx_for_key[cache_key] = i
 
-                cached_logits = eng.prefix_cache.attach(req.prompt, sess)
+                cached_logits = eng.prefix_cache.attach(cache_key, sess)
                 if cached_logits is not None:
                     last_logits_per_req[i] = cached_logits
                     continue
@@ -2159,7 +2175,7 @@ class OnlineScheduler:
                 last_logits_per_req[idx] = logits
                 if self.use_prefix_cache:
                     eng.prefix_cache.put(
-                        requests[idx].prompt,
+                        cache_keys[idx],
                         sessions[idx],
                         logits,
                     )
