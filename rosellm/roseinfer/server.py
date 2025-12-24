@@ -123,6 +123,15 @@ class _TokenizeTask:
     do_sample: bool
 
 
+class _StreamState:
+    __slots__ = ("buf", "tokens_since_flush", "sent_any")
+
+    def __init__(self) -> None:
+        self.buf: list[str] = []
+        self.tokens_since_flush = 0
+        self.sent_any = False
+
+
 PrefillAdmissionPolicy = Literal["fifo", "pack"]
 
 
@@ -242,6 +251,7 @@ class SchedulerManager:
         max_batch_size: int = 8,
         prefill_max_batch_size: Optional[int] = None,
         prefill_max_tokens: Optional[int] = None,
+        stream_interval: int = 1,
         record_token_timestamps: bool = False,
         tokenize_workers: int = 0,
         decode_first: bool = False,
@@ -263,6 +273,9 @@ class SchedulerManager:
         )
         if self._prefill_max_tokens is not None and self._prefill_max_tokens <= 0:
             raise ValueError("prefill_max_tokens must be positive")
+        self._stream_interval = int(stream_interval)
+        if self._stream_interval <= 0:
+            raise ValueError("stream_interval must be positive")
         self._tokenize_workers = int(tokenize_workers)
         if self._tokenize_workers < 0:
             raise ValueError("tokenize_workers must be non-negative")
@@ -297,6 +310,7 @@ class SchedulerManager:
         self._wakeup = threading.Event()
         self._queues: Dict[int, "queue.Queue[Optional[str]]"] = {}
         self._detoks: Dict[int, BaseDetokenizer] = {}
+        self._stream_states: Dict[int, _StreamState] = {}
         self._record_token_timestamps = bool(record_token_timestamps)
         self._token_timestamps: Dict[int, list[float]] = {}
         self._admit_timestamps: Dict[int, float] = {}
@@ -343,6 +357,7 @@ class SchedulerManager:
                     q.put(None)
             self._queues.clear()
             self._detoks.clear()
+            self._stream_states.clear()
             self._token_timestamps.clear()
             self._admit_timestamps.clear()
             self._tokenize_timestamps.clear()
@@ -384,6 +399,7 @@ class SchedulerManager:
             q: "queue.Queue[Optional[str]]" = queue.Queue()
             self._queues[request_id] = q
             self._detoks[request_id] = detok
+            self._stream_states[request_id] = _StreamState()
             if self._record_token_timestamps:
                 self._token_timestamps[request_id] = []
 
@@ -528,6 +544,7 @@ class SchedulerManager:
             with self._lock:
                 self._queues.pop(request_id, None)
                 self._detoks.pop(request_id, None)
+                self._stream_states.pop(request_id, None)
 
     def _worker_loop(self) -> None:
         try:
@@ -543,31 +560,47 @@ class SchedulerManager:
                         with self._lock:
                             q = self._queues.get(rid)
                             detok = self._detoks.get(rid)
+                            state = self._stream_states.get(rid)
                             token_ts = (
                                 self._token_timestamps.get(rid)
                                 if self._record_token_timestamps
                                 else None
                             )
-                        if q is None or detok is None:
+                        if q is None or detok is None or state is None:
                             self.scheduler.discard_request(rid)
                             continue
                         if token_ts is not None:
                             token_ts.append(time.perf_counter())
                         piece = detok.on_token(int(token_id))
                         if piece:
-                            q.put(piece)
+                            state.buf.append(piece)
+                        state.tokens_since_flush += 1
+                        if state.buf and (
+                            not state.sent_any
+                            or state.tokens_since_flush >= self._stream_interval
+                        ):
+                            q.put("".join(state.buf))
+                            state.buf.clear()
+                            state.tokens_since_flush = 0
+                            state.sent_any = True
 
                     for rid in finished_ids:
                         with self._lock:
                             q = self._queues.get(rid)
                             detok = self._detoks.get(rid)
+                            state = self._stream_states.get(rid)
                         self.scheduler.discard_request(rid)
-                        if q is None:
+                        if q is None or state is None:
                             continue
                         if detok is not None:
                             tail = detok.flush()
                             if tail:
-                                q.put(tail)
+                                state.buf.append(tail)
+                        if state.buf:
+                            q.put("".join(state.buf))
+                            state.buf.clear()
+                            state.tokens_since_flush = 0
+                            state.sent_any = True
                         q.put(None)
 
                 with self._lock:
@@ -646,12 +679,13 @@ class SchedulerManager:
                     with self._lock:
                         q = self._queues.get(rid)
                         detok = self._detoks.get(rid)
+                        state = self._stream_states.get(rid)
                         token_ts = (
                             self._token_timestamps.get(rid)
                             if self._record_token_timestamps
                             else None
                         )
-                    if q is None or detok is None:
+                    if q is None or detok is None or state is None:
                         self.scheduler.discard_request(rid)
                         continue
                     for tid in self.scheduler.get_generated_ids(rid):
@@ -659,11 +693,25 @@ class SchedulerManager:
                             token_ts.append(time.perf_counter())
                         piece = detok.on_token(int(tid))
                         if piece:
-                            q.put(piece)
+                            state.buf.append(piece)
+                        state.tokens_since_flush += 1
+                        if state.buf and (
+                            not state.sent_any
+                            or state.tokens_since_flush >= self._stream_interval
+                        ):
+                            q.put("".join(state.buf))
+                            state.buf.clear()
+                            state.tokens_since_flush = 0
+                            state.sent_any = True
                     if self.scheduler.is_finished(rid):
                         tail = detok.flush()
                         if tail:
-                            q.put(tail)
+                            state.buf.append(tail)
+                        if state.buf:
+                            q.put("".join(state.buf))
+                            state.buf.clear()
+                            state.tokens_since_flush = 0
+                            state.sent_any = True
                         q.put(None)
                         self.scheduler.discard_request(rid)
 
@@ -721,12 +769,14 @@ def create_app(
     engine: InferenceEngine,
     *,
     max_inflight_requests: Optional[int] = None,
+    stream_interval: int = 1,
 ) -> FastAPI:
     app = FastAPI(title="roseinfer", version="0.1.0")
     sched_manager = SchedulerManager(
         engine,
         max_batch_size=8,
         max_inflight_requests=max_inflight_requests,
+        stream_interval=stream_interval,
     )
     app.add_event_handler("shutdown", sched_manager.close)
 
@@ -951,6 +1001,12 @@ def parse_args() -> argparse.Namespace:
         help="Max inflight requests accepted by SchedulerManager (default: unlimited).",
     )
     parser.add_argument(
+        "--stream-interval",
+        type=int,
+        default=1,
+        help="Flush streaming output every N generated tokens (default: 1).",
+    )
+    parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
@@ -971,6 +1027,8 @@ def main() -> None:
     args = parse_args()
     if args.max_inflight_requests is not None and int(args.max_inflight_requests) <= 0:
         raise ValueError("--max-inflight-requests must be >= 1")
+    if int(args.stream_interval) <= 0:
+        raise ValueError("--stream-interval must be >= 1")
     engine = InferenceEngine(
         checkpoint_path=args.checkpoint_path,
         tokenizer_name=args.tokenizer_name,
@@ -978,7 +1036,11 @@ def main() -> None:
         use_amp=not args.no_amp,
         bf16=args.bf16,
     )
-    app = create_app(engine, max_inflight_requests=args.max_inflight_requests)
+    app = create_app(
+        engine,
+        max_inflight_requests=args.max_inflight_requests,
+        stream_interval=int(args.stream_interval),
+    )
     uvicorn.run(
         app,
         host=args.host,
