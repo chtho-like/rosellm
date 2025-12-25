@@ -189,3 +189,4 @@ checkpoints
 profiles*
 *.nsys-rep
 *.ncu-rep
+outputs
