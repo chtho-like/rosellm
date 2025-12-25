@@ -7,6 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as ckpt
 
+from rosellm.rosetrainer.attention_backends import (
+    prefill_attention_flashattn,
+    prefill_attention_flashinfer,
+)
 from rosellm.rosetrainer.config import GPTConfig
 from rosellm.rosetrainer.paged_attention import (
     TRITON_AVAILABLE,
@@ -80,6 +84,7 @@ class MultiHeadSelfAttention(nn.Module):
         return_kv: bool = False,
         paged_kv_cache: Optional[PagedKVCache] = None,
         layer_idx: int = 0,
+        attn_backend: str | None = None,
     ):
         bsz, seq_len, _ = x.size()
         qkv = self.qkv_proj(x)
@@ -124,21 +129,56 @@ class MultiHeadSelfAttention(nn.Module):
         else:
             full_seq_len = seq_len
 
-        attn_scores = q @ k.transpose(-2, -1) * self.d_head**-0.5
-        causal_mask = self.mask[
-            :,
-            :,
-            full_seq_len - seq_len : full_seq_len,
-            :full_seq_len,
-        ]
-        attn_scores = attn_scores.masked_fill(causal_mask == 0, float("-inf"))
-        if attention_mask is not None:  # padding mask
-            attn_mask = attention_mask[:, None, None, :]
-            mask_value = torch.finfo(attn_scores.dtype).min
-            attn_scores = attn_scores.masked_fill(attn_mask == 0, mask_value)
-        attn_weights = F.softmax(attn_scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-        attn_output = attn_weights @ v
+        backend = (attn_backend or "naive").lower()
+        scale = float(self.d_head**-0.5)
+        if backend in ("naive", "eager"):
+            attn_scores = q @ k.transpose(-2, -1) * scale
+            causal_mask = self.mask[
+                :,
+                :,
+                full_seq_len - seq_len : full_seq_len,
+                :full_seq_len,
+            ]
+            attn_scores = attn_scores.masked_fill(causal_mask == 0, float("-inf"))
+            if attention_mask is not None:  # padding mask
+                attn_mask = attention_mask[:, None, None, :]
+                mask_value = torch.finfo(attn_scores.dtype).min
+                attn_scores = attn_scores.masked_fill(attn_mask == 0, mask_value)
+            attn_weights = F.softmax(attn_scores, dim=-1)
+            attn_weights = self.dropout(attn_weights)
+            attn_output = attn_weights @ v
+        elif backend in ("flashinfer", "flashattn"):
+            if self.training or x.requires_grad:
+                raise ValueError(f"{backend} attention backend only supports inference")
+            if past_kv is not None:
+                raise ValueError(
+                    f"{backend} attention backend does not support past_kv"
+                )
+            if attention_mask is not None and int(attention_mask.size(-1)) != int(
+                seq_len
+            ):
+                raise ValueError("attention_mask must match x sequence length")
+            if backend == "flashinfer":
+                attn_output = prefill_attention_flashinfer(
+                    q=q,
+                    k=k,
+                    v=v,
+                    attention_mask=attention_mask,
+                    sm_scale=scale,
+                    causal=True,
+                )
+            else:
+                attn_output = prefill_attention_flashattn(
+                    q=q,
+                    k=k,
+                    v=v,
+                    attention_mask=attention_mask,
+                    softmax_scale=scale,
+                    causal=True,
+                )
+        else:
+            raise ValueError(f"unknown attention backend: {attn_backend}")
+
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, seq_len, self.local_heads * self.d_head)
         out = self.out_proj(attn_output)
@@ -206,6 +246,7 @@ class TransformerBlock(nn.Module):
         return_kv: bool = False,
         paged_kv_cache: Optional[PagedKVCache] = None,
         layer_idx: int = 0,
+        attn_backend: str | None = None,
     ):
         if return_kv:
             attn_out, present_kv = self.attn(
@@ -215,9 +256,18 @@ class TransformerBlock(nn.Module):
                 return_kv=True,
                 paged_kv_cache=paged_kv_cache,
                 layer_idx=layer_idx,
+                attn_backend=attn_backend,
             )
         else:
-            attn_out = self.attn(self.ln1(x), attention_mask=attention_mask)
+            attn_out = self.attn(
+                self.ln1(x),
+                attention_mask=attention_mask,
+                past_kv=past_kv,
+                return_kv=False,
+                paged_kv_cache=paged_kv_cache,
+                layer_idx=layer_idx,
+                attn_backend=attn_backend,
+            )
             present_kv = None
         x = x + attn_out
         mlp_out = self.mlp(self.ln2(x))
@@ -279,6 +329,7 @@ class GPTModel(nn.Module):
         use_cache: bool = False,
         position_ids: Optional[torch.Tensor] = None,
         paged_kv_cache: Optional[PagedKVCache] = None,
+        attn_backend: str | None = None,
     ):
         bsz, seq_len = input_ids.size()
         device = input_ids.device
@@ -336,10 +387,16 @@ class GPTModel(nn.Module):
                         return_kv=True,
                         paged_kv_cache=paged_kv_cache,
                         layer_idx=layer_idx,
+                        attn_backend=attn_backend,
                     )
                     presents.append(present_kv)
                 else:
-                    x = block(x, attention_mask=attention_mask, past_kv=past_kv)
+                    x = block(
+                        x,
+                        attention_mask=attention_mask,
+                        past_kv=past_kv,
+                        attn_backend=attn_backend,
+                    )
         x = self.ln_f(x)
         logits = self.lm_head(x)
         loss = None

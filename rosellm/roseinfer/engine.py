@@ -71,12 +71,16 @@ class InferenceEngine:
         prefix_cache_max_entries: int = 256,
         use_paged_attention: bool = False,
         use_cuda_graph: bool = False,
+        prefill_attn_backend: str = "naive",
+        decode_attn_backend: str = "naive",
         model: GPTModel | None = None,
         config: GPTConfig | None = None,
         tokenizer=None,
     ) -> None:
         super().__init__()
         self.use_paged_attention = use_paged_attention
+        self.prefill_attn_backend = str(prefill_attn_backend)
+        self.decode_attn_backend = str(decode_attn_backend)
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
@@ -403,8 +407,21 @@ class InferenceEngine:
             raise ValueError("batch size mismatch")
         from torch.amp import autocast
 
-        position_ids = attention_mask.to(dtype=torch.long).cumsum(-1) - 1
-        position_ids.masked_fill_(attention_mask == 0, 0)
+        seq_len = int(input_ids.size(1))
+        no_padding = all(int(l) == seq_len for l in lengths)
+        if no_padding:
+            position_ids = torch.arange(
+                seq_len,
+                device=input_ids.device,
+                dtype=torch.long,
+            ).unsqueeze(0)
+            if position_ids.size(0) != input_ids.size(0):
+                position_ids = position_ids.expand(input_ids.size(0), -1).contiguous()
+            attn_mask_for_model = None
+        else:
+            position_ids = attention_mask.to(dtype=torch.long).cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 0)
+            attn_mask_for_model = attention_mask
 
         with record_function("roseinfer.prefill_batch.model_forward"):
             if self.use_amp:
@@ -414,20 +431,22 @@ class InferenceEngine:
                 ):
                     logits, _, presents = self.model(
                         input_ids=input_ids,
-                        attention_mask=attention_mask,
+                        attention_mask=attn_mask_for_model,
                         labels=None,
                         past_key_values=None,
                         use_cache=True,
                         position_ids=position_ids,
+                        attn_backend=self.prefill_attn_backend,
                     )
             else:
                 logits, _, presents = self.model(
                     input_ids=input_ids,
-                    attention_mask=attention_mask,
+                    attention_mask=attn_mask_for_model,
                     labels=None,
                     past_key_values=None,
                     use_cache=True,
                     position_ids=position_ids,
+                    attn_backend=self.prefill_attn_backend,
                 )
         kvm = self.kv_manager
         with record_function("roseinfer.prefill_batch.register_kv"):
@@ -1159,6 +1178,7 @@ class InferenceEngine:
                 use_cache=True,
                 position_ids=position_ids,
                 paged_kv_cache=paged,
+                attn_backend=self.decode_attn_backend,
             )
 
         # Warm up: compile kernels / populate allocator cache before capture.
@@ -1351,6 +1371,7 @@ class InferenceEngine:
                                     use_cache=True,
                                     position_ids=position_ids,
                                     paged_kv_cache=paged,
+                                    attn_backend=self.decode_attn_backend,
                                 )
                         else:
                             logits, _, presents = self.model(
@@ -1361,6 +1382,7 @@ class InferenceEngine:
                                 use_cache=True,
                                 position_ids=position_ids,
                                 paged_kv_cache=paged,
+                                attn_backend=self.decode_attn_backend,
                             )
                 last_logits = logits[:, -1, :]  # [B, V]
                 with _maybe_nvtx_range(
@@ -1439,6 +1461,7 @@ class InferenceEngine:
                             past_key_values=tuple(batched_past),
                             use_cache=True,
                             position_ids=position_ids,
+                            attn_backend=self.decode_attn_backend,
                         )
                 else:
                     logits, _, presents = self.model(
@@ -1448,6 +1471,7 @@ class InferenceEngine:
                         past_key_values=tuple(batched_past),
                         use_cache=True,
                         position_ids=position_ids,
+                        attn_backend=self.decode_attn_backend,
                     )
             last_logits = logits[:, -1, :]  # [B, V]
             with record_function("roseinfer.kv.append_token"):
@@ -1612,6 +1636,7 @@ class InferenceSession:
                     labels=None,
                     past_key_values=None,
                     use_cache=True,
+                    attn_backend=eng.prefill_attn_backend,
                 )
         else:
             logits, _, presents = eng.model(
@@ -1620,6 +1645,7 @@ class InferenceSession:
                 labels=None,
                 past_key_values=None,
                 use_cache=True,
+                attn_backend=eng.prefill_attn_backend,
             )
         self._register_prefill_kv(presents, input_ids.size(1))
         self.kv_cache = presents
@@ -1648,6 +1674,7 @@ class InferenceSession:
                     labels=None,
                     past_key_values=None,
                     use_cache=True,
+                    attn_backend=eng.prefill_attn_backend,
                 )
         else:
             logits, _, presents = eng.model(
@@ -1656,6 +1683,7 @@ class InferenceSession:
                 labels=None,
                 past_key_values=None,
                 use_cache=True,
+                attn_backend=eng.prefill_attn_backend,
             )
         if input_ids.size(0) == 1:  # temporarily only support batch size 1
             self._register_prefill_kv(presents, input_ids.size(1))
@@ -1682,6 +1710,7 @@ class InferenceSession:
                     labels=None,
                     past_key_values=self.kv_cache,
                     use_cache=True,
+                    attn_backend=eng.decode_attn_backend,
                 )
         else:
             logits, _, presents = eng.model(
@@ -1690,6 +1719,7 @@ class InferenceSession:
                 labels=None,
                 past_key_values=self.kv_cache,
                 use_cache=True,
+                attn_backend=eng.decode_attn_backend,
             )
         self.kv_cache = presents
         next_logits = logits[:, -1, :]  # [1, V]
@@ -1781,6 +1811,7 @@ class InferenceSession:
                     labels=None,
                     past_key_values=self.kv_cache,
                     use_cache=True,
+                    attn_backend=eng.decode_attn_backend,
                 )
         else:
             logits, _, presents = eng.model(
@@ -1789,6 +1820,7 @@ class InferenceSession:
                 labels=None,
                 past_key_values=self.kv_cache,
                 use_cache=True,
+                attn_backend=eng.decode_attn_backend,
             )
         self.kv_cache = presents
         next_logits = logits[:, -1, :]  # [B, V]

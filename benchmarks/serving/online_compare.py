@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as _dt
+import importlib.util
 import json
 import os
 import random
@@ -24,6 +25,15 @@ TRACE_A_URL = (
     "https://raw.githubusercontent.com/alibaba-edu/"
     "qwen-bailian-usagetraces-anon/refs/heads/main/qwen_traceA_blksz_16.jsonl"
 )
+
+_DUMMY_OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or "sk-rosellm"
+
+
+def _module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except Exception:
+        return False
 
 
 def _iso_now() -> str:
@@ -416,7 +426,7 @@ async def run_trace_benchmark(
     ignore_eos: bool,
 ) -> tuple[list[RequestMetrics], list[float]]:
     start0 = time.perf_counter()
-    async with AsyncOpenAI(base_url=base_url, api_key="") as client:
+    async with AsyncOpenAI(base_url=base_url, api_key=_DUMMY_OPENAI_API_KEY) as client:
         tasks = [
             _benchmark_one(
                 client,
@@ -454,7 +464,7 @@ async def _warmup(
 ) -> None:
     if num_requests <= 0:
         return
-    async with AsyncOpenAI(base_url=base_url, api_key="") as client:
+    async with AsyncOpenAI(base_url=base_url, api_key=_DUMMY_OPENAI_API_KEY) as client:
         for _ in range(num_requests):
             response = await client.completions.create(
                 model=model,
@@ -548,8 +558,23 @@ def _terminate_process(p: subprocess.Popen[bytes], *, timeout_s: float = 15.0) -
 
 
 def _roseinfer_server_cmd(
-    args: argparse.Namespace, *, host: str, port: int
+    args: argparse.Namespace,
+    *,
+    host: str,
+    port: int,
+    prefill_attn_backend: str | None = None,
+    decode_attn_backend: str | None = None,
 ) -> list[str]:
+    prefill_attn_backend = (
+        str(prefill_attn_backend)
+        if prefill_attn_backend is not None
+        else str(args.roseinfer_prefill_attn_backend)
+    )
+    decode_attn_backend = (
+        str(decode_attn_backend)
+        if decode_attn_backend is not None
+        else str(args.roseinfer_decode_attn_backend)
+    )
     cmd = [
         sys.executable,
         "-m",
@@ -566,6 +591,10 @@ def _roseinfer_server_cmd(
         str(port),
         "--stream-interval",
         "1",
+        "--prefill-attn-backend",
+        prefill_attn_backend,
+        "--decode-attn-backend",
+        decode_attn_backend,
     ]
     if args.max_inflight_requests is not None:
         cmd += ["--max-inflight-requests", str(args.max_inflight_requests)]
@@ -577,6 +606,10 @@ def _roseinfer_server_cmd(
         cmd += ["--no-amp"]
     if args.bf16:
         cmd += ["--bf16"]
+    if args.roseinfer_paged_attn:
+        cmd += ["--paged-attn"]
+    if args.roseinfer_cuda_graph:
+        cmd += ["--cuda-graph"]
     return cmd
 
 
@@ -808,6 +841,39 @@ def parse_args() -> argparse.Namespace:
         help="Use bf16 AMP for roseinfer.",
     )
     parser.add_argument(
+        "--roseinfer-prefill-attn-backend",
+        type=str,
+        default="naive",
+        choices=["naive", "flashinfer", "flashattn"],
+        help="Prefill attention backend for roseinfer (default: naive).",
+    )
+    parser.add_argument(
+        "--roseinfer-prefill-attn-backends",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated prefill attention backends to compare for roseinfer. "
+            "If set, expands 'roseinfer' in --backends (e.g. naive,flashinfer,flashattn)."
+        ),
+    )
+    parser.add_argument(
+        "--roseinfer-decode-attn-backend",
+        type=str,
+        default="naive",
+        choices=["naive", "flashinfer", "flashattn"],
+        help="Decode attention backend for roseinfer dense past_kv path (default: naive).",
+    )
+    parser.add_argument(
+        "--roseinfer-paged-attn",
+        action="store_true",
+        help="Use paged attention decode(T=1) for roseinfer.",
+    )
+    parser.add_argument(
+        "--roseinfer-cuda-graph",
+        action="store_true",
+        help="Use CUDA graphs for paged attention decode(T=1) in roseinfer.",
+    )
+    parser.add_argument(
         "--timeout-ready-s",
         type=float,
         default=120.0,
@@ -884,6 +950,45 @@ def main() -> None:
         )
     )
     backends = [b.strip() for b in args.backends.split(",") if b.strip()]
+    roseinfer_prefill_backends = None
+    if args.roseinfer_prefill_attn_backends:
+        roseinfer_prefill_backends = [
+            x.strip()
+            for x in str(args.roseinfer_prefill_attn_backends).split(",")
+            if x.strip()
+        ]
+        if not roseinfer_prefill_backends:
+            roseinfer_prefill_backends = None
+
+    run_specs: list[tuple[str, str, str | None]] = []
+    for backend in backends:
+        if backend != "roseinfer":
+            run_specs.append((backend, backend, None))
+            continue
+        variants = roseinfer_prefill_backends or [
+            str(args.roseinfer_prefill_attn_backend)
+        ]
+        for prefill_backend in variants:
+            prefill_backend = str(prefill_backend)
+            if prefill_backend == "flashinfer" and not _module_available("flashinfer"):
+                print(
+                    "[warn] flashinfer not installed; skipping roseinfer prefill backend 'flashinfer'"
+                )
+                continue
+            if prefill_backend == "flashattn" and not _module_available("flash_attn"):
+                print(
+                    "[warn] flash-attn not installed; skipping roseinfer prefill backend 'flashattn'"
+                )
+                continue
+            label = (
+                "roseinfer"
+                if prefill_backend == "naive"
+                else f"roseinfer+{prefill_backend}"
+            )
+            run_specs.append(("roseinfer", label, prefill_backend))
+
+    if not run_specs:
+        raise ValueError("no backends to run (all candidates were skipped)")
     scales = _parse_csv_floats(args.scales)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
@@ -893,7 +998,7 @@ def main() -> None:
     summaries: list[OnlineBenchmarkSummary] = []
     raw_per_backend: dict[str, dict[str, Any]] = {}
 
-    for i, backend in enumerate(backends):
+    for i, (base_backend, backend, prefill_backend) in enumerate(run_specs):
         backend_wall_t0 = time.perf_counter()
         backend_start_time = _iso_now()
         port = int(args.port_base) + i
@@ -906,18 +1011,23 @@ def main() -> None:
         env["MKL_NUM_THREADS"] = str(len(server_cpus))
         env["TOKENIZERS_PARALLELISM"] = "false"
 
-        if backend == "roseinfer":
-            cmd = _roseinfer_server_cmd(args, host=args.host, port=port)
-        elif backend == "vllm":
+        if base_backend == "roseinfer":
+            cmd = _roseinfer_server_cmd(
+                args,
+                host=args.host,
+                port=port,
+                prefill_attn_backend=prefill_backend,
+            )
+        elif base_backend == "vllm":
             cmd = _vllm_server_cmd(
                 args, host=args.host, port=port, max_context_len=max_ctx
             )
-        elif backend == "sglang":
+        elif base_backend == "sglang":
             cmd = _sglang_server_cmd(
                 args, host=args.host, port=port, max_context_len=max_ctx
             )
         else:
-            raise ValueError(f"unknown backend: {backend}")
+            raise ValueError(f"unknown backend: {base_backend}")
 
         server = _start_process(
             cmd=cmd, env=env, cpu_set=server_cpus, log_path=log_path
@@ -1062,9 +1172,25 @@ def main() -> None:
             "warmup_input_len": int(args.warmup_input_len),
             "warmup_output_len": int(args.warmup_output_len),
             "timeout_ready_s": float(args.timeout_ready_s),
-            "backends": backends,
+            "backends": [label for _, label, _ in run_specs],
             "server_cpus": server_cpus,
             "client_cpus": client_cpus,
+            "max_inflight_requests": (
+                int(args.max_inflight_requests)
+                if args.max_inflight_requests is not None
+                else None
+            ),
+            "no_amp": bool(args.no_amp),
+            "bf16": bool(args.bf16),
+            "roseinfer_prefill_attn_backend": str(args.roseinfer_prefill_attn_backend),
+            "roseinfer_prefill_attn_backends": (
+                [str(x) for x in roseinfer_prefill_backends]
+                if roseinfer_prefill_backends is not None
+                else None
+            ),
+            "roseinfer_decode_attn_backend": str(args.roseinfer_decode_attn_backend),
+            "roseinfer_paged_attn": bool(args.roseinfer_paged_attn),
+            "roseinfer_cuda_graph": bool(args.roseinfer_cuda_graph),
             "trace_path": str(trace_path),
             "run_start_time": run_start_time,
             "run_end_time": run_end_time,

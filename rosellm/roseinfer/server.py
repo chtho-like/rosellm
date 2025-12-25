@@ -1156,6 +1156,30 @@ def parse_args() -> argparse.Namespace:
         help="Use bfloat16 AMP on CUDA instead of float16.",
     )
     parser.add_argument(
+        "--prefill-attn-backend",
+        type=str,
+        default="naive",
+        choices=["naive", "flashinfer", "flashattn"],
+        help="Prefill attention backend (default: naive).",
+    )
+    parser.add_argument(
+        "--decode-attn-backend",
+        type=str,
+        default="naive",
+        choices=["naive", "flashinfer", "flashattn"],
+        help="Decode attention backend for dense past_kv path (default: naive).",
+    )
+    parser.add_argument(
+        "--paged-attn",
+        action="store_true",
+        help="Use paged attention for decode(T=1).",
+    )
+    parser.add_argument(
+        "--cuda-graph",
+        action="store_true",
+        help="Use CUDA graphs for paged attention decode(T=1).",
+    )
+    parser.add_argument(
         "--stop-on-eos",
         dest="stop_on_eos",
         action="store_true",
@@ -1237,6 +1261,10 @@ def main() -> None:
             device=args.device,
             use_amp=not args.no_amp,
             bf16=args.bf16,
+            use_paged_attention=bool(args.paged_attn),
+            use_cuda_graph=bool(args.cuda_graph),
+            prefill_attn_backend=str(args.prefill_attn_backend),
+            decode_attn_backend=str(args.decode_attn_backend),
         )
     else:
         from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
@@ -1258,6 +1286,10 @@ def main() -> None:
             device=args.device,
             use_amp=use_amp,
             bf16=args.bf16,
+            use_paged_attention=bool(args.paged_attn),
+            use_cuda_graph=bool(args.cuda_graph),
+            prefill_attn_backend=str(args.prefill_attn_backend),
+            decode_attn_backend=str(args.decode_attn_backend),
             model=model,
             config=config,
             tokenizer=tokenizer,

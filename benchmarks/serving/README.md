@@ -7,6 +7,7 @@ These scripts assume the following Python packages are available:
 - `openai`, `httpx`, `transformers`, `numpy`, `matplotlib`
 - `vllm` (for vLLM runs)
 - `sglang` (for SGLang runs)
+- Optional (for roseinfer self-compare variants): `flashinfer`, `flash-attn`
 
 ## Online (OpenAI servers + trace replay)
 
@@ -54,3 +55,11 @@ This writes figures (paper-style) under `--output-dir` (default: `outputs/benchm
 ```bash
 bash scripts/bench_serving_compare.sh
 ```
+
+## Self-compare (roseinfer variants only)
+
+```bash
+bash scripts/bench_roseinfer_self_compare.sh
+```
+
+By default this runs `roseinfer` with multiple prefill attention backends (naive / flashinfer / flash-attn when installed), and produces the same plot set under `outputs/benchmarks/serving/figures/`.

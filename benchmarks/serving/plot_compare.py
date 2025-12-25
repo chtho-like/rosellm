@@ -12,18 +12,24 @@ from matplotlib.patches import Patch
 
 BACKEND_LABELS = {
     "roseinfer": "roseinfer",
+    "roseinfer+flashinfer": "roseinfer (flashinfer)",
+    "roseinfer+flashattn": "roseinfer (flash-attn)",
     "vllm": "vLLM",
     "sglang": "SGLang",
 }
 
 BACKEND_COLORS = {
     "roseinfer": "#1f77b4",
+    "roseinfer+flashinfer": "#9467bd",
+    "roseinfer+flashattn": "#d62728",
     "vllm": "#ff7f0e",
     "sglang": "#2ca02c",
 }
 
 BACKEND_MARKERS = {
     "roseinfer": "o",
+    "roseinfer+flashinfer": "D",
+    "roseinfer+flashattn": "v",
     "vllm": "s",
     "sglang": "^",
 }
