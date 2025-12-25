@@ -10,6 +10,7 @@ from torch.utils.checkpoint import checkpoint as ckpt
 from rosellm.rosetrainer.attention_backends import (
     prefill_attention_flashattn,
     prefill_attention_flashinfer,
+    prefill_attention_flashinfer_paged,
 )
 from rosellm.rosetrainer.config import GPTConfig
 from rosellm.rosetrainer.paged_attention import (
@@ -94,8 +95,38 @@ class MultiHeadSelfAttention(nn.Module):
         if paged_kv_cache is not None:
             if past_kv is not None:
                 raise ValueError("past_kv and paged_kv_cache cannot be used together")
+            backend = (attn_backend or "naive").lower()
             if seq_len != 1:
-                raise ValueError("paged attention only supports decode(T=1)")
+                if backend not in ("flashinfer_paged", "flashinfer-paged"):
+                    raise ValueError(
+                        "paged prefill requires attn_backend='flashinfer_paged' "
+                        f"(got attn_backend={attn_backend})"
+                    )
+                if self.training or x.requires_grad:
+                    raise ValueError(
+                        "flashinfer_paged attention backend only supports inference"
+                    )
+                attn_output = prefill_attention_flashinfer_paged(
+                    q=q,
+                    k=k,
+                    v=v,
+                    attention_mask=attention_mask,
+                    paged_kv_cache=paged_kv_cache,
+                    layer_idx=int(layer_idx),
+                    sm_scale=float(self.d_head**-0.5),
+                    causal=True,
+                )
+                attn_output = attn_output.transpose(1, 2).contiguous()
+                attn_output = attn_output.view(
+                    bsz,
+                    seq_len,
+                    self.local_heads * self.d_head,
+                )
+                out = self.out_proj(attn_output)
+                out = self.dropout(out)
+                if return_kv:
+                    return out, (k, v)
+                return out
             out_h = paged_attention_decode(
                 q=q.squeeze(-2),  # [B, H, D]
                 k_new=k.squeeze(-2),  # [B, H, D]
@@ -395,6 +426,8 @@ class GPTModel(nn.Module):
                         x,
                         attention_mask=attention_mask,
                         past_kv=past_kv,
+                        paged_kv_cache=paged_kv_cache,
+                        layer_idx=layer_idx,
                         attn_backend=attn_backend,
                     )
         x = self.ln_f(x)

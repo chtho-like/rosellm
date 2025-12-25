@@ -7,6 +7,19 @@ OUTDIR="${OUTDIR:-outputs/benchmarks/serving}"
 
 # Comma-separated list. Missing optional deps are auto-skipped by the python scripts.
 ROSEINFER_PREFILL_ATTN_BACKENDS="${ROSEINFER_PREFILL_ATTN_BACKENDS:-naive,flashinfer,flashattn}"
+ROSEINFER_CHUNKED_PREFILL="${ROSEINFER_CHUNKED_PREFILL:-0}"
+ROSEINFER_PREFILL_CHUNK_SIZE="${ROSEINFER_PREFILL_CHUNK_SIZE:-256}"
+
+ROSEINFER_OFFLINE_NUM_PROMPTS="${ROSEINFER_OFFLINE_NUM_PROMPTS:-128}"
+ROSEINFER_OFFLINE_INPUT_LEN="${ROSEINFER_OFFLINE_INPUT_LEN:-256}"
+ROSEINFER_OFFLINE_OUTPUT_LEN="${ROSEINFER_OFFLINE_OUTPUT_LEN:-64}"
+ROSEINFER_OFFLINE_MAX_BATCH_SIZE="${ROSEINFER_OFFLINE_MAX_BATCH_SIZE:-128}"
+ROSEINFER_OFFLINE_WARMUP_PROMPTS="${ROSEINFER_OFFLINE_WARMUP_PROMPTS:-8}"
+
+CHUNK_ARGS=()
+if [[ "${ROSEINFER_CHUNKED_PREFILL}" == "1" ]]; then
+  CHUNK_ARGS=(--roseinfer-chunked-prefill --roseinfer-prefill-chunk-size "${ROSEINFER_PREFILL_CHUNK_SIZE}")
+fi
 
 PYTHON_BIN="${PYTHON_BIN:-}"
 if [[ -z "${PYTHON_BIN}" ]]; then
@@ -40,6 +53,7 @@ done
   --roseinfer-prefill-attn-backends "${ROSEINFER_PREFILL_ATTN_BACKENDS}" \
   --roseinfer-paged-attn \
   --roseinfer-cuda-graph \
+  "${CHUNK_ARGS[@]}" \
   --output-dir "${OUTDIR}" \
   "$@"
 
@@ -49,9 +63,15 @@ ONLINE_JSON="$(ls -t "${OUTDIR}"/online_*/online_results.json | head -n 1)"
   --model "${MODEL}" \
   --gpu "${GPU}" \
   --backends "roseinfer" \
+  --num-prompts "${ROSEINFER_OFFLINE_NUM_PROMPTS}" \
+  --input-len "${ROSEINFER_OFFLINE_INPUT_LEN}" \
+  --output-len "${ROSEINFER_OFFLINE_OUTPUT_LEN}" \
+  --max-batch-size "${ROSEINFER_OFFLINE_MAX_BATCH_SIZE}" \
+  --warmup-prompts "${ROSEINFER_OFFLINE_WARMUP_PROMPTS}" \
   --roseinfer-prefill-attn-backends "${ROSEINFER_PREFILL_ATTN_BACKENDS}" \
   --roseinfer-paged-attn \
   --roseinfer-cuda-graph \
+  "${CHUNK_ARGS[@]}" \
   --output-dir "${OUTDIR}" \
   "${OFFLINE_EXTRA_ARGS[@]}"
 

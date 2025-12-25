@@ -14,6 +14,7 @@ BACKEND_LABELS = {
     "roseinfer": "roseinfer",
     "roseinfer+flashinfer": "roseinfer (flashinfer)",
     "roseinfer+flashattn": "roseinfer (flash-attn)",
+    "roseinfer+chunked": "roseinfer (chunked prefill)",
     "vllm": "vLLM",
     "sglang": "SGLang",
 }
@@ -22,6 +23,7 @@ BACKEND_COLORS = {
     "roseinfer": "#1f77b4",
     "roseinfer+flashinfer": "#9467bd",
     "roseinfer+flashattn": "#d62728",
+    "roseinfer+chunked": "#8c564b",
     "vllm": "#ff7f0e",
     "sglang": "#2ca02c",
 }
@@ -30,6 +32,7 @@ BACKEND_MARKERS = {
     "roseinfer": "o",
     "roseinfer+flashinfer": "D",
     "roseinfer+flashattn": "v",
+    "roseinfer+chunked": "P",
     "vllm": "s",
     "sglang": "^",
 }

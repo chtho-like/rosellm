@@ -13,7 +13,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .detokenizer import BaseDetokenizer
-from .engine import InferenceEngine, OnlineRequest, OnlineScheduler
+from .engine import (
+    ChunkedOnlineScheduler,
+    InferenceEngine,
+    OnlineRequest,
+    OnlineScheduler,
+)
 
 
 class SchedulerManagerOverloadedError(RuntimeError):
@@ -292,6 +297,8 @@ class SchedulerManager:
         self,
         engine: InferenceEngine,
         max_batch_size: int = 8,
+        chunked_prefill: bool = False,
+        prefill_chunk_size: int = 256,
         prefill_max_batch_size: Optional[int] = None,
         prefill_max_tokens: Optional[int] = None,
         stream_interval: int = 1,
@@ -345,10 +352,19 @@ class SchedulerManager:
             raise ValueError("max_inflight_requests must be positive")
 
         self.engine = engine
-        self.scheduler = OnlineScheduler(
-            engine,
-            max_batch_size=int(max_batch_size),
-        )
+        if bool(chunked_prefill):
+            self.scheduler = ChunkedOnlineScheduler(
+                engine,
+                max_batch_size=int(max_batch_size),
+                prefill_chunk_size=int(prefill_chunk_size),
+                prefill_max_batch_size=int(prefill_max_batch_size),
+                use_prefix_cache=True,
+            )
+        else:
+            self.scheduler = OnlineScheduler(
+                engine,
+                max_batch_size=int(max_batch_size),
+            )
         self.engine.warmup_paged_attention_decode()
         self._lock = threading.Lock()
         self._wakeup = threading.Event()
@@ -845,6 +861,8 @@ def create_app(
     *,
     max_inflight_requests: Optional[int] = None,
     stream_interval: int = 1,
+    chunked_prefill: bool = False,
+    prefill_chunk_size: int = 256,
     served_model_name: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="roseinfer", version="0.1.0")
@@ -853,6 +871,8 @@ def create_app(
         max_batch_size=8,
         max_inflight_requests=max_inflight_requests,
         stream_interval=stream_interval,
+        chunked_prefill=bool(chunked_prefill),
+        prefill_chunk_size=int(prefill_chunk_size),
     )
     app.add_event_handler("shutdown", sched_manager.close)
 
@@ -1180,6 +1200,17 @@ def parse_args() -> argparse.Namespace:
         help="Use CUDA graphs for paged attention decode(T=1).",
     )
     parser.add_argument(
+        "--chunked-prefill",
+        action="store_true",
+        help="Enable chunked prefill (incremental prompt ingestion).",
+    )
+    parser.add_argument(
+        "--prefill-chunk-size",
+        type=int,
+        default=256,
+        help="Max tokens per prefill chunk when --chunked-prefill is set.",
+    )
+    parser.add_argument(
         "--stop-on-eos",
         dest="stop_on_eos",
         action="store_true",
@@ -1253,6 +1284,10 @@ def main() -> None:
         raise ValueError("--max-inflight-requests must be >= 1")
     if int(args.stream_interval) <= 0:
         raise ValueError("--stream-interval must be >= 1")
+    if args.chunked_prefill and not args.paged_attn:
+        raise ValueError("--chunked-prefill requires --paged-attn")
+    if args.chunked_prefill and int(args.prefill_chunk_size) <= 0:
+        raise ValueError("--prefill-chunk-size must be >= 1")
     served_model_name = args.tokenizer_name or "roseinfer"
     if args.hf_model_id is None:
         engine = InferenceEngine(
@@ -1299,6 +1334,8 @@ def main() -> None:
         engine,
         max_inflight_requests=args.max_inflight_requests,
         stream_interval=int(args.stream_interval),
+        chunked_prefill=bool(args.chunked_prefill),
+        prefill_chunk_size=int(args.prefill_chunk_size),
         served_model_name=served_model_name,
     )
     uvicorn.run(

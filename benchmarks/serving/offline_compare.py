@@ -188,7 +188,12 @@ def _dtype_flag_sglang(dtype: str) -> dict[str, Any]:
 def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
     import torch
 
-    from rosellm.roseinfer.engine import InferenceEngine, OnlineRequest, OnlineScheduler
+    from rosellm.roseinfer.engine import (
+        ChunkedOnlineScheduler,
+        InferenceEngine,
+        OnlineRequest,
+        OnlineScheduler,
+    )
     from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
 
     device = torch.device(args.device)
@@ -226,6 +231,12 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
         seed=int(args.seed),
         vocab_size=int(tokenizer.vocab_size),
     )
+    use_chunked = bool(getattr(args, "roseinfer_chunked_prefill", False))
+    prefill_chunk_size = int(getattr(args, "roseinfer_prefill_chunk_size", 256))
+    if use_chunked and not bool(args.roseinfer_paged_attn):
+        raise ValueError("--roseinfer-chunked-prefill requires --roseinfer-paged-attn")
+    if use_chunked and prefill_chunk_size <= 0:
+        raise ValueError("--roseinfer-prefill-chunk-size must be >= 1")
 
     def make_requests(n: int, *, output_len: int) -> list[OnlineRequest]:
         reqs: list[OnlineRequest] = []
@@ -245,11 +256,19 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
         return reqs
 
     if int(args.warmup_prompts) > 0:
-        scheduler = OnlineScheduler(
-            engine,
-            max_batch_size=int(args.max_batch_size),
-            use_prefix_cache=False,
-        )
+        if use_chunked:
+            scheduler = ChunkedOnlineScheduler(
+                engine,
+                max_batch_size=int(args.max_batch_size),
+                prefill_chunk_size=prefill_chunk_size,
+                use_prefix_cache=False,
+            )
+        else:
+            scheduler = OnlineScheduler(
+                engine,
+                max_batch_size=int(args.max_batch_size),
+                use_prefix_cache=False,
+            )
         warmup_reqs = make_requests(
             min(int(args.warmup_prompts), int(args.num_prompts)),
             output_len=min(16, int(args.output_len)),
@@ -260,11 +279,19 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
         for sess in scheduler._sessions.values():  # type: ignore[attr-defined]
             sess.release_kv_blocks()
 
-    scheduler = OnlineScheduler(
-        engine,
-        max_batch_size=int(args.max_batch_size),
-        use_prefix_cache=False,
-    )
+    if use_chunked:
+        scheduler = ChunkedOnlineScheduler(
+            engine,
+            max_batch_size=int(args.max_batch_size),
+            prefill_chunk_size=prefill_chunk_size,
+            use_prefix_cache=False,
+        )
+    else:
+        scheduler = OnlineScheduler(
+            engine,
+            max_batch_size=int(args.max_batch_size),
+            use_prefix_cache=False,
+        )
     reqs = make_requests(int(args.num_prompts), output_len=int(args.output_len))
     total_input_tokens = sum(len(r.prompt_token_ids or []) for r in reqs)
 
@@ -282,8 +309,8 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
     for sess in scheduler._sessions.values():  # type: ignore[attr-defined]
         sess.release_kv_blocks()
 
-    prefill_s = t1 - t0
-    decode_s = t2 - t1
+    prefill_s = None if use_chunked else float(t1 - t0)
+    decode_s = None if use_chunked else float(t2 - t1)
     total_s = t2 - t0
     return OfflineResult(
         backend=str(args.roseinfer_label),
@@ -294,8 +321,8 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
         output_len=int(args.output_len),
         total_input_tokens=total_input_tokens,
         total_output_tokens=total_output_tokens,
-        prefill_s=float(prefill_s),
-        decode_s=float(decode_s),
+        prefill_s=prefill_s,
+        decode_s=decode_s,
         total_s=float(total_s),
         request_throughput_rps=float(int(args.num_prompts) / max(total_s, 1e-9)),
         output_throughput_tps=float(total_output_tokens / max(total_s, 1e-9)),
@@ -303,8 +330,8 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
             (total_input_tokens + total_output_tokens) / max(total_s, 1e-9)
         ),
         extra={
-            "prefill_throughput_tps": float(total_input_tokens / max(prefill_s, 1e-9)),
-            "decode_throughput_tps": float(total_output_tokens / max(decode_s, 1e-9)),
+            "prefill_chunked": use_chunked,
+            "prefill_chunk_size": prefill_chunk_size if use_chunked else None,
         },
     )
 
@@ -583,6 +610,17 @@ def parse_args() -> argparse.Namespace:
         help="Use CUDA graphs for paged attention decode(T=1) in roseinfer.",
     )
     parser.add_argument(
+        "--roseinfer-chunked-prefill",
+        action="store_true",
+        help="Enable chunked prefill for roseinfer (requires --roseinfer-paged-attn).",
+    )
+    parser.add_argument(
+        "--roseinfer-prefill-chunk-size",
+        type=int,
+        default=256,
+        help="Chunk size for roseinfer chunked prefill (default: 256).",
+    )
+    parser.add_argument(
         "--roseinfer-label",
         type=str,
         default="roseinfer",
@@ -686,6 +724,13 @@ def _run_compare(args: argparse.Namespace) -> None:
                 else f"roseinfer+{prefill_backend}"
             )
             run_specs.append(("roseinfer", label, prefill_backend))
+        if args.roseinfer_chunked_prefill:
+            if not _module_available("flashinfer"):
+                print(
+                    "[warn] flashinfer not installed; skipping roseinfer chunked prefill variant"
+                )
+            else:
+                run_specs.append(("roseinfer", "roseinfer+chunked", "flashinfer"))
 
     if not run_specs:
         raise ValueError("no backends to run (all candidates were skipped)")
@@ -747,7 +792,14 @@ def _run_compare(args: argparse.Namespace) -> None:
                 "--roseinfer-label",
                 str(label),
             ]
-            if args.roseinfer_paged_attn:
+            if label == "roseinfer+chunked":
+                cmd.append("--roseinfer-chunked-prefill")
+                cmd += [
+                    "--roseinfer-prefill-chunk-size",
+                    str(int(args.roseinfer_prefill_chunk_size)),
+                ]
+                cmd.append("--roseinfer-paged-attn")
+            elif args.roseinfer_paged_attn:
                 cmd.append("--roseinfer-paged-attn")
             if args.roseinfer_cuda_graph:
                 cmd.append("--roseinfer-cuda-graph")
@@ -810,6 +862,8 @@ def _run_compare(args: argparse.Namespace) -> None:
             "roseinfer_decode_attn_backend": str(args.roseinfer_decode_attn_backend),
             "roseinfer_paged_attn": bool(args.roseinfer_paged_attn),
             "roseinfer_cuda_graph": bool(args.roseinfer_cuda_graph),
+            "roseinfer_chunked_prefill": bool(args.roseinfer_chunked_prefill),
+            "roseinfer_prefill_chunk_size": int(args.roseinfer_prefill_chunk_size),
             "server_cpus": server_cpus,
             "backends": [label for _, label, _ in run_specs],
             "run_start_time": run_start_time,

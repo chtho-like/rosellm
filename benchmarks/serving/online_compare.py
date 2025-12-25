@@ -874,6 +874,17 @@ def parse_args() -> argparse.Namespace:
         help="Use CUDA graphs for paged attention decode(T=1) in roseinfer.",
     )
     parser.add_argument(
+        "--roseinfer-chunked-prefill",
+        action="store_true",
+        help="Enable chunked prefill for roseinfer (requires --roseinfer-paged-attn).",
+    )
+    parser.add_argument(
+        "--roseinfer-prefill-chunk-size",
+        type=int,
+        default=256,
+        help="Chunk size for roseinfer chunked prefill (default: 256).",
+    )
+    parser.add_argument(
         "--timeout-ready-s",
         type=float,
         default=120.0,
@@ -986,6 +997,13 @@ def main() -> None:
                 else f"roseinfer+{prefill_backend}"
             )
             run_specs.append(("roseinfer", label, prefill_backend))
+        if args.roseinfer_chunked_prefill:
+            if not _module_available("flashinfer"):
+                print(
+                    "[warn] flashinfer not installed; skipping roseinfer chunked prefill variant"
+                )
+            else:
+                run_specs.append(("roseinfer", "roseinfer+chunked", "flashinfer"))
 
     if not run_specs:
         raise ValueError("no backends to run (all candidates were skipped)")
@@ -1018,6 +1036,14 @@ def main() -> None:
                 port=port,
                 prefill_attn_backend=prefill_backend,
             )
+            if backend == "roseinfer+chunked":
+                cmd.append("--chunked-prefill")
+                cmd += [
+                    "--prefill-chunk-size",
+                    str(int(args.roseinfer_prefill_chunk_size)),
+                ]
+                if not bool(args.roseinfer_paged_attn):
+                    cmd.append("--paged-attn")
         elif base_backend == "vllm":
             cmd = _vllm_server_cmd(
                 args, host=args.host, port=port, max_context_len=max_ctx
@@ -1191,6 +1217,8 @@ def main() -> None:
             "roseinfer_decode_attn_backend": str(args.roseinfer_decode_attn_backend),
             "roseinfer_paged_attn": bool(args.roseinfer_paged_attn),
             "roseinfer_cuda_graph": bool(args.roseinfer_cuda_graph),
+            "roseinfer_chunked_prefill": bool(args.roseinfer_chunked_prefill),
+            "roseinfer_prefill_chunk_size": int(args.roseinfer_prefill_chunk_size),
             "trace_path": str(trace_path),
             "run_start_time": run_start_time,
             "run_end_time": run_end_time,

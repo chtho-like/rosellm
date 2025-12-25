@@ -468,6 +468,219 @@ class InferenceEngine:
         last_logits = logits[:, -1, :]  # [B, V]
         return last_logits
 
+    def _sync_paged_global_block_tables_for_sessions(
+        self,
+        sessions: list["InferenceSession"],
+    ) -> None:
+        if not sessions:
+            return
+        if self.device.type != "cuda" or not torch.cuda.is_available():
+            return
+        global_block_tables = self._get_paged_global_block_tables()
+        max_blocks_per_layer = int(self.kv_manager.max_blocks_per_layer)
+        num_layers = int(self.kv_manager.num_layers)
+
+        dirty_idx: list[int] = []
+        slot_ids: list[int] = []
+        for idx, sess in enumerate(sessions):
+            if sess.paged_slot_id is None:
+                raise RuntimeError("paged_slot_id must be allocated before syncing")
+            slot_ids.append(int(sess.paged_slot_id))
+            _, dirty = sess.get_paged_block_table_row_cpu_and_dirty(
+                layer_idx=0,
+                offset=0,
+            )
+            if dirty:
+                dirty_idx.append(idx)
+
+        if not dirty_idx:
+            return
+
+        dirty_slot_ids = [slot_ids[idx] for idx in dirty_idx]
+        dirty_slot_ids_t = torch.tensor(
+            dirty_slot_ids,
+            device=self.device,
+            dtype=torch.long,
+        )
+        n_dirty = len(dirty_idx)
+        rows_cpu = self._get_paged_dirty_rows_cpu_buf(n_dirty)[:n_dirty]
+        rows_buf = self._get_paged_dirty_rows_buf(n_dirty)[:n_dirty]
+        for layer_idx in range(num_layers):
+            offset = layer_idx * max_blocks_per_layer
+            rows = [
+                sessions[idx].get_paged_block_table_row_cpu(
+                    layer_idx=layer_idx,
+                    offset=offset,
+                )
+                for idx in dirty_idx
+            ]
+            torch.stack(rows, dim=0, out=rows_cpu)
+            rows_buf.copy_(rows_cpu, non_blocking=True)
+            global_block_tables[layer_idx].index_copy_(
+                0,
+                dirty_slot_ids_t,
+                rows_buf,
+            )
+
+    @torch.no_grad()
+    def prefill_chunk_sessions(
+        self,
+        *,
+        sessions: list["InferenceSession"],
+        chunk_token_ids: list[list[int]],
+    ) -> torch.Tensor:
+        if not sessions:
+            raise ValueError("sessions must be non-empty")
+        if len(sessions) != len(chunk_token_ids):
+            raise ValueError("sessions/chunk_token_ids size mismatch")
+        if self.device.type != "cuda" or not torch.cuda.is_available():
+            raise RuntimeError("chunked prefill requires CUDA")
+        if not self.use_paged_attention:
+            raise RuntimeError("chunked prefill requires --paged-attn (paged KV cache)")
+        if not self.use_amp or self.amp_dtype not in (torch.float16, torch.bfloat16):
+            raise RuntimeError("chunked prefill requires fp16/bf16 AMP on CUDA")
+
+        from torch.amp import autocast
+
+        from rosellm.rosetrainer.paged_attention import PagedKVCache
+
+        eng = self
+        kvm = self.kv_manager
+        num_layers = int(kvm.num_layers)
+        block_size = int(kvm.block_size)
+        max_ctx = int(self.config.max_position_embeddings)
+
+        start_lens: list[int] = []
+        new_lens: list[int] = []
+        chunk_lens: list[int] = []
+
+        for sess, chunk in zip(sessions, chunk_token_ids):
+            n = int(len(chunk))
+            if n <= 0:
+                raise ValueError("chunk_token_ids entries must be non-empty")
+            cur = int(sess.prompt_length)
+            nxt = cur + n
+            if nxt > max_ctx:
+                raise ValueError(
+                    f"chunked prefill exceeds max_position_embeddings ({nxt} > {max_ctx})"
+                )
+            start_lens.append(cur)
+            new_lens.append(nxt)
+            chunk_lens.append(n)
+
+        for sess in sessions:
+            if sess.paged_slot_id is None:
+                sess.paged_slot_id = self._alloc_paged_slot()
+                sess.clear_paged_block_table_cache()
+
+        # Reserve KV metadata for the appended tokens (and clone on write when needed).
+        for sess, n_append in zip(sessions, chunk_lens):
+            for layer_idx in range(num_layers):
+                kvm.reserve_append_tokens(
+                    layer_idx=layer_idx,
+                    block_ids=sess.block_ids_per_layer[layer_idx],
+                    n_append=n_append,
+                )
+
+        # Update prompt lengths after KV reservation.
+        for sess, nxt in zip(sessions, new_lens):
+            sess.prompt_length = int(nxt)
+
+        # Sync paged block tables so flashinfer_paged can gather kv_indices correctly.
+        self._sync_paged_global_block_tables_for_sessions(sessions)
+
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.eos_token_id
+
+        max_chunk = int(max(chunk_lens))
+        batch_ids: list[list[int]] = []
+        masks: list[list[int]] = []
+        pos_ids: list[list[int]] = []
+        for start, chunk in zip(start_lens, chunk_token_ids):
+            n = len(chunk)
+            pad_len = max_chunk - n
+            batch_ids.append(list(chunk) + [int(pad_id)] * pad_len)
+            masks.append([1] * n + [0] * pad_len)
+            pos_ids.append(list(range(int(start), int(start) + n)) + [0] * pad_len)
+
+        input_ids = torch.tensor(
+            batch_ids,
+            device=self.device,
+            dtype=torch.long,
+        )
+        attention_mask = torch.tensor(
+            masks,
+            device=self.device,
+            dtype=torch.long,
+        )
+        position_ids = torch.tensor(
+            pos_ids,
+            device=self.device,
+            dtype=torch.long,
+        )
+
+        slot_mapping = torch.tensor(
+            [int(sess.paged_slot_id) for sess in sessions],
+            device=self.device,
+            dtype=torch.int32,
+        )
+        context_lens = torch.tensor(
+            new_lens,
+            device=self.device,
+            dtype=torch.int32,
+        )
+        global_block_tables = self._get_paged_global_block_tables()
+        block_tables = [
+            global_block_tables[layer_idx] for layer_idx in range(num_layers)
+        ]
+        paged = PagedKVCache(
+            k_cache=kvm._k_cache,
+            v_cache=kvm._v_cache,
+            block_tables=block_tables,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            block_size=block_size,
+        )
+
+        with record_function("roseinfer.prefill_chunk.model_forward"):
+            if eng.use_amp:
+                with autocast(
+                    device_type=eng.device.type,
+                    dtype=eng.amp_dtype,
+                ):
+                    logits, _ = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=False,
+                        position_ids=position_ids,
+                        paged_kv_cache=paged,
+                        attn_backend="flashinfer_paged",
+                    )
+            else:
+                logits, _ = eng.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=None,
+                    past_key_values=None,
+                    use_cache=False,
+                    position_ids=position_ids,
+                    paged_kv_cache=paged,
+                    attn_backend="flashinfer_paged",
+                )
+
+        # Return last logits for each sequence's last valid token in this chunk.
+        bsz = int(input_ids.size(0))
+        last_pos = torch.tensor(
+            [int(n) - 1 for n in chunk_lens],
+            device=self.device,
+            dtype=torch.long,
+        )
+        row = torch.arange(bsz, device=self.device, dtype=torch.long)
+        return logits[row, last_pos, :]
+
     def _top_k_logits(
         self,
         logits: torch.Tensor,  # [..., vocab]
@@ -2546,6 +2759,404 @@ class OnlineScheduler:
             session.release_kv_blocks()
 
 
+class ChunkedOnlineScheduler:
+    def __init__(
+        self,
+        engine: "InferenceEngine",
+        *,
+        max_batch_size: int = 8,
+        prefill_chunk_size: int = 256,
+        prefill_max_batch_size: Optional[int] = None,
+        use_prefix_cache: bool = True,
+    ) -> None:
+        if max_batch_size <= 0:
+            raise ValueError("max_batch_size must be positive")
+        prefill_chunk_size = int(prefill_chunk_size)
+        if prefill_chunk_size <= 0:
+            raise ValueError("prefill_chunk_size must be positive")
+        if prefill_max_batch_size is None:
+            prefill_max_batch_size = max_batch_size
+        if int(prefill_max_batch_size) <= 0:
+            raise ValueError("prefill_max_batch_size must be positive")
+        if not engine.use_paged_attention:
+            raise ValueError(
+                "ChunkedOnlineScheduler requires engine.use_paged_attention"
+            )
+        self.engine = engine
+        self.max_batch_size = int(max_batch_size)
+        self.prefill_chunk_size = prefill_chunk_size
+        self.prefill_max_batch_size = int(prefill_max_batch_size)
+        self.use_prefix_cache = bool(use_prefix_cache)
+        self._sessions: dict[int, InferenceSession] = {}
+        self._prompt_token_ids: dict[int, list[int]] = {}
+        self._cache_keys: dict[int, PrefixCacheKey] = {}
+        self._prefill_rids: deque[int] = deque()
+        self._decode_rids: deque[int] = deque()
+        self._finished_ids: list[int] = []
+        self._next_request_id: int = 0
+
+    def pop_finished_ids(self) -> list[int]:
+        ids, self._finished_ids = self._finished_ids, []
+        return ids
+
+    def has_unfinished(self) -> bool:
+        while self._decode_rids:
+            rid = self._decode_rids[0]
+            sess = self._sessions.get(rid)
+            if sess is None or sess.finished:
+                self._decode_rids.popleft()
+                continue
+            return True
+        while self._prefill_rids:
+            rid = self._prefill_rids[0]
+            sess = self._sessions.get(rid)
+            if sess is None or sess.finished:
+                self._prefill_rids.popleft()
+                continue
+            return True
+        return False
+
+    def num_unfinished(self) -> int:
+        return sum(1 for sess in self._sessions.values() if not sess.finished)
+
+    def is_finished(self, request_id: int) -> bool:
+        session = self._sessions.get(request_id)
+        if session is None:
+            return True
+        return session.finished
+
+    def get_generated_ids(self, request_id: int) -> list[int]:
+        session = self._sessions.get(request_id)
+        if session is None:
+            return []
+        return list(session.generated_ids)
+
+    def get_step_count(self, request_id: int) -> int:
+        session = self._sessions.get(request_id)
+        if session is None:
+            return 0
+        return int(session.step_count)
+
+    def get_response(self, request_id: int) -> str:
+        session = self._sessions[request_id]
+        return session.decode_text()
+
+    def pop_response(self, request_id: int) -> str:
+        session = self._sessions.pop(request_id)
+        session.release_kv_blocks()
+        self._prompt_token_ids.pop(request_id, None)
+        self._cache_keys.pop(request_id, None)
+        return session.decode_text()
+
+    def discard_request(self, request_id: int) -> None:
+        session = self._sessions.pop(request_id, None)
+        if session is not None:
+            session.release_kv_blocks()
+        self._prompt_token_ids.pop(request_id, None)
+        self._cache_keys.pop(request_id, None)
+
+    @torch.no_grad()
+    def add_request(
+        self,
+        prompt: str,
+        max_new_tokens: int = 64,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        stop_on_eos: bool = True,
+        do_sample: bool = False,
+        prompt_token_ids: Optional[list[int]] = None,
+        request_id: Optional[int] = None,
+    ) -> int:
+        req = OnlineRequest(
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            stop_on_eos=stop_on_eos,
+            do_sample=do_sample,
+            prompt_token_ids=prompt_token_ids,
+            request_id=request_id,
+        )
+        return self.add_requests([req])[0]
+
+    @torch.no_grad()
+    def add_requests(
+        self,
+        requests: list[OnlineRequest],
+    ) -> list[int]:
+        if not requests:
+            return []
+        eng = self.engine
+        eng.model.eval()
+
+        used: set[int] = set()
+        next_rid = self._next_request_id
+        rids: list[int] = []
+
+        def alloc_rid(desired: Optional[int]) -> int:
+            nonlocal next_rid
+            if desired is None:
+                while next_rid in used or next_rid in self._sessions:
+                    next_rid += 1
+                rid = next_rid
+                next_rid += 1
+                used.add(rid)
+                return rid
+            rid = int(desired)
+            if rid in used or rid in self._sessions:
+                raise ValueError(f"request_id {rid} already exists")
+            used.add(rid)
+            if rid >= next_rid:
+                next_rid = rid + 1
+            return rid
+
+        for req in requests:
+            rid = alloc_rid(req.request_id)
+            rids.append(rid)
+
+            if req.prompt_token_ids is None:
+                ids = eng.tokenizer.encode(req.prompt, add_special_tokens=False)
+                cache_key: PrefixCacheKey = req.prompt
+            else:
+                ids = list(req.prompt_token_ids)
+                cache_key = tuple(ids)
+            if not ids:
+                ids = [eng.eos_token_id]
+                cache_key = tuple(ids)
+            max_pos = int(eng.config.max_position_embeddings)
+            if len(ids) > max_pos:
+                ids = ids[-max_pos:]
+                cache_key = tuple(ids)
+
+            sess = InferenceSession(eng)
+            sess.input_ids = eng._encode_prompt_token_ids(ids)
+
+            max_new = int(req.max_new_tokens)
+            if max_new > 0:
+                available = max_pos - len(ids)
+                if available <= 0:
+                    sess.finished = True
+                elif max_new > available:
+                    max_new = available
+            sess.set_generation_config(
+                max_new_tokens=max_new,
+                temperature=float(req.temperature),
+                top_k=int(req.top_k),
+                top_p=float(req.top_p),
+                do_sample=bool(req.do_sample),
+                stop_on_eos=bool(req.stop_on_eos),
+            )
+
+            self._sessions[rid] = sess
+            self._prompt_token_ids[rid] = list(ids)
+            self._cache_keys[rid] = cache_key
+
+            cached_logits: torch.Tensor | None = None
+            if self.use_prefix_cache:
+                cached_logits = eng.prefix_cache.attach(cache_key, sess)
+
+            if cached_logits is not None:
+                token_id = eng._sample_next_token(
+                    logits=cached_logits,
+                    temperature=sess.temperature,
+                    top_k=sess.top_k,
+                    top_p=sess.top_p,
+                    do_sample=sess.do_sample,
+                )
+                sess.generated_ids.append(int(token_id))
+                sess.step_count = 1
+                if (
+                    sess.stop_on_eos
+                    and eng.eos_token_id is not None
+                    and int(token_id) == int(eng.eos_token_id)
+                ):
+                    sess.finished = True
+                if sess.max_new_tokens > 0 and sess.step_count >= sess.max_new_tokens:
+                    sess.finished = True
+                if sess.finished:
+                    sess.release_kv_blocks()
+                    self._finished_ids.append(rid)
+                else:
+                    self._decode_rids.append(rid)
+                continue
+
+            if sess.finished:
+                sess.release_kv_blocks()
+                self._finished_ids.append(rid)
+                continue
+
+            if self.use_prefix_cache and isinstance(cache_key, tuple):
+                entry = eng.prefix_cache.find_longest_token_prefix(cache_key)
+                if entry is not None:
+                    eng.prefix_cache.attach(entry.key, sess)
+
+            if int(sess.prompt_length) >= len(ids):
+                raise RuntimeError("prefix cache attach produced invalid prompt_length")
+            self._prefill_rids.append(rid)
+
+        self._next_request_id = next_rid
+        return rids
+
+    def _select_decode_batch(self) -> list[tuple[int, InferenceSession]]:
+        selected: list[tuple[int, InferenceSession]] = []
+        max_examine = len(self._decode_rids)
+        while (
+            len(selected) < self.max_batch_size
+            and self._decode_rids
+            and max_examine > 0
+        ):
+            max_examine -= 1
+            rid = self._decode_rids.popleft()
+            sess = self._sessions.get(rid)
+            if sess is None or sess.finished:
+                continue
+            if not sess.generated_ids:
+                continue
+            selected.append((rid, sess))
+        return selected
+
+    def _select_prefill_batch(self) -> list[tuple[int, InferenceSession, list[int]]]:
+        selected: list[tuple[int, InferenceSession, list[int]]] = []
+        max_examine = len(self._prefill_rids)
+        while (
+            len(selected) < self.prefill_max_batch_size
+            and self._prefill_rids
+            and max_examine > 0
+        ):
+            max_examine -= 1
+            rid = self._prefill_rids.popleft()
+            sess = self._sessions.get(rid)
+            if sess is None or sess.finished:
+                continue
+            prompt_ids = self._prompt_token_ids.get(rid)
+            if not prompt_ids:
+                continue
+            cur = int(sess.prompt_length)
+            if cur >= len(prompt_ids):
+                continue
+            remaining = len(prompt_ids) - cur
+            take = min(int(self.prefill_chunk_size), int(remaining))
+            chunk = prompt_ids[cur : cur + take]
+            if not chunk:
+                continue
+            selected.append((rid, sess, chunk))
+        return selected
+
+    @torch.no_grad()
+    def step(self) -> dict[int, int]:
+        eng = self.engine
+        step_tokens: dict[int, int] = {}
+        just_finished: list[int] = []
+
+        decode_pairs = self._select_decode_batch()
+        if decode_pairs:
+            sessions = [sess for _, sess in decode_pairs]
+            last_logits = eng.decode_step_sessions(sessions)
+
+            groups: dict[tuple[float, int, float, bool], list[int]] = {}
+            for i, (_, sess) in enumerate(decode_pairs):
+                key = (
+                    float(sess.temperature),
+                    int(sess.top_k),
+                    float(sess.top_p),
+                    bool(sess.do_sample),
+                )
+                groups.setdefault(key, []).append(i)
+
+            next_token_ids: list[int] = [0 for _ in range(len(decode_pairs))]
+            for (temp, top_k, top_p, do_sample), idxs in groups.items():
+                if len(idxs) == len(decode_pairs) and idxs == list(
+                    range(len(decode_pairs))
+                ):
+                    next_ids = eng._sample_next_token_batch(
+                        logits=last_logits,
+                        temperature=temp,
+                        top_k=top_k,
+                        top_p=top_p,
+                        do_sample=do_sample,
+                    )
+                    next_token_ids = [int(x) for x in next_ids.tolist()]
+                    break
+                idx_t = torch.tensor(
+                    idxs,
+                    device=eng.device,
+                    dtype=torch.long,
+                )
+                logits_g = last_logits.index_select(0, idx_t)
+                next_ids = eng._sample_next_token_batch(
+                    logits=logits_g,
+                    temperature=temp,
+                    top_k=top_k,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                )
+                next_list = next_ids.tolist()
+                for pos, i in enumerate(idxs):
+                    next_token_ids[i] = int(next_list[pos])
+
+            for i, (rid, sess) in enumerate(decode_pairs):
+                token_id = sess.apply_token_id(next_token_ids[i])
+                if token_id is not None:
+                    step_tokens[rid] = int(token_id)
+                if sess.finished:
+                    just_finished.append(rid)
+                    sess.release_kv_blocks()
+                else:
+                    self._decode_rids.append(rid)
+
+        prefill_batch = self._select_prefill_batch()
+        if prefill_batch:
+            sessions = [sess for _, sess, _ in prefill_batch]
+            chunks = [chunk for _, _, chunk in prefill_batch]
+            last_logits = eng.prefill_chunk_sessions(
+                sessions=sessions,
+                chunk_token_ids=chunks,
+            )
+
+            for b, (rid, sess, _) in enumerate(prefill_batch):
+                prompt_ids = self._prompt_token_ids.get(rid) or []
+                if int(sess.prompt_length) < len(prompt_ids):
+                    self._prefill_rids.append(rid)
+                    continue
+
+                logits_b = last_logits[b : b + 1]
+                if self.use_prefix_cache:
+                    cache_key = self._cache_keys.get(rid)
+                    if cache_key is not None:
+                        eng.prefix_cache.put(cache_key, sess, logits_b)
+
+                token_id = eng._sample_next_token(
+                    logits=logits_b,
+                    temperature=sess.temperature,
+                    top_k=sess.top_k,
+                    top_p=sess.top_p,
+                    do_sample=sess.do_sample,
+                )
+                sess.generated_ids.append(int(token_id))
+                sess.step_count = 1
+                if (
+                    sess.stop_on_eos
+                    and eng.eos_token_id is not None
+                    and int(token_id) == int(eng.eos_token_id)
+                ):
+                    sess.finished = True
+                if sess.max_new_tokens > 0 and sess.step_count >= sess.max_new_tokens:
+                    sess.finished = True
+
+                if sess.finished:
+                    sess.release_kv_blocks()
+                    just_finished.append(rid)
+                else:
+                    self._decode_rids.append(rid)
+                step_tokens.setdefault(rid, int(token_id))
+
+        if just_finished:
+            self._finished_ids.extend(just_finished)
+        return step_tokens
+
+
 @dataclass(slots=True)
 class KVBlockInfo:
     layer: int
@@ -3045,6 +3656,175 @@ class KVBlockManager:
                 key_new[b],
                 value_new[b],
             )
+
+    def _clone_blocks(
+        self,
+        *,
+        layer_idx: int,
+        src_block_idx: list[int],
+        dst_block_idx: list[int],
+    ) -> None:
+        if not src_block_idx:
+            return
+        if len(src_block_idx) != len(dst_block_idx):
+            raise ValueError("src_block_idx and dst_block_idx size mismatch")
+        device = self.device
+        k_layer = self._k_cache[layer_idx]
+        v_layer = self._v_cache[layer_idx]
+        use_triton_clone = False
+        kv_clone_blocks_triton = None
+        if device.type == "cuda":
+            try:
+                from rosellm.roseinfer.kv_clone_triton import (
+                    TRITON_AVAILABLE as TRITON_CLONE_AVAILABLE,
+                )
+                from rosellm.roseinfer.kv_clone_triton import USE_TRITON_KV_CLONE
+                from rosellm.roseinfer.kv_clone_triton import (
+                    kv_clone_blocks_triton as _kv_clone_blocks_triton,
+                )
+
+                use_triton_clone = TRITON_CLONE_AVAILABLE and USE_TRITON_KV_CLONE
+                kv_clone_blocks_triton = _kv_clone_blocks_triton
+            except Exception:
+                use_triton_clone = False
+                kv_clone_blocks_triton = None
+
+        if use_triton_clone and kv_clone_blocks_triton is not None:
+            src_t = torch.tensor(
+                src_block_idx,
+                device=device,
+                dtype=torch.int32,
+            )
+            dst_t = torch.tensor(
+                dst_block_idx,
+                device=device,
+                dtype=torch.int32,
+            )
+            kv_clone_blocks_triton(
+                k_cache_layer=k_layer,
+                v_cache_layer=v_layer,
+                src_block_idx=src_t,
+                dst_block_idx=dst_t,
+            )
+            return
+
+        src_t = torch.tensor(
+            src_block_idx,
+            device=device,
+            dtype=torch.long,
+        )
+        dst_t = torch.tensor(
+            dst_block_idx,
+            device=device,
+            dtype=torch.long,
+        )
+        k_src = k_layer.index_select(0, src_t)
+        v_src = v_layer.index_select(0, src_t)
+        k_layer.index_copy_(0, dst_t, k_src)
+        v_layer.index_copy_(0, dst_t, v_src)
+
+    def reserve_append_tokens(
+        self,
+        *,
+        layer_idx: int,
+        block_ids: list[int],
+        n_append: int,
+    ) -> None:
+        n_append = int(n_append)
+        if n_append <= 0:
+            return
+        if not (0 <= layer_idx < self.num_layers):
+            raise ValueError("layer_idx out of range")
+
+        # Ensure at least one block exists.
+        if not block_ids:
+            block_idx = self._alloc_block_index(layer_idx)
+            gid = self._to_global_block_id(layer_idx, block_idx)
+            info = KVBlockInfo(
+                layer=layer_idx,
+                block_index=block_idx,
+                start=0,
+                length=0,
+            )
+            self._block_infos[gid] = info
+            self._block_refcounts[gid] = 1
+            block_ids.append(gid)
+
+        block_size = int(self.block_size)
+
+        # If the last block is full, allocate a new empty one first.
+        last_gid = int(block_ids[-1])
+        last_info = self._block_infos[last_gid]
+        if last_info is None:
+            raise RuntimeError(f"missing KVBlockInfo for block {last_gid}")
+        if int(last_info.length) >= block_size:
+            block_idx = self._alloc_block_index(layer_idx)
+            gid = self._to_global_block_id(layer_idx, block_idx)
+            info = KVBlockInfo(
+                layer=layer_idx,
+                block_index=block_idx,
+                start=int(last_info.start + last_info.length),
+                length=0,
+            )
+            self._block_infos[gid] = info
+            self._block_refcounts[gid] = 1
+            block_ids.append(gid)
+            last_gid = gid
+            last_info = info
+
+        # Copy-on-write for shared last block if we will write into it.
+        ref = int(self._block_refcounts[last_gid])
+        if ref != 1 and int(last_info.length) < block_size:
+            old_gid = last_gid
+            old_info = last_info
+            old_block_idx = int(old_info.block_index)
+            old_len = int(old_info.length)
+            self._block_refcounts[old_gid] = ref - 1
+            new_block_idx = self._alloc_block_index(layer_idx)
+            new_gid = self._to_global_block_id(layer_idx, new_block_idx)
+            new_info = KVBlockInfo(
+                layer=layer_idx,
+                block_index=new_block_idx,
+                start=int(old_info.start),
+                length=int(old_len),
+            )
+            self._block_infos[new_gid] = new_info
+            self._block_refcounts[new_gid] = 1
+            block_ids[-1] = new_gid
+            self._clone_blocks(
+                layer_idx=layer_idx,
+                src_block_idx=[old_block_idx],
+                dst_block_idx=[new_block_idx],
+            )
+            last_gid = new_gid
+            last_info = new_info
+
+        # Fill remaining space in the last block.
+        avail = block_size - int(last_info.length)
+        take = min(avail, n_append)
+        last_info.length += int(take)
+        n_append -= int(take)
+        if n_append <= 0:
+            return
+
+        # Allocate additional blocks for remaining tokens.
+        prev_info = last_info
+        while n_append > 0:
+            block_idx = self._alloc_block_index(layer_idx)
+            gid = self._to_global_block_id(layer_idx, block_idx)
+            info = KVBlockInfo(
+                layer=layer_idx,
+                block_index=block_idx,
+                start=int(prev_info.start + prev_info.length),
+                length=0,
+            )
+            self._block_infos[gid] = info
+            self._block_refcounts[gid] = 1
+            block_ids.append(gid)
+            fill_len = min(block_size, n_append)
+            info.length = int(fill_len)
+            n_append -= int(fill_len)
+            prev_info = info
 
     def gather_sequence_into(
         self,
