@@ -88,13 +88,56 @@ class ChatCompletionChunkResponse(BaseModel):
     choices: List[ChatCompletionChunkChoice]
 
 
+class CompletionChoice(BaseModel):
+    text: str
+    index: int
+    finish_reason: Optional[str] = None
+
+
+class CompletionResponse(BaseModel):
+    id: str
+    object: Literal["text_completion"]
+    created: int
+    model: str
+    choices: List[CompletionChoice]
+    usage: Optional[UsageInfo] = None
+
+
+class CompletionChunkChoice(BaseModel):
+    text: str
+    index: int
+    finish_reason: Optional[str] = None
+
+
+class CompletionChunk(BaseModel):
+    id: str
+    object: Literal["text_completion"]
+    created: int
+    model: str
+    choices: List[CompletionChunkChoice]
+
+
+class CompletionRequest(BaseModel):
+    model: str
+    prompt: str
+    max_tokens: int = 64
+    temperature: float = 1.0
+    top_p: float = 1.0
+    top_k: int = 0
+    do_sample: bool = True
+    ignore_eos: bool = False
+    stream: bool = False
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
-    max_tokens: int = (64,)
-    temperature: float = (1.0,)
+    max_tokens: int = 64
+    temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = 0
+    do_sample: bool = True
+    ignore_eos: bool = False
     stream: bool = False
 
 
@@ -802,6 +845,7 @@ def create_app(
     *,
     max_inflight_requests: Optional[int] = None,
     stream_interval: int = 1,
+    served_model_name: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="roseinfer", version="0.1.0")
     sched_manager = SchedulerManager(
@@ -815,6 +859,21 @@ def create_app(
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/v1/models")
+    def models() -> dict:
+        model_id = served_model_name or "roseinfer"
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "rosellm",
+                }
+            ],
+        }
 
     @app.post("/generate", response_model=GenerateResponse)
     def generate(
@@ -861,6 +920,7 @@ def create_app(
         created = int(time.time())
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         model_name = body.model or "roseinfer"
+        stop_on_eos = not bool(body.ignore_eos)
         if body.stream:
             try:
                 request_id = sched_manager.add_request(
@@ -869,8 +929,8 @@ def create_app(
                     temperature=body.temperature,
                     top_k=body.top_k,
                     top_p=body.top_p,
-                    stop_on_eos=True,
-                    do_sample=True,
+                    stop_on_eos=stop_on_eos,
+                    do_sample=bool(body.do_sample),
                 )
             except SchedulerManagerOverloadedError as exc:
                 raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -942,8 +1002,8 @@ def create_app(
             temperature=body.temperature,
             top_k=body.top_k,
             top_p=body.top_p,
-            stop_on_eos=True,
-            do_sample=True,
+            stop_on_eos=stop_on_eos,
+            do_sample=bool(body.do_sample),
         )
         usage = estimate_usage(engine, prompt, text)
         resp = ChatCompletionResponse(
@@ -962,6 +1022,95 @@ def create_app(
         )
         return resp
 
+    @app.post("/v1/completions", response_model=CompletionResponse)
+    def completions(
+        body: CompletionRequest,
+    ) -> CompletionResponse | StreamingResponse:
+        created = int(time.time())
+        completion_id = f"cmpl-{uuid.uuid4().hex}"
+        model_name = body.model or "roseinfer"
+        stop_on_eos = not bool(body.ignore_eos)
+        if body.stream:
+            try:
+                request_id = sched_manager.add_request(
+                    prompt=body.prompt,
+                    max_new_tokens=body.max_tokens,
+                    temperature=body.temperature,
+                    top_k=body.top_k,
+                    top_p=body.top_p,
+                    stop_on_eos=stop_on_eos,
+                    do_sample=bool(body.do_sample),
+                )
+            except SchedulerManagerOverloadedError as exc:
+                raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+            def event_stream():
+                for piece in sched_manager.stream_text(request_id):
+                    if not piece:
+                        continue
+                    chunk = CompletionChunk(
+                        id=completion_id,
+                        object="text_completion",
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            CompletionChunkChoice(
+                                index=0,
+                                text=piece,
+                                finish_reason=None,
+                            )
+                        ],
+                    )
+                    yield f"data: {chunk.model_dump_json()}\n\n".encode("utf-8")
+                final_chunk = CompletionChunk(
+                    id=completion_id,
+                    object="text_completion",
+                    created=created,
+                    model=model_name,
+                    choices=[
+                        CompletionChunkChoice(
+                            index=0,
+                            text="",
+                            finish_reason="stop",
+                        )
+                    ],
+                )
+                yield f"data: {final_chunk.model_dump_json()}\n\n".encode("utf-8")
+                yield b"data: [DONE]\n\n"
+
+            return StreamingResponse(
+                event_stream(),
+                media_type="text/event-stream",
+            )
+
+        text = engine.generate(
+            prompt=body.prompt,
+            max_new_tokens=body.max_tokens,
+            temperature=body.temperature,
+            top_k=body.top_k,
+            top_p=body.top_p,
+            stop_on_eos=stop_on_eos,
+            do_sample=bool(body.do_sample),
+        )
+        completion_text = (
+            text[len(body.prompt) :] if text.startswith(body.prompt) else text
+        )
+        usage = estimate_usage(engine, body.prompt, completion_text)
+        return CompletionResponse(
+            id=completion_id,
+            object="text_completion",
+            created=created,
+            model=model_name,
+            choices=[
+                CompletionChoice(
+                    index=0,
+                    text=completion_text,
+                    finish_reason="stop",
+                )
+            ],
+            usage=usage,
+        )
+
     return app
 
 
@@ -972,14 +1121,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-path",
         type=str,
-        required=True,
+        default=None,
         help="Path to checkpoint file",
     )
     parser.add_argument(
         "--tokenizer-name",
         type=str,
-        required=True,
+        default=None,
         help="Tokenizer name",
+    )
+    parser.add_argument(
+        "--hf-model-id",
+        type=str,
+        default=None,
+        help=(
+            "Load model weights from Hugging Face (GPT-2 only). "
+            "If set, --checkpoint-path/--tokenizer-name become optional."
+        ),
     )
     parser.add_argument(
         "--device",
@@ -1050,10 +1208,20 @@ def parse_args() -> argparse.Namespace:
         default=8000,
         help="Port to listen on",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.hf_model_id is None:
+        if args.checkpoint_path is None:
+            parser.error("--checkpoint-path is required when --hf-model-id is not set")
+        if args.tokenizer_name is None:
+            parser.error("--tokenizer-name is required when --hf-model-id is not set")
+    else:
+        if args.tokenizer_name is None:
+            args.tokenizer_name = args.hf_model_id
+    return args
 
 
 def main() -> None:
+    import torch
     import uvicorn
 
     args = parse_args()
@@ -1061,17 +1229,45 @@ def main() -> None:
         raise ValueError("--max-inflight-requests must be >= 1")
     if int(args.stream_interval) <= 0:
         raise ValueError("--stream-interval must be >= 1")
-    engine = InferenceEngine(
-        checkpoint_path=args.checkpoint_path,
-        tokenizer_name=args.tokenizer_name,
-        device=args.device,
-        use_amp=not args.no_amp,
-        bf16=args.bf16,
-    )
+    served_model_name = args.tokenizer_name or "roseinfer"
+    if args.hf_model_id is None:
+        engine = InferenceEngine(
+            checkpoint_path=args.checkpoint_path,
+            tokenizer_name=args.tokenizer_name,
+            device=args.device,
+            use_amp=not args.no_amp,
+            bf16=args.bf16,
+        )
+    else:
+        from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
+
+        device = torch.device(args.device)
+        use_amp = bool(not args.no_amp) and device.type == "cuda"
+        if use_amp:
+            dtype = torch.bfloat16 if args.bf16 else torch.float16
+        else:
+            dtype = torch.float32
+        model, config, tokenizer = load_gpt2_from_hf_pretrained(
+            args.hf_model_id,
+            device=device,
+            dtype=dtype,
+        )
+        engine = InferenceEngine(
+            checkpoint_path=None,
+            tokenizer_name=args.tokenizer_name or args.hf_model_id,
+            device=args.device,
+            use_amp=use_amp,
+            bf16=args.bf16,
+            model=model,
+            config=config,
+            tokenizer=tokenizer,
+        )
+        served_model_name = args.hf_model_id
     app = create_app(
         engine,
         max_inflight_requests=args.max_inflight_requests,
         stream_interval=int(args.stream_interval),
+        served_model_name=served_model_name,
     )
     uvicorn.run(
         app,
