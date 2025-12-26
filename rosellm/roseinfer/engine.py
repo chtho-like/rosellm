@@ -23,6 +23,11 @@ try:
 except ImportError:
     tiktoken = None
 
+try:
+    import flashinfer  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover
+    flashinfer = None  # type: ignore[assignment]
+
 PrefixCacheKey = str | tuple[int, ...]
 
 
@@ -75,6 +80,9 @@ class InferenceEngine:
         prefill_attn_backend: str = "auto",
         decode_attn_backend: str = "auto",
         use_fused_ops: bool = True,
+        use_fused_mlp: bool = True,
+        use_fused_sampler: bool = True,
+        use_fused_kv_append: bool = True,
         model: GPTModel | None = None,
         config: GPTConfig | None = None,
         tokenizer=None,
@@ -140,6 +148,9 @@ class InferenceEngine:
         self.prefill_attn_backend = _resolve_prefill_backend(prefill_attn_backend)
         self.decode_attn_backend = _resolve_decode_backend(decode_attn_backend)
         self.use_fused_ops = bool(use_fused_ops)
+        self.use_fused_mlp = bool(use_fused_mlp)
+        self.use_fused_sampler = bool(use_fused_sampler)
+        self.use_fused_kv_append = bool(use_fused_kv_append)
         if model is None:
             if checkpoint_path is None:
                 raise ValueError("checkpoint_path must be provided when model is None")
@@ -175,6 +186,8 @@ class InferenceEngine:
         self.model.eval()
         if hasattr(self.model, "use_fused_ops"):
             self.model.use_fused_ops = bool(self.use_fused_ops)
+        if hasattr(self.model, "use_fused_mlp"):
+            self.model.use_fused_mlp = bool(self.use_fused_mlp)
         if tokenizer is None:
             self.tokenizer = build_tokenizer(tokenizer_name)
         else:
@@ -234,6 +247,19 @@ class InferenceEngine:
         self._cuda_graph_pool = (
             torch.cuda.graphs.graph_pool_handle() if self.use_cuda_graph else None
         )
+
+        self._sampling_generator: torch.Generator | None = None
+        if (
+            self.device.type == "cuda"
+            and self.use_fused_sampler
+            and flashinfer is not None
+        ):
+            self._sampling_generator = torch.Generator(device=self.device)
+            seed_env = os.environ.get("ROSEINFER_SAMPLING_SEED")
+            if seed_env is not None and seed_env.strip():
+                self._sampling_generator.manual_seed(int(seed_env))
+            else:
+                self._sampling_generator.manual_seed(int(torch.initial_seed()))
 
         if self.config.vocab_size < self.tokenizer.vocab_size:
             raise ValueError("the model vocab_size is less than tokenizer vocab_size")
@@ -781,16 +807,15 @@ class InferenceEngine:
         top_p: float,
         do_sample: bool,
     ) -> int:
-        if not do_sample or temperature <= 0.0:
-            next_token = torch.argmax(logits, dim=-1)  # [..., 1]
-            return int(next_token.item())
-        scaled = logits / float(temperature)
-        filtered = self._top_k_logits(scaled, top_k)
-        filtered = self._top_p_logits(filtered, top_p)
-        probs = torch.softmax(filtered, dim=-1)  # [..., vocab]
-        probs = probs.clamp_min(1e-9)
-        next_token = torch.multinomial(probs, num_samples=1)[:, 0]  # [..., 1]
-        return int(next_token.item())
+        logits_2d = logits.view(-1, int(logits.size(-1)))
+        token_ids = self._sample_next_token_batch(
+            logits=logits_2d,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sample=do_sample,
+        )
+        return int(token_ids[0].item())
 
     def _sample_next_token_batch(
         self,
@@ -804,8 +829,30 @@ class InferenceEngine:
             raise ValueError(
                 f"logits must be 2D [B, V], got shape={tuple(logits.shape)}"
             )
-        if not do_sample or temperature <= 0.0:
+        if (not do_sample) or temperature <= 0.0:
             return torch.argmax(logits, dim=-1)
+
+        if (
+            self.use_fused_sampler
+            and flashinfer is not None
+            and logits.is_cuda
+            and self._sampling_generator is not None
+        ):
+            top_k = int(top_k)
+            top_p = float(top_p)
+            if top_p <= 0.0 or top_p >= 1.0:
+                top_p = 1.0
+            scaled = (
+                logits if float(temperature) == 1.0 else logits / float(temperature)
+            )
+            return flashinfer.sampling.top_k_top_p_sampling_from_logits(
+                scaled,
+                top_k=top_k,
+                top_p=top_p,
+                filter_apply_order="joint",
+                deterministic=True,
+                generator=self._sampling_generator,
+            )
         scaled = logits / float(temperature)
         vocab = int(scaled.size(-1))
         top_k = int(top_k)
@@ -1425,6 +1472,7 @@ class InferenceEngine:
             slot_mapping=slot_mapping,
             context_lens=context_lens,
             block_size=int(self.kv_manager.block_size),
+            write_kv=bool(self.use_fused_kv_append),
         )
 
         def run_model():
@@ -1513,6 +1561,7 @@ class InferenceEngine:
                 nvtx = device.type == "cuda" and os.environ.get("ROSEINFER_NVTX") == "1"
                 block_size = kvm.block_size
                 max_blocks_per_layer = kvm.max_blocks_per_layer
+                fused_kv_append = bool(self.use_fused_kv_append)
                 slot_ids: list[int] = []
                 for sess in sessions:
                     if sess.paged_slot_id is None:
@@ -1520,6 +1569,18 @@ class InferenceEngine:
                         sess.clear_paged_block_table_cache()
                     assert sess.paged_slot_id is not None
                     slot_ids.append(sess.paged_slot_id)
+
+                if fused_kv_append:
+                    with _maybe_nvtx_range(
+                        "roseinfer.kv.reserve_append_token", nvtx
+                    ), record_function("roseinfer.kv.reserve_append_token"):
+                        for layer_idx in range(num_layers):
+                            for sess in sessions:
+                                kvm.reserve_append_tokens(
+                                    layer_idx=layer_idx,
+                                    block_ids=sess.block_ids_per_layer[layer_idx],
+                                    n_append=1,
+                                )
                 global_block_tables = self._get_paged_global_block_tables()
 
                 with _maybe_nvtx_range(
@@ -1610,6 +1671,7 @@ class InferenceEngine:
                         slot_mapping=slot_mapping,
                         context_lens=lens.to(torch.int32),
                         block_size=block_size,
+                        write_kv=fused_kv_append,
                     )
                     with _maybe_nvtx_range(
                         "roseinfer.model.forward", nvtx
@@ -1643,22 +1705,23 @@ class InferenceEngine:
                                 attn_backend=self.decode_attn_backend,
                             )
                 last_logits = logits[:, -1, :]  # [B, V]
-                with _maybe_nvtx_range(
-                    "roseinfer.kv.append_token", nvtx
-                ), record_function("roseinfer.kv.append_token"):
-                    for layer_idx in range(num_layers):
-                        k_step, v_step = presents[layer_idx]  # [B, H, 1, D]
-                        k_step = k_step.squeeze(2)  # [B, H, D]
-                        v_step = v_step.squeeze(2)
-                        block_ids_list = [
-                            sess.block_ids_per_layer[layer_idx] for sess in sessions
-                        ]
-                        kvm.append_token_batch(
-                            layer_idx,
-                            block_ids_list,
-                            k_step,
-                            v_step,
-                        )
+                if not fused_kv_append:
+                    with _maybe_nvtx_range(
+                        "roseinfer.kv.append_token", nvtx
+                    ), record_function("roseinfer.kv.append_token"):
+                        for layer_idx in range(num_layers):
+                            k_step, v_step = presents[layer_idx]  # [B, H, 1, D]
+                            k_step = k_step.squeeze(2)  # [B, H, D]
+                            v_step = v_step.squeeze(2)
+                            block_ids_list = [
+                                sess.block_ids_per_layer[layer_idx] for sess in sessions
+                            ]
+                            kvm.append_token_batch(
+                                layer_idx,
+                                block_ids_list,
+                                k_step,
+                                v_step,
+                            )
                 return last_logits
 
             lens = torch.tensor(seq_lens, device=device, dtype=torch.long)
@@ -3160,42 +3223,92 @@ class ChunkedOnlineScheduler:
                 chunk_token_ids=chunks,
             )
 
+            ready_pairs: list[tuple[int, int, InferenceSession]] = []
             for b, (rid, sess, _) in enumerate(prefill_batch):
                 prompt_ids = self._prompt_token_ids.get(rid) or []
                 if int(sess.prompt_length) < len(prompt_ids):
                     self._prefill_rids.append(rid)
                     continue
+                ready_pairs.append((b, rid, sess))
 
-                logits_b = last_logits[b : b + 1]
-                if self.use_prefix_cache:
-                    cache_key = self._cache_keys.get(rid)
-                    if cache_key is not None:
-                        eng.prefix_cache.put(cache_key, sess, logits_b)
+            if ready_pairs:
+                groups: dict[tuple[float, int, float, bool], list[int]] = {}
+                for i, (_, _, sess) in enumerate(ready_pairs):
+                    key = (
+                        float(sess.temperature),
+                        int(sess.top_k),
+                        float(sess.top_p),
+                        bool(sess.do_sample),
+                    )
+                    groups.setdefault(key, []).append(i)
 
-                token_id = eng._sample_next_token(
-                    logits=logits_b,
-                    temperature=sess.temperature,
-                    top_k=sess.top_k,
-                    top_p=sess.top_p,
-                    do_sample=sess.do_sample,
+                next_token_ids: list[int] = [0 for _ in range(len(ready_pairs))]
+                logits_ready = last_logits.index_select(
+                    0,
+                    torch.tensor(
+                        [b for b, _, _ in ready_pairs],
+                        device=eng.device,
+                        dtype=torch.long,
+                    ),
                 )
-                sess.generated_ids.append(int(token_id))
-                sess.step_count = 1
-                if (
-                    sess.stop_on_eos
-                    and eng.eos_token_id is not None
-                    and int(token_id) == int(eng.eos_token_id)
-                ):
-                    sess.finished = True
-                if sess.max_new_tokens > 0 and sess.step_count >= sess.max_new_tokens:
-                    sess.finished = True
+                for (temp, top_k, top_p, do_sample), idxs in groups.items():
+                    if len(idxs) == len(ready_pairs) and idxs == list(
+                        range(len(ready_pairs))
+                    ):
+                        next_ids = eng._sample_next_token_batch(
+                            logits=logits_ready,
+                            temperature=temp,
+                            top_k=top_k,
+                            top_p=top_p,
+                            do_sample=do_sample,
+                        )
+                        next_token_ids = [int(x) for x in next_ids.tolist()]
+                        break
+                    idx_t = torch.tensor(
+                        idxs,
+                        device=eng.device,
+                        dtype=torch.long,
+                    )
+                    logits_g = logits_ready.index_select(0, idx_t)
+                    next_ids = eng._sample_next_token_batch(
+                        logits=logits_g,
+                        temperature=temp,
+                        top_k=top_k,
+                        top_p=top_p,
+                        do_sample=do_sample,
+                    )
+                    next_list = next_ids.tolist()
+                    for pos, i in enumerate(idxs):
+                        next_token_ids[i] = int(next_list[pos])
 
-                if sess.finished:
-                    sess.release_kv_blocks()
-                    just_finished.append(rid)
-                else:
-                    self._decode_rids.append(rid)
-                step_tokens.setdefault(rid, int(token_id))
+                for i, (b, rid, sess) in enumerate(ready_pairs):
+                    logits_b = last_logits[b : b + 1]
+                    if self.use_prefix_cache:
+                        cache_key = self._cache_keys.get(rid)
+                        if cache_key is not None:
+                            eng.prefix_cache.put(cache_key, sess, logits_b)
+
+                    token_id = int(next_token_ids[i])
+                    sess.generated_ids.append(token_id)
+                    sess.step_count = 1
+                    if (
+                        sess.stop_on_eos
+                        and eng.eos_token_id is not None
+                        and token_id == int(eng.eos_token_id)
+                    ):
+                        sess.finished = True
+                    if (
+                        sess.max_new_tokens > 0
+                        and sess.step_count >= sess.max_new_tokens
+                    ):
+                        sess.finished = True
+
+                    if sess.finished:
+                        sess.release_kv_blocks()
+                        just_finished.append(rid)
+                    else:
+                        self._decode_rids.append(rid)
+                    step_tokens.setdefault(rid, token_id)
 
         if just_finished:
             self._finished_ids.extend(just_finished)

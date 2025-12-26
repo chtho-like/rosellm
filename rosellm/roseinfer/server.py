@@ -1306,6 +1306,45 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(fused_ops=True)
     parser.add_argument(
+        "--fused-mlp",
+        dest="fused_mlp",
+        action="store_true",
+        help="Enable fused MLP epilogue (bias+GELU/residual) (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-fused-mlp",
+        dest="fused_mlp",
+        action="store_false",
+        help="Disable fused MLP epilogue.",
+    )
+    parser.set_defaults(fused_mlp=True)
+    parser.add_argument(
+        "--fused-sampler",
+        dest="fused_sampler",
+        action="store_true",
+        help="Enable fused GPU sampler (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-fused-sampler",
+        dest="fused_sampler",
+        action="store_false",
+        help="Disable fused sampler (falls back to torch ops).",
+    )
+    parser.set_defaults(fused_sampler=True)
+    parser.add_argument(
+        "--fused-kv-append",
+        dest="fused_kv_append",
+        action="store_true",
+        help="Fuse KV append into paged decode kernel (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-fused-kv-append",
+        dest="fused_kv_append",
+        action="store_false",
+        help="Disable fused KV append (uses separate append kernel).",
+    )
+    parser.set_defaults(fused_kv_append=True)
+    parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
@@ -1383,6 +1422,9 @@ def main() -> None:
             prefill_attn_backend=str(args.prefill_attn_backend),
             decode_attn_backend=str(args.decode_attn_backend),
             use_fused_ops=bool(args.fused_ops),
+            use_fused_mlp=bool(args.fused_mlp),
+            use_fused_sampler=bool(args.fused_sampler),
+            use_fused_kv_append=bool(args.fused_kv_append),
         )
     else:
         from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
@@ -1408,6 +1450,9 @@ def main() -> None:
             prefill_attn_backend=str(args.prefill_attn_backend),
             decode_attn_backend=str(args.decode_attn_backend),
             use_fused_ops=bool(args.fused_ops),
+            use_fused_mlp=bool(args.fused_mlp),
+            use_fused_sampler=bool(args.fused_sampler),
+            use_fused_kv_append=bool(args.fused_kv_append),
             model=model,
             config=config,
             tokenizer=tokenizer,

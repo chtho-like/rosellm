@@ -15,6 +15,7 @@ from rosellm.rosetrainer.attention_backends import (
 )
 from rosellm.rosetrainer.config import GPTConfig
 from rosellm.rosetrainer.fused_layernorm import add_layer_norm_, layer_norm
+from rosellm.rosetrainer.fused_mlp import add_bias_residual_, bias_gelu_new_
 from rosellm.rosetrainer.paged_attention import (
     TRITON_AVAILABLE,
     PagedKVCache,
@@ -140,6 +141,7 @@ class MultiHeadSelfAttention(nn.Module):
                 context_lens=paged_kv_cache.context_lens,
                 scale=self.d_head**-0.5,
                 block_size=paged_kv_cache.block_size,
+                write_kv=bool(paged_kv_cache.write_kv),
             )  # [B, H, D]
             attn_output = out_h.unsqueeze(2)  # [B, H, 1, D]
             # [B, 1, H, D]
@@ -252,7 +254,40 @@ class FeedForward(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
         self.activation = getattr(config, "activation", "gelu")
 
-    def forward(self, x: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        residual: torch.Tensor | None = None,
+        use_fused_mlp: bool = False,
+    ) -> torch.Tensor:
+        wants_residual = (
+            bool(use_fused_mlp)
+            and residual is not None
+            and (not self.training)
+            and (not x.requires_grad)
+        )
+        fused_ok = (
+            wants_residual
+            and x.is_cuda
+            and residual.is_cuda
+            and residual.dtype == x.dtype
+            and x.is_contiguous()
+            and residual.is_contiguous()
+            and isinstance(self.fc1, nn.Linear)
+            and isinstance(self.fc2, nn.Linear)
+            and self.fc1.bias is not None
+            and self.fc2.bias is not None
+            and self.activation == "gelu_new"
+        )
+        if fused_ok:
+            x2 = x.view(-1, int(x.size(-1)))
+            residual2 = residual.view(-1, int(residual.size(-1)))
+            h = torch.matmul(x2, self.fc1.weight.t())
+            bias_gelu_new_(h, self.fc1.bias)
+            y = torch.matmul(h, self.fc2.weight.t())
+            add_bias_residual_(residual2, y, self.fc2.bias)
+            return residual
         x = self.fc1(x)
         if self.activation == "gelu_new":
             x = gelu_new(x)
@@ -260,6 +295,9 @@ class FeedForward(nn.Module):
             x = F.gelu(x)
         x = self.fc2(x)
         x = self.dropout(x)
+        if wants_residual:
+            residual.add_(x)
+            return residual
         return x
 
 
@@ -281,6 +319,7 @@ class TransformerBlock(nn.Module):
         layer_idx: int = 0,
         attn_backend: str | None = None,
         use_fused_ops: bool = False,
+        use_fused_mlp: bool = False,
     ):
         fused_ok = bool(use_fused_ops) and (not self.training) and (not x.requires_grad)
         if fused_ok:
@@ -324,11 +363,18 @@ class TransformerBlock(nn.Module):
         else:
             x = x + attn_out
             x_ln2 = self.ln2(x)
-        mlp_out = self.mlp(x_ln2)
-        if fused_ok:
-            x.add_(mlp_out)
+        if fused_ok and bool(use_fused_mlp):
+            x = self.mlp(
+                x_ln2,
+                residual=x,
+                use_fused_mlp=True,
+            )
         else:
-            x = x + mlp_out
+            mlp_out = self.mlp(x_ln2)
+            if fused_ok:
+                x.add_(mlp_out)
+            else:
+                x = x + mlp_out
         if return_kv:
             return x, present_kv
         return x
@@ -339,6 +385,7 @@ class GPTModel(nn.Module):
         super().__init__()
         self.config = config
         self.use_fused_ops = os.environ.get("ROSELLM_FUSED_OPS", "1") != "0"
+        self.use_fused_mlp = os.environ.get("ROSELLM_FUSED_MLP", "1") != "0"
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
         self.position_embedding = nn.Embedding(
             config.max_position_embeddings, config.d_model
@@ -447,6 +494,7 @@ class GPTModel(nn.Module):
                         layer_idx=layer_idx,
                         attn_backend=attn_backend,
                         use_fused_ops=bool(self.use_fused_ops),
+                        use_fused_mlp=bool(self.use_fused_mlp),
                     )
                     presents.append(present_kv)
                 else:
@@ -458,6 +506,7 @@ class GPTModel(nn.Module):
                         layer_idx=layer_idx,
                         attn_backend=attn_backend,
                         use_fused_ops=bool(self.use_fused_ops),
+                        use_fused_mlp=bool(self.use_fused_mlp),
                     )
         if (
             bool(self.use_fused_ops)

@@ -55,6 +55,12 @@ def _backend_label(key: str) -> str:
                 extras.append("chunked prefill")
             elif p == "nofuse":
                 extras.append("no fused ops")
+            elif p == "nomlp":
+                extras.append("no fused mlp")
+            elif p == "nosampler":
+                extras.append("no fused sampler")
+            elif p == "nokv":
+                extras.append("no fused kv append")
         if extras:
             return f"roseinfer ({', '.join(extras)})"
         return "roseinfer"
@@ -67,6 +73,12 @@ def _backend_color(key: str) -> str:
     if key.startswith("roseinfer"):
         if "nofuse" in key.split("+"):
             return "#7f7f7f"
+        if "nomlp" in key.split("+"):
+            return "#e377c2"
+        if "nosampler" in key.split("+"):
+            return "#bcbd22"
+        if "nokv" in key.split("+"):
+            return "#17becf"
         return BACKEND_COLORS["roseinfer"]
     return "#333333"
 
@@ -78,6 +90,12 @@ def _backend_marker(key: str) -> str:
         parts = key.split("+")
         if "nofuse" in parts:
             return "X"
+        if "nomlp" in parts:
+            return "8"
+        if "nosampler" in parts:
+            return "*"
+        if "nokv" in parts:
+            return "h"
         if "chunked" in parts:
             return "P"
         if "flashinfer" in parts:
@@ -423,11 +441,29 @@ def _plot_offline(payload: dict[str, Any], out_dir: Path) -> Path:
     results = payload.get("results", [])
     if not results:
         raise ValueError("no offline results found")
+
+    def tick_label(backend: str) -> str:
+        label = _backend_label(backend)
+        if not label.startswith("roseinfer (") or not label.endswith(")"):
+            return label
+        inner = label[len("roseinfer (") : -1]
+        parts = [p.strip() for p in inner.split(",") if p.strip()]
+        short = {
+            "no fused ops": "no ops",
+            "no fused mlp": "no MLP",
+            "no fused sampler": "no samp",
+            "no fused kv append": "no KV",
+        }
+        parts = [short.get(p, p) for p in parts]
+        if not parts:
+            return "roseinfer"
+        return "\n".join(parts)
+
     _paper_rcparams()
-    fig, axes = plt.subplots(1, 3, figsize=(10, 3.2), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(12.5, 3.6), constrained_layout=True)
 
     backends = [r["backend"] for r in results]
-    labels = [_backend_label(str(b)) for b in backends]
+    labels = [tick_label(str(b)) for b in backends]
     colors = [_backend_color(str(b)) for b in backends]
 
     metrics = [
@@ -437,10 +473,20 @@ def _plot_offline(payload: dict[str, Any], out_dir: Path) -> Path:
     ]
     for ax, (key, title) in zip(axes, metrics, strict=True):
         vals = [float(r[key]) for r in results]
-        x = np.arange(len(vals))
-        ax.bar(x, vals, color=colors, edgecolor="black", linewidth=0.8)
+        bar_width = 0.75
+        x = np.arange(len(vals), dtype=np.float32) * 1.25
+        ax.bar(
+            x,
+            vals,
+            width=bar_width,
+            color=colors,
+            edgecolor="black",
+            linewidth=0.8,
+        )
         ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=15, ha="right")
+        ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=8)
+        ax.tick_params(axis="x", pad=4)
+        ax.set_xlim(x[0] - bar_width, x[-1] + bar_width)
         ax.set_title(title)
         ax.set_ylabel(title.split(" (", 1)[-1].rstrip(")"))
 

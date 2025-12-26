@@ -22,6 +22,7 @@ class PagedKVCache:
     slot_mapping: torch.Tensor
     context_lens: torch.Tensor
     block_size: int
+    write_kv: bool = False
 
 
 def paged_attention_decode_ref(
@@ -36,6 +37,7 @@ def paged_attention_decode_ref(
     *,
     scale: float,
     block_size: int,
+    write_kv: bool = False,
 ) -> torch.Tensor:  # [B, H, D]
     assert q.dim() == 3
     assert q.shape == k_new.shape == v_new.shape
@@ -79,6 +81,14 @@ def paged_attention_decode_ref(
         )
         m = m_new
     out = (o / l.unsqueeze(-1)).to(dtype=q.dtype)  # [B, H, D]
+    if write_kv:
+        write_pos = context_lens.to(dtype=torch.long)
+        block_ids = (write_pos // int(block_size)).to(dtype=torch.long)
+        pos_in_block = (write_pos % int(block_size)).to(dtype=torch.long)
+        for b in range(bsz):
+            blk = block_table[int(slots[b]), int(block_ids[b])]
+            k_cache_layer[int(blk), :, int(pos_in_block[b]), :].copy_(k_new[b])
+            v_cache_layer[int(blk), :, int(pos_in_block[b]), :].copy_(v_new[b])
     return out
 
 
@@ -118,6 +128,7 @@ if TRITON_AVAILABLE:
         D: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
         MAX_BLOCKS: tl.constexpr,
+        WRITE_KV: tl.constexpr,
     ):
         pid = tl.program_id(0)
         b = pid // H
@@ -125,14 +136,41 @@ if TRITON_AVAILABLE:
         d = tl.arange(0, D)
         base = (b * H + h) * D + d
         q = tl.load(q_ptr + base, mask=d < D, other=0.0).to(tl.float32)
-        k_new = tl.load(k_new_ptr + base, mask=d < D, other=0.0).to(tl.float32)
-        v_new = tl.load(v_new_ptr + base, mask=d < D, other=0.0).to(tl.float32)
+        k_new_in = tl.load(k_new_ptr + base, mask=d < D, other=0.0)
+        v_new_in = tl.load(v_new_ptr + base, mask=d < D, other=0.0)
+        k_new = k_new_in.to(tl.float32)
+        v_new = v_new_in.to(tl.float32)
         score_cur = tl.sum(q * k_new, axis=0) * scale
         m = score_cur
         l = 1.0
         acc = v_new
         slot = tl.load(slot_mapping_ptr + b).to(tl.int32)
         context_len = tl.load(context_lens_ptr + b).to(tl.int32)
+        if WRITE_KV:
+            write_block = context_len // BLOCK_SIZE
+            write_pos = context_len - write_block * BLOCK_SIZE
+            write_ok = write_block < MAX_BLOCKS
+            write_block_id = tl.load(
+                block_table_ptr + slot * MAX_BLOCKS + write_block,
+                mask=write_ok,
+                other=0,
+            ).to(tl.int32)
+            k_store_ptrs = (
+                k_cache_ptr
+                + write_block_id * stride_kcb
+                + h * stride_kch
+                + write_pos * stride_kct
+                + d * stride_kcd
+            )
+            v_store_ptrs = (
+                v_cache_ptr
+                + write_block_id * stride_vcb
+                + h * stride_vch
+                + write_pos * stride_vct
+                + d * stride_vcd
+            )
+            tl.store(k_store_ptrs, k_new_in, mask=write_ok & (d < D))
+            tl.store(v_store_ptrs, v_new_in, mask=write_ok & (d < D))
         t = tl.arange(0, BLOCK_SIZE)
         for lb in tl.static_range(0, MAX_BLOCKS):
             start = lb * BLOCK_SIZE
@@ -193,6 +231,7 @@ def paged_attention_decode_triton(
     *,
     scale: float,
     block_size: int,
+    write_kv: bool = False,
 ) -> torch.Tensor:  # [B, H, D]
     if not TRITON_AVAILABLE:
         raise RuntimeError(
@@ -235,5 +274,6 @@ def paged_attention_decode_triton(
         D=D,
         BLOCK_SIZE=block_size,
         MAX_BLOCKS=block_table.size(1),
+        WRITE_KV=bool(write_kv),
     )
     return out

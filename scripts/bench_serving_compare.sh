@@ -16,7 +16,8 @@ ONLINE_JSON="$(ls -t "${OUTDIR}"/online_*/online_results.json | head -n 1)"
 python benchmarks/serving/offline_compare.py \
   --model "${MODEL}" \
   --gpu "${GPU}" \
-  --output-dir "${OUTDIR}"
+  --output-dir "${OUTDIR}" \
+  "$@"
 
 OFFLINE_JSON="$(ls -t "${OUTDIR}"/offline_*/offline_results.json | head -n 1)"
 
@@ -31,4 +32,3 @@ python benchmarks/serving/plot_compare.py \
 echo "Online results: ${ONLINE_JSON}"
 echo "Offline results: ${OFFLINE_JSON}"
 echo "Figures: ${FIG_DIR}"
-

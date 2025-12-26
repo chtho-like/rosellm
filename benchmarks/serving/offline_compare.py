@@ -225,6 +225,9 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
         prefill_attn_backend=str(args.roseinfer_prefill_attn_backend),
         decode_attn_backend=str(args.roseinfer_decode_attn_backend),
         use_fused_ops=bool(args.roseinfer_fused_ops),
+        use_fused_mlp=bool(args.roseinfer_fused_mlp),
+        use_fused_sampler=bool(args.roseinfer_fused_sampler),
+        use_fused_kv_append=bool(args.roseinfer_fused_kv_append),
     )
     prompt_token_ids = _make_prompt_token_ids(
         num_prompts=int(args.num_prompts),
@@ -343,6 +346,8 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
             "prefill_chunk_size": prefill_chunk_size if use_chunked else None,
             "prefix_cache": use_prefix_cache,
             "fused_ops": bool(args.roseinfer_fused_ops),
+            "fused_sampler": bool(args.roseinfer_fused_sampler),
+            "fused_kv_append": bool(args.roseinfer_fused_kv_append),
         },
     )
 
@@ -687,6 +692,60 @@ def parse_args() -> argparse.Namespace:
         help="Run roseinfer twice: fused ops on/off (for A/B benchmark).",
     )
     parser.add_argument(
+        "--roseinfer-fused-mlp",
+        dest="roseinfer_fused_mlp",
+        action="store_true",
+        help="Enable fused MLP epilogue for roseinfer (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-fused-mlp",
+        dest="roseinfer_fused_mlp",
+        action="store_false",
+        help="Disable fused MLP epilogue for roseinfer.",
+    )
+    parser.set_defaults(roseinfer_fused_mlp=True)
+    parser.add_argument(
+        "--roseinfer-compare-fused-mlp",
+        action="store_true",
+        help="Run roseinfer twice: fused MLP on/off (for A/B benchmark).",
+    )
+    parser.add_argument(
+        "--roseinfer-fused-sampler",
+        dest="roseinfer_fused_sampler",
+        action="store_true",
+        help="Enable fused sampler for roseinfer (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-fused-sampler",
+        dest="roseinfer_fused_sampler",
+        action="store_false",
+        help="Disable fused sampler for roseinfer.",
+    )
+    parser.set_defaults(roseinfer_fused_sampler=True)
+    parser.add_argument(
+        "--roseinfer-compare-fused-sampler",
+        action="store_true",
+        help="Run roseinfer twice: fused sampler on/off (for A/B benchmark).",
+    )
+    parser.add_argument(
+        "--roseinfer-fused-kv-append",
+        dest="roseinfer_fused_kv_append",
+        action="store_true",
+        help="Enable fused KV append for roseinfer (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-fused-kv-append",
+        dest="roseinfer_fused_kv_append",
+        action="store_false",
+        help="Disable fused KV append for roseinfer.",
+    )
+    parser.set_defaults(roseinfer_fused_kv_append=True)
+    parser.add_argument(
+        "--roseinfer-compare-fused-kv-append",
+        action="store_true",
+        help="Run roseinfer twice: fused KV append on/off (for A/B benchmark).",
+    )
+    parser.add_argument(
         "--roseinfer-label",
         type=str,
         default="roseinfer",
@@ -770,6 +829,9 @@ def _run_compare(args: argparse.Namespace) -> None:
         label: str
         roseinfer_prefill_backend: str | None = None
         roseinfer_fused_ops: bool | None = None
+        roseinfer_fused_mlp: bool | None = None
+        roseinfer_fused_sampler: bool | None = None
+        roseinfer_fused_kv_append: bool | None = None
 
     run_specs: list[RunSpec] = []
     for backend in base_backends:
@@ -779,11 +841,61 @@ def _run_compare(args: argparse.Namespace) -> None:
         variants = roseinfer_prefill_backends or [
             str(args.roseinfer_prefill_attn_backend)
         ]
-        fused_variants = (
-            [True, False]
-            if bool(getattr(args, "roseinfer_compare_fused_ops", False))
-            else [bool(args.roseinfer_fused_ops)]
+        base_fused_ops = bool(args.roseinfer_fused_ops)
+        base_fused_mlp = bool(args.roseinfer_fused_mlp)
+        base_fused_sampler = bool(args.roseinfer_fused_sampler)
+        base_fused_kv_append = bool(args.roseinfer_fused_kv_append)
+        cfgs: list[tuple[bool, bool, bool, bool]] = []
+        seen: set[tuple[bool, bool, bool, bool]] = set()
+
+        def add_cfg(
+            fused_ops: bool,
+            fused_mlp: bool,
+            fused_sampler: bool,
+            fused_kv_append: bool,
+        ) -> None:
+            cfg = (
+                bool(fused_ops),
+                bool(fused_mlp),
+                bool(fused_sampler),
+                bool(fused_kv_append),
+            )
+            if cfg in seen:
+                return
+            seen.add(cfg)
+            cfgs.append(cfg)
+
+        add_cfg(
+            base_fused_ops, base_fused_mlp, base_fused_sampler, base_fused_kv_append
         )
+        if bool(getattr(args, "roseinfer_compare_fused_ops", False)):
+            add_cfg(
+                (not base_fused_ops),
+                base_fused_mlp,
+                base_fused_sampler,
+                base_fused_kv_append,
+            )
+        if bool(getattr(args, "roseinfer_compare_fused_mlp", False)):
+            add_cfg(
+                base_fused_ops,
+                (not base_fused_mlp),
+                base_fused_sampler,
+                base_fused_kv_append,
+            )
+        if bool(getattr(args, "roseinfer_compare_fused_sampler", False)):
+            add_cfg(
+                base_fused_ops,
+                base_fused_mlp,
+                (not base_fused_sampler),
+                base_fused_kv_append,
+            )
+        if bool(getattr(args, "roseinfer_compare_fused_kv_append", False)):
+            add_cfg(
+                base_fused_ops,
+                base_fused_mlp,
+                base_fused_sampler,
+                (not base_fused_kv_append),
+            )
         for prefill_backend in variants:
             prefill_backend = str(prefill_backend)
             if prefill_backend == "flashinfer" and not _module_available("flashinfer"):
@@ -801,14 +913,25 @@ def _run_compare(args: argparse.Namespace) -> None:
                 if prefill_backend == "auto"
                 else f"roseinfer+{prefill_backend}"
             )
-            for fused_ops in fused_variants:
-                label = base_label if fused_ops else f"{base_label}+nofuse"
+            for fused_ops, fused_mlp, fused_sampler, fused_kv_append in cfgs:
+                label = base_label
+                if not fused_ops:
+                    label += "+nofuse"
+                if not fused_mlp:
+                    label += "+nomlp"
+                if not fused_sampler:
+                    label += "+nosampler"
+                if not fused_kv_append:
+                    label += "+nokv"
                 run_specs.append(
                     RunSpec(
                         base_backend="roseinfer",
                         label=label,
                         roseinfer_prefill_backend=prefill_backend,
                         roseinfer_fused_ops=bool(fused_ops),
+                        roseinfer_fused_mlp=bool(fused_mlp),
+                        roseinfer_fused_sampler=bool(fused_sampler),
+                        roseinfer_fused_kv_append=bool(fused_kv_append),
                     )
                 )
 
@@ -820,6 +943,9 @@ def _run_compare(args: argparse.Namespace) -> None:
         label = spec.label
         prefill_backend = spec.roseinfer_prefill_backend
         fused_ops = spec.roseinfer_fused_ops
+        fused_mlp = spec.roseinfer_fused_mlp
+        fused_sampler = spec.roseinfer_fused_sampler
+        fused_kv_append = spec.roseinfer_fused_kv_append
         cmd = [
             "taskset",
             "-c",
@@ -905,6 +1031,21 @@ def _run_compare(args: argparse.Namespace) -> None:
                 if bool(fused_ops)
                 else "--roseinfer-no-fused-ops"
             )
+            cmd.append(
+                "--roseinfer-fused-mlp"
+                if bool(fused_mlp)
+                else "--roseinfer-no-fused-mlp"
+            )
+            cmd.append(
+                "--roseinfer-fused-sampler"
+                if bool(fused_sampler)
+                else "--roseinfer-no-fused-sampler"
+            )
+            cmd.append(
+                "--roseinfer-fused-kv-append"
+                if bool(fused_kv_append)
+                else "--roseinfer-no-fused-kv-append"
+            )
 
         backend_t0 = time.perf_counter()
         raw = subprocess.check_output(cmd, env=env)
@@ -969,6 +1110,16 @@ def _run_compare(args: argparse.Namespace) -> None:
             "roseinfer_prefix_cache": bool(args.roseinfer_prefix_cache),
             "roseinfer_fused_ops": bool(args.roseinfer_fused_ops),
             "roseinfer_compare_fused_ops": bool(args.roseinfer_compare_fused_ops),
+            "roseinfer_fused_mlp": bool(args.roseinfer_fused_mlp),
+            "roseinfer_compare_fused_mlp": bool(args.roseinfer_compare_fused_mlp),
+            "roseinfer_fused_sampler": bool(args.roseinfer_fused_sampler),
+            "roseinfer_compare_fused_sampler": bool(
+                args.roseinfer_compare_fused_sampler
+            ),
+            "roseinfer_fused_kv_append": bool(args.roseinfer_fused_kv_append),
+            "roseinfer_compare_fused_kv_append": bool(
+                args.roseinfer_compare_fused_kv_append
+            ),
             "server_cpus": server_cpus,
             "backends": [spec.label for spec in run_specs],
             "run_start_time": run_start_time,
