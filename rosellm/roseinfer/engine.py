@@ -1,3 +1,4 @@
+import importlib.util
 import os
 from collections import OrderedDict, deque
 from contextlib import contextmanager
@@ -69,23 +70,29 @@ class InferenceEngine:
         bf16: bool = False,
         kv_cache_max_concurrency: int = 256,
         prefix_cache_max_entries: int = 256,
-        use_paged_attention: bool = False,
-        use_cuda_graph: bool = False,
-        prefill_attn_backend: str = "naive",
-        decode_attn_backend: str = "naive",
+        use_paged_attention: bool = True,
+        use_cuda_graph: bool = True,
+        prefill_attn_backend: str = "auto",
+        decode_attn_backend: str = "auto",
+        use_fused_ops: bool = True,
         model: GPTModel | None = None,
         config: GPTConfig | None = None,
         tokenizer=None,
     ) -> None:
         super().__init__()
-        self.use_paged_attention = use_paged_attention
-        self.prefill_attn_backend = str(prefill_attn_backend)
-        self.decode_attn_backend = str(decode_attn_backend)
+        self.use_paged_attention = bool(use_paged_attention)
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
+
+        if self.use_paged_attention and (
+            self.device.type != "cuda" or not torch.cuda.is_available()
+        ):
+            self.use_paged_attention = False
+
+        self.use_cuda_graph = bool(use_cuda_graph) and self.use_paged_attention
         self.use_cuda_graph = (
-            bool(use_cuda_graph)
+            self.use_cuda_graph
             and self.device.type == "cuda"
             and torch.cuda.is_available()
         )
@@ -97,6 +104,42 @@ class InferenceEngine:
                 self.amp_dtype = torch.float16
         else:
             self.amp_dtype = None
+
+        def _module_available(name: str) -> bool:
+            try:
+                return importlib.util.find_spec(name) is not None
+            except Exception:
+                return False
+
+        def _resolve_prefill_backend(name: str) -> str:
+            name = str(name or "auto").lower()
+            if name != "auto":
+                return name
+            if self.device.type != "cuda" or not torch.cuda.is_available():
+                return "naive"
+            if not self.use_amp or self.amp_dtype not in (
+                torch.float16,
+                torch.bfloat16,
+            ):
+                return "naive"
+            if _module_available("flashinfer"):
+                return "flashinfer"
+            if _module_available("flash_attn"):
+                return "flashattn"
+            return "naive"
+
+        def _resolve_decode_backend(name: str) -> str:
+            name = str(name or "auto").lower()
+            if name == "auto":
+                return "naive"
+            # Dense past_kv decode only supports the eager kernel in our GPT2 stack.
+            if not self.use_paged_attention and name in ("flashinfer", "flashattn"):
+                return "naive"
+            return name
+
+        self.prefill_attn_backend = _resolve_prefill_backend(prefill_attn_backend)
+        self.decode_attn_backend = _resolve_decode_backend(decode_attn_backend)
+        self.use_fused_ops = bool(use_fused_ops)
         if model is None:
             if checkpoint_path is None:
                 raise ValueError("checkpoint_path must be provided when model is None")
@@ -130,6 +173,8 @@ class InferenceEngine:
             self.config = config
             self.model = model.to(self.device)
         self.model.eval()
+        if hasattr(self.model, "use_fused_ops"):
+            self.model.use_fused_ops = bool(self.use_fused_ops)
         if tokenizer is None:
             self.tokenizer = build_tokenizer(tokenizer_name)
         else:

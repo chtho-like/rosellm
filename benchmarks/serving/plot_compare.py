@@ -38,6 +38,56 @@ BACKEND_MARKERS = {
 }
 
 
+def _backend_label(key: str) -> str:
+    if key in BACKEND_LABELS:
+        return BACKEND_LABELS[key]
+    if key.startswith("roseinfer"):
+        parts = [p for p in key.split("+")[1:] if p]
+        extras: list[str] = []
+        for p in parts:
+            if p == "flashinfer":
+                extras.append("flashinfer")
+            elif p == "flashattn":
+                extras.append("flash-attn")
+            elif p == "naive":
+                extras.append("naive")
+            elif p == "chunked":
+                extras.append("chunked prefill")
+            elif p == "nofuse":
+                extras.append("no fused ops")
+        if extras:
+            return f"roseinfer ({', '.join(extras)})"
+        return "roseinfer"
+    return key
+
+
+def _backend_color(key: str) -> str:
+    if key in BACKEND_COLORS:
+        return BACKEND_COLORS[key]
+    if key.startswith("roseinfer"):
+        if "nofuse" in key.split("+"):
+            return "#7f7f7f"
+        return BACKEND_COLORS["roseinfer"]
+    return "#333333"
+
+
+def _backend_marker(key: str) -> str:
+    if key in BACKEND_MARKERS:
+        return BACKEND_MARKERS[key]
+    if key.startswith("roseinfer"):
+        parts = key.split("+")
+        if "nofuse" in parts:
+            return "X"
+        if "chunked" in parts:
+            return "P"
+        if "flashinfer" in parts:
+            return "D"
+        if "flashattn" in parts:
+            return "v"
+        return "o"
+    return "o"
+
+
 def _semantic_legend_handles(*, band_alpha: float) -> tuple[list[object], list[str]]:
     return (
         [
@@ -154,7 +204,7 @@ def _write_online_summary_md(payload: dict[str, Any], out_dir: Path) -> Path:
     )
     lines.append(header)
     for r in rows:
-        backend = BACKEND_LABELS.get(r["backend"], r["backend"])
+        backend = _backend_label(str(r["backend"]))
         lines.append(
             "| {scale:.2f} | {backend} | {ttft} | {tpot} | {itl} | {e2e} |\n".format(
                 scale=r["scale"],
@@ -222,7 +272,7 @@ def _write_offline_summary_md(payload: dict[str, Any], out_dir: Path) -> Path:
     )
     lines.append(header)
     for r in results:
-        backend = BACKEND_LABELS.get(r["backend"], r["backend"])
+        backend = _backend_label(str(r["backend"]))
         lines.append(
             "| {backend} | {rps:.2f} | {out_tps:.2f} | {tot_tps:.2f} | {lat:.3f} |\n".format(
                 backend=backend,
@@ -262,9 +312,9 @@ def _plot_online(payload: dict[str, Any], out_dir: Path) -> Path:
     ]
     for idx, (ax, (metric, title, ylabel)) in enumerate(zip(axes, specs, strict=True)):
         for backend in backends:
-            label = BACKEND_LABELS.get(backend, backend)
-            color = BACKEND_COLORS.get(backend, "#333333")
-            marker = BACKEND_MARKERS.get(backend, "o")
+            label = _backend_label(backend)
+            color = _backend_color(backend)
+            marker = _backend_marker(backend)
             x, y90 = series(backend, f"{metric}_p90")
             _, y50 = series(backend, f"{metric}_p50")
             _, y99 = series(backend, f"{metric}_p99")
@@ -330,9 +380,9 @@ def _plot_online_single(payload: dict[str, Any], out_dir: Path) -> list[Path]:
     for metric, ylabel, filename in specs:
         fig, ax = plt.subplots(1, 1, figsize=(5.2, 3.6), constrained_layout=True)
         for backend in backends:
-            label = BACKEND_LABELS.get(backend, backend)
-            color = BACKEND_COLORS.get(backend, "#333333")
-            marker = BACKEND_MARKERS.get(backend, "o")
+            label = _backend_label(backend)
+            color = _backend_color(backend)
+            marker = _backend_marker(backend)
             x, y90 = series(backend, f"{metric}_p90")
             _, y50 = series(backend, f"{metric}_p50")
             _, y99 = series(backend, f"{metric}_p99")
@@ -377,8 +427,8 @@ def _plot_offline(payload: dict[str, Any], out_dir: Path) -> Path:
     fig, axes = plt.subplots(1, 3, figsize=(10, 3.2), constrained_layout=True)
 
     backends = [r["backend"] for r in results]
-    labels = [BACKEND_LABELS.get(b, b) for b in backends]
-    colors = [BACKEND_COLORS.get(b, "#333333") for b in backends]
+    labels = [_backend_label(str(b)) for b in backends]
+    colors = [_backend_color(str(b)) for b in backends]
 
     metrics = [
         ("output_throughput_tps", "Output Throughput (tok/s)"),

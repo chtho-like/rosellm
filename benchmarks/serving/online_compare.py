@@ -564,6 +564,7 @@ def _roseinfer_server_cmd(
     port: int,
     prefill_attn_backend: str | None = None,
     decode_attn_backend: str | None = None,
+    fused_ops: bool | None = None,
 ) -> list[str]:
     prefill_attn_backend = (
         str(prefill_attn_backend)
@@ -574,6 +575,13 @@ def _roseinfer_server_cmd(
         str(decode_attn_backend)
         if decode_attn_backend is not None
         else str(args.roseinfer_decode_attn_backend)
+    )
+    paged_attn = bool(args.roseinfer_paged_attn)
+    cuda_graph = bool(args.roseinfer_cuda_graph)
+    chunked_prefill = bool(args.roseinfer_chunked_prefill)
+    prefix_cache = bool(args.roseinfer_prefix_cache)
+    fused_ops = (
+        bool(fused_ops) if fused_ops is not None else bool(args.roseinfer_fused_ops)
     )
     cmd = [
         sys.executable,
@@ -606,10 +614,13 @@ def _roseinfer_server_cmd(
         cmd += ["--no-amp"]
     if args.bf16:
         cmd += ["--bf16"]
-    if args.roseinfer_paged_attn:
-        cmd += ["--paged-attn"]
-    if args.roseinfer_cuda_graph:
-        cmd += ["--cuda-graph"]
+    cmd += ["--paged-attn" if paged_attn else "--no-paged-attn"]
+    cmd += ["--cuda-graph" if cuda_graph else "--no-cuda-graph"]
+    cmd += ["--chunked-prefill" if chunked_prefill else "--no-chunked-prefill"]
+    if chunked_prefill:
+        cmd += ["--prefill-chunk-size", str(int(args.roseinfer_prefill_chunk_size))]
+    cmd += ["--prefix-cache" if prefix_cache else "--no-prefix-cache"]
+    cmd += ["--fused-ops" if fused_ops else "--no-fused-ops"]
     return cmd
 
 
@@ -843,9 +854,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--roseinfer-prefill-attn-backend",
         type=str,
-        default="naive",
-        choices=["naive", "flashinfer", "flashattn"],
-        help="Prefill attention backend for roseinfer (default: naive).",
+        default="auto",
+        choices=["auto", "naive", "flashinfer", "flashattn"],
+        help="Prefill attention backend for roseinfer (default: auto).",
     )
     parser.add_argument(
         "--roseinfer-prefill-attn-backends",
@@ -859,30 +870,85 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--roseinfer-decode-attn-backend",
         type=str,
-        default="naive",
-        choices=["naive", "flashinfer", "flashattn"],
-        help="Decode attention backend for roseinfer dense past_kv path (default: naive).",
+        default="auto",
+        choices=["auto", "naive", "flashinfer", "flashattn"],
+        help="Decode attention backend for roseinfer dense past_kv path (default: auto).",
     )
     parser.add_argument(
         "--roseinfer-paged-attn",
+        dest="roseinfer_paged_attn",
         action="store_true",
-        help="Use paged attention decode(T=1) for roseinfer.",
+        help="Use paged attention decode(T=1) for roseinfer (default: enabled).",
     )
+    parser.add_argument(
+        "--roseinfer-no-paged-attn",
+        dest="roseinfer_paged_attn",
+        action="store_false",
+        help="Disable paged attention for roseinfer.",
+    )
+    parser.set_defaults(roseinfer_paged_attn=True)
     parser.add_argument(
         "--roseinfer-cuda-graph",
+        dest="roseinfer_cuda_graph",
         action="store_true",
-        help="Use CUDA graphs for paged attention decode(T=1) in roseinfer.",
+        help="Use CUDA graphs for paged attention decode(T=1) in roseinfer (default: enabled).",
     )
     parser.add_argument(
-        "--roseinfer-chunked-prefill",
-        action="store_true",
-        help="Enable chunked prefill for roseinfer (requires --roseinfer-paged-attn).",
+        "--roseinfer-no-cuda-graph",
+        dest="roseinfer_cuda_graph",
+        action="store_false",
+        help="Disable CUDA graphs for roseinfer.",
     )
+    parser.set_defaults(roseinfer_cuda_graph=True)
+    parser.add_argument(
+        "--roseinfer-chunked-prefill",
+        dest="roseinfer_chunked_prefill",
+        action="store_true",
+        help="Enable chunked prefill for roseinfer (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-chunked-prefill",
+        dest="roseinfer_chunked_prefill",
+        action="store_false",
+        help="Disable chunked prefill for roseinfer.",
+    )
+    parser.set_defaults(roseinfer_chunked_prefill=True)
     parser.add_argument(
         "--roseinfer-prefill-chunk-size",
         type=int,
         default=256,
         help="Chunk size for roseinfer chunked prefill (default: 256).",
+    )
+    parser.add_argument(
+        "--roseinfer-prefix-cache",
+        dest="roseinfer_prefix_cache",
+        action="store_true",
+        help="Enable prefix caching for roseinfer (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-prefix-cache",
+        dest="roseinfer_prefix_cache",
+        action="store_false",
+        help="Disable prefix caching for roseinfer.",
+    )
+    parser.set_defaults(roseinfer_prefix_cache=True)
+    parser.add_argument(
+        "--roseinfer-fused-ops",
+        dest="roseinfer_fused_ops",
+        action="store_true",
+        help="Enable fused ops (e.g., add+LayerNorm) for roseinfer (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-fused-ops",
+        dest="roseinfer_fused_ops",
+        action="store_false",
+        help="Disable fused ops for roseinfer.",
+    )
+    parser.set_defaults(roseinfer_fused_ops=True)
+    parser.add_argument(
+        "--roseinfer-compare-fused-ops",
+        action="store_true",
+        help="Run roseinfer twice: fused ops on/off (for A/B benchmark).",
     )
     parser.add_argument(
         "--timeout-ready-s",
@@ -971,14 +1037,26 @@ def main() -> None:
         if not roseinfer_prefill_backends:
             roseinfer_prefill_backends = None
 
-    run_specs: list[tuple[str, str, str | None]] = []
+    @dataclass(frozen=True)
+    class RunSpec:
+        base_backend: str
+        label: str
+        roseinfer_prefill_backend: str | None = None
+        roseinfer_fused_ops: bool | None = None
+
+    run_specs: list[RunSpec] = []
     for backend in backends:
         if backend != "roseinfer":
-            run_specs.append((backend, backend, None))
+            run_specs.append(RunSpec(base_backend=backend, label=backend))
             continue
         variants = roseinfer_prefill_backends or [
             str(args.roseinfer_prefill_attn_backend)
         ]
+        fused_variants = (
+            [True, False]
+            if bool(getattr(args, "roseinfer_compare_fused_ops", False))
+            else [bool(args.roseinfer_fused_ops)]
+        )
         for prefill_backend in variants:
             prefill_backend = str(prefill_backend)
             if prefill_backend == "flashinfer" and not _module_available("flashinfer"):
@@ -991,19 +1069,21 @@ def main() -> None:
                     "[warn] flash-attn not installed; skipping roseinfer prefill backend 'flashattn'"
                 )
                 continue
-            label = (
+            base_label = (
                 "roseinfer"
-                if prefill_backend == "naive"
+                if prefill_backend == "auto"
                 else f"roseinfer+{prefill_backend}"
             )
-            run_specs.append(("roseinfer", label, prefill_backend))
-        if args.roseinfer_chunked_prefill:
-            if not _module_available("flashinfer"):
-                print(
-                    "[warn] flashinfer not installed; skipping roseinfer chunked prefill variant"
+            for fused_ops in fused_variants:
+                label = base_label if fused_ops else f"{base_label}+nofuse"
+                run_specs.append(
+                    RunSpec(
+                        base_backend="roseinfer",
+                        label=label,
+                        roseinfer_prefill_backend=prefill_backend,
+                        roseinfer_fused_ops=bool(fused_ops),
+                    )
                 )
-            else:
-                run_specs.append(("roseinfer", "roseinfer+chunked", "flashinfer"))
 
     if not run_specs:
         raise ValueError("no backends to run (all candidates were skipped)")
@@ -1016,7 +1096,11 @@ def main() -> None:
     summaries: list[OnlineBenchmarkSummary] = []
     raw_per_backend: dict[str, dict[str, Any]] = {}
 
-    for i, (base_backend, backend, prefill_backend) in enumerate(run_specs):
+    for i, spec in enumerate(run_specs):
+        base_backend = spec.base_backend
+        backend = spec.label
+        prefill_backend = spec.roseinfer_prefill_backend
+        fused_ops = spec.roseinfer_fused_ops
         backend_wall_t0 = time.perf_counter()
         backend_start_time = _iso_now()
         port = int(args.port_base) + i
@@ -1035,15 +1119,8 @@ def main() -> None:
                 host=args.host,
                 port=port,
                 prefill_attn_backend=prefill_backend,
+                fused_ops=fused_ops,
             )
-            if backend == "roseinfer+chunked":
-                cmd.append("--chunked-prefill")
-                cmd += [
-                    "--prefill-chunk-size",
-                    str(int(args.roseinfer_prefill_chunk_size)),
-                ]
-                if not bool(args.roseinfer_paged_attn):
-                    cmd.append("--paged-attn")
         elif base_backend == "vllm":
             cmd = _vllm_server_cmd(
                 args, host=args.host, port=port, max_context_len=max_ctx
@@ -1198,7 +1275,7 @@ def main() -> None:
             "warmup_input_len": int(args.warmup_input_len),
             "warmup_output_len": int(args.warmup_output_len),
             "timeout_ready_s": float(args.timeout_ready_s),
-            "backends": [label for _, label, _ in run_specs],
+            "backends": [spec.label for spec in run_specs],
             "server_cpus": server_cpus,
             "client_cpus": client_cpus,
             "max_inflight_requests": (
@@ -1219,6 +1296,11 @@ def main() -> None:
             "roseinfer_cuda_graph": bool(args.roseinfer_cuda_graph),
             "roseinfer_chunked_prefill": bool(args.roseinfer_chunked_prefill),
             "roseinfer_prefill_chunk_size": int(args.roseinfer_prefill_chunk_size),
+            "roseinfer_prefix_cache": bool(args.roseinfer_prefix_cache),
+            "roseinfer_fused_ops": bool(args.roseinfer_fused_ops),
+            "roseinfer_compare_fused_ops": bool(
+                getattr(args, "roseinfer_compare_fused_ops", False)
+            ),
             "trace_path": str(trace_path),
             "run_start_time": run_start_time,
             "run_end_time": run_end_time,

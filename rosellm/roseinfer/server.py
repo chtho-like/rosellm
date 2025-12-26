@@ -299,6 +299,7 @@ class SchedulerManager:
         max_batch_size: int = 8,
         chunked_prefill: bool = False,
         prefill_chunk_size: int = 256,
+        prefix_cache: bool = True,
         prefill_max_batch_size: Optional[int] = None,
         prefill_max_tokens: Optional[int] = None,
         stream_interval: int = 1,
@@ -358,12 +359,13 @@ class SchedulerManager:
                 max_batch_size=int(max_batch_size),
                 prefill_chunk_size=int(prefill_chunk_size),
                 prefill_max_batch_size=int(prefill_max_batch_size),
-                use_prefix_cache=True,
+                use_prefix_cache=bool(prefix_cache),
             )
         else:
             self.scheduler = OnlineScheduler(
                 engine,
                 max_batch_size=int(max_batch_size),
+                use_prefix_cache=bool(prefix_cache),
             )
         self.engine.warmup_paged_attention_decode()
         self._lock = threading.Lock()
@@ -863,6 +865,7 @@ def create_app(
     stream_interval: int = 1,
     chunked_prefill: bool = False,
     prefill_chunk_size: int = 256,
+    prefix_cache: bool = True,
     served_model_name: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="roseinfer", version="0.1.0")
@@ -873,6 +876,7 @@ def create_app(
         stream_interval=stream_interval,
         chunked_prefill=bool(chunked_prefill),
         prefill_chunk_size=int(prefill_chunk_size),
+        prefix_cache=bool(prefix_cache),
     )
     app.add_event_handler("shutdown", sched_manager.close)
 
@@ -1178,32 +1182,56 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prefill-attn-backend",
         type=str,
-        default="naive",
-        choices=["naive", "flashinfer", "flashattn"],
-        help="Prefill attention backend (default: naive).",
+        default="auto",
+        choices=["auto", "naive", "flashinfer", "flashattn"],
+        help="Prefill attention backend (default: auto).",
     )
     parser.add_argument(
         "--decode-attn-backend",
         type=str,
-        default="naive",
-        choices=["naive", "flashinfer", "flashattn"],
-        help="Decode attention backend for dense past_kv path (default: naive).",
+        default="auto",
+        choices=["auto", "naive", "flashinfer", "flashattn"],
+        help="Decode attention backend for dense past_kv path (default: auto).",
     )
     parser.add_argument(
         "--paged-attn",
+        dest="paged_attn",
         action="store_true",
         help="Use paged attention for decode(T=1).",
     )
     parser.add_argument(
+        "--no-paged-attn",
+        dest="paged_attn",
+        action="store_false",
+        help="Disable paged attention.",
+    )
+    parser.set_defaults(paged_attn=True)
+    parser.add_argument(
         "--cuda-graph",
+        dest="cuda_graph",
         action="store_true",
         help="Use CUDA graphs for paged attention decode(T=1).",
     )
     parser.add_argument(
+        "--no-cuda-graph",
+        dest="cuda_graph",
+        action="store_false",
+        help="Disable CUDA graphs.",
+    )
+    parser.set_defaults(cuda_graph=True)
+    parser.add_argument(
         "--chunked-prefill",
+        dest="chunked_prefill",
         action="store_true",
         help="Enable chunked prefill (incremental prompt ingestion).",
     )
+    parser.add_argument(
+        "--no-chunked-prefill",
+        dest="chunked_prefill",
+        action="store_false",
+        help="Disable chunked prefill.",
+    )
+    parser.set_defaults(chunked_prefill=True)
     parser.add_argument(
         "--prefill-chunk-size",
         type=int,
@@ -1252,6 +1280,32 @@ def parse_args() -> argparse.Namespace:
         help="Flush streaming output every N generated tokens (default: 1).",
     )
     parser.add_argument(
+        "--prefix-cache",
+        dest="prefix_cache",
+        action="store_true",
+        help="Enable prefix caching (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-prefix-cache",
+        dest="prefix_cache",
+        action="store_false",
+        help="Disable prefix caching.",
+    )
+    parser.set_defaults(prefix_cache=True)
+    parser.add_argument(
+        "--fused-ops",
+        dest="fused_ops",
+        action="store_true",
+        help="Enable fused inference ops (e.g., add+LayerNorm) (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-fused-ops",
+        dest="fused_ops",
+        action="store_false",
+        help="Disable fused inference ops.",
+    )
+    parser.set_defaults(fused_ops=True)
+    parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
@@ -1284,10 +1338,38 @@ def main() -> None:
         raise ValueError("--max-inflight-requests must be >= 1")
     if int(args.stream_interval) <= 0:
         raise ValueError("--stream-interval must be >= 1")
-    if args.chunked_prefill and not args.paged_attn:
-        raise ValueError("--chunked-prefill requires --paged-attn")
-    if args.chunked_prefill and int(args.prefill_chunk_size) <= 0:
+    if int(args.prefill_chunk_size) <= 0:
         raise ValueError("--prefill-chunk-size must be >= 1")
+    device = torch.device(args.device)
+    paged_attn = bool(args.paged_attn)
+    cuda_graph = bool(args.cuda_graph)
+    chunked_prefill = bool(args.chunked_prefill)
+    if device.type != "cuda" or not torch.cuda.is_available():
+        if paged_attn:
+            print("[warn] disabling --paged-attn (requires CUDA)")
+        if cuda_graph:
+            print("[warn] disabling --cuda-graph (requires CUDA)")
+        if chunked_prefill:
+            print("[warn] disabling --chunked-prefill (requires CUDA)")
+        paged_attn = False
+        cuda_graph = False
+        chunked_prefill = False
+    if not paged_attn:
+        if cuda_graph:
+            print("[warn] disabling --cuda-graph (requires --paged-attn)")
+            cuda_graph = False
+        if chunked_prefill:
+            print("[warn] disabling --chunked-prefill (requires --paged-attn)")
+            chunked_prefill = False
+    if chunked_prefill:
+        import importlib.util
+
+        if bool(args.no_amp):
+            print("[warn] disabling --chunked-prefill (requires fp16/bf16 AMP)")
+            chunked_prefill = False
+        elif importlib.util.find_spec("flashinfer") is None:
+            print("[warn] disabling --chunked-prefill (requires flashinfer)")
+            chunked_prefill = False
     served_model_name = args.tokenizer_name or "roseinfer"
     if args.hf_model_id is None:
         engine = InferenceEngine(
@@ -1296,15 +1378,15 @@ def main() -> None:
             device=args.device,
             use_amp=not args.no_amp,
             bf16=args.bf16,
-            use_paged_attention=bool(args.paged_attn),
-            use_cuda_graph=bool(args.cuda_graph),
+            use_paged_attention=paged_attn,
+            use_cuda_graph=cuda_graph,
             prefill_attn_backend=str(args.prefill_attn_backend),
             decode_attn_backend=str(args.decode_attn_backend),
+            use_fused_ops=bool(args.fused_ops),
         )
     else:
         from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
 
-        device = torch.device(args.device)
         use_amp = bool(not args.no_amp) and device.type == "cuda"
         if use_amp:
             dtype = torch.bfloat16 if args.bf16 else torch.float16
@@ -1321,10 +1403,11 @@ def main() -> None:
             device=args.device,
             use_amp=use_amp,
             bf16=args.bf16,
-            use_paged_attention=bool(args.paged_attn),
-            use_cuda_graph=bool(args.cuda_graph),
+            use_paged_attention=paged_attn,
+            use_cuda_graph=cuda_graph,
             prefill_attn_backend=str(args.prefill_attn_backend),
             decode_attn_backend=str(args.decode_attn_backend),
+            use_fused_ops=bool(args.fused_ops),
             model=model,
             config=config,
             tokenizer=tokenizer,
@@ -1334,8 +1417,9 @@ def main() -> None:
         engine,
         max_inflight_requests=args.max_inflight_requests,
         stream_interval=int(args.stream_interval),
-        chunked_prefill=bool(args.chunked_prefill),
+        chunked_prefill=chunked_prefill,
         prefill_chunk_size=int(args.prefill_chunk_size),
+        prefix_cache=bool(args.prefix_cache),
         served_model_name=served_model_name,
     )
     uvicorn.run(

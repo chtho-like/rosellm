@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Any, Optional
 
 import torch
@@ -13,6 +14,7 @@ from rosellm.rosetrainer.attention_backends import (
     prefill_attention_flashinfer_paged,
 )
 from rosellm.rosetrainer.config import GPTConfig
+from rosellm.rosetrainer.fused_layernorm import add_layer_norm_, layer_norm
 from rosellm.rosetrainer.paged_attention import (
     TRITON_AVAILABLE,
     PagedKVCache,
@@ -278,10 +280,21 @@ class TransformerBlock(nn.Module):
         paged_kv_cache: Optional[PagedKVCache] = None,
         layer_idx: int = 0,
         attn_backend: str | None = None,
+        use_fused_ops: bool = False,
     ):
+        fused_ok = bool(use_fused_ops) and (not self.training) and (not x.requires_grad)
+        if fused_ok:
+            x_ln1 = layer_norm(
+                x,
+                self.ln1.weight,
+                self.ln1.bias,
+                eps=float(self.ln1.eps),
+            )
+        else:
+            x_ln1 = self.ln1(x)
         if return_kv:
             attn_out, present_kv = self.attn(
-                self.ln1(x),
+                x_ln1,
                 attention_mask=attention_mask,
                 past_kv=past_kv,
                 return_kv=True,
@@ -291,7 +304,7 @@ class TransformerBlock(nn.Module):
             )
         else:
             attn_out = self.attn(
-                self.ln1(x),
+                x_ln1,
                 attention_mask=attention_mask,
                 past_kv=past_kv,
                 return_kv=False,
@@ -300,9 +313,22 @@ class TransformerBlock(nn.Module):
                 attn_backend=attn_backend,
             )
             present_kv = None
-        x = x + attn_out
-        mlp_out = self.mlp(self.ln2(x))
-        x = x + mlp_out
+        if fused_ok:
+            x_ln2 = add_layer_norm_(
+                x,
+                attn_out,
+                self.ln2.weight,
+                self.ln2.bias,
+                eps=float(self.ln2.eps),
+            )
+        else:
+            x = x + attn_out
+            x_ln2 = self.ln2(x)
+        mlp_out = self.mlp(x_ln2)
+        if fused_ok:
+            x.add_(mlp_out)
+        else:
+            x = x + mlp_out
         if return_kv:
             return x, present_kv
         return x
@@ -312,6 +338,7 @@ class GPTModel(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.config = config
+        self.use_fused_ops = os.environ.get("ROSELLM_FUSED_OPS", "1") != "0"
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
         self.position_embedding = nn.Embedding(
             config.max_position_embeddings, config.d_model
@@ -419,6 +446,7 @@ class GPTModel(nn.Module):
                         paged_kv_cache=paged_kv_cache,
                         layer_idx=layer_idx,
                         attn_backend=attn_backend,
+                        use_fused_ops=bool(self.use_fused_ops),
                     )
                     presents.append(present_kv)
                 else:
@@ -429,8 +457,22 @@ class GPTModel(nn.Module):
                         paged_kv_cache=paged_kv_cache,
                         layer_idx=layer_idx,
                         attn_backend=attn_backend,
+                        use_fused_ops=bool(self.use_fused_ops),
                     )
-        x = self.ln_f(x)
+        if (
+            bool(self.use_fused_ops)
+            and (not self.training)
+            and (not x.requires_grad)
+            and x.is_cuda
+        ):
+            x = layer_norm(
+                x,
+                self.ln_f.weight,
+                self.ln_f.bias,
+                eps=float(self.ln_f.eps),
+            )
+        else:
+            x = self.ln_f(x)
         logits = self.lm_head(x)
         loss = None
         if labels is not None:
