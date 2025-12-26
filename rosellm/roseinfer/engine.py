@@ -9,19 +9,10 @@ import numpy as np
 import torch
 from torch.profiler import record_function
 
-from rosellm.roseinfer.detokenizer import (
-    BaseDetokenizer,
-    GPT2ByteDetokenizer,
-    PrefixDiffDetokenizer,
-)
+from rosellm.roseinfer.detokenizer import BaseDetokenizer, build_detokenizer
 from rosellm.rosetrainer.config import GPTConfig
 from rosellm.rosetrainer.dataset import build_tokenizer
 from rosellm.rosetrainer.model import GPTModel
-
-try:
-    import tiktoken
-except ImportError:
-    tiktoken = None
 
 try:
     import flashinfer  # type: ignore[import-not-found]
@@ -193,23 +184,9 @@ class InferenceEngine:
         else:
             self.tokenizer = tokenizer
         self.eos_token_id = self.tokenizer.eos_token_id
-
-        def make_detok() -> BaseDetokenizer:
-            tok_name = tokenizer_name
-            if tok_name is None:
-                tok_name = getattr(self.tokenizer, "name_or_path", "")
-            if (
-                isinstance(tok_name, str)
-                and tok_name.startswith("gpt2")
-                and tiktoken is not None
-            ):
-                try:
-                    return GPT2ByteDetokenizer(self.tokenizer)
-                except Exception as e:
-                    print(f"failed to create GPT2ByteDetokenizer: {e}")
-            return PrefixDiffDetokenizer(self.tokenizer)
-
-        self._make_detok = make_detok
+        self._make_detok = lambda: build_detokenizer(
+            self.tokenizer, tokenizer_name=tokenizer_name
+        )
         block_size = 64
         max_context = max_position_embeddings or self.config.max_position_embeddings
         max_concurrency = max(1, kv_cache_max_concurrency)

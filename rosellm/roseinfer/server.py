@@ -19,10 +19,8 @@ from .engine import (
     OnlineRequest,
     OnlineScheduler,
 )
-
-
-class SchedulerManagerOverloadedError(RuntimeError):
-    pass
+from .errors import SchedulerManagerOverloadedError
+from .mp import EngineProcessArgs, MPSchedulerManager
 
 
 class GenerateRequest(BaseModel):
@@ -842,11 +840,10 @@ def format_messages_as_prompt(messages: List[ChatMessage]) -> str:
 
 
 def estimate_usage(
-    engine: InferenceEngine,
+    tokenizer,
     prompt: str,
     completion: str,
 ) -> UsageInfo:
-    tokenizer = engine.tokenizer
     prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
     completion_ids = tokenizer.encode(completion, add_special_tokens=False)
     prompt_tokens = len(prompt_ids)
@@ -859,25 +856,12 @@ def estimate_usage(
 
 
 def create_app(
-    engine: InferenceEngine,
+    tokenizer,
+    sched_manager: "SchedulerManager | MPSchedulerManager",
     *,
-    max_inflight_requests: Optional[int] = None,
-    stream_interval: int = 1,
-    chunked_prefill: bool = False,
-    prefill_chunk_size: int = 256,
-    prefix_cache: bool = True,
     served_model_name: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="roseinfer", version="0.1.0")
-    sched_manager = SchedulerManager(
-        engine,
-        max_batch_size=8,
-        max_inflight_requests=max_inflight_requests,
-        stream_interval=stream_interval,
-        chunked_prefill=bool(chunked_prefill),
-        prefill_chunk_size=int(prefill_chunk_size),
-        prefix_cache=bool(prefix_cache),
-    )
     app.add_event_handler("shutdown", sched_manager.close)
 
     @app.get("/health")
@@ -925,16 +909,20 @@ def create_app(
                 token_stream(),
                 media_type="text/plain; charset=utf-8",
             )
-        text = engine.generate(
-            prompt=body.prompt,
-            max_new_tokens=body.max_new_tokens,
-            temperature=body.temperature,
-            top_k=body.top_k,
-            top_p=body.top_p,
-            stop_on_eos=True,
-            do_sample=True,
-        )
-        return GenerateResponse(text=text)
+        try:
+            request_id = sched_manager.add_request(
+                prompt=body.prompt,
+                max_new_tokens=body.max_new_tokens,
+                temperature=body.temperature,
+                top_k=body.top_k,
+                top_p=body.top_p,
+                stop_on_eos=True,
+                do_sample=True,
+            )
+        except SchedulerManagerOverloadedError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        completion = "".join(sched_manager.stream_text(request_id))
+        return GenerateResponse(text=body.prompt + completion)
 
     @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
     def chat_completions(
@@ -1020,16 +1008,21 @@ def create_app(
                 event_stream(),
                 media_type="text/event-stream",
             )
-        text = engine.generate(
-            prompt=prompt,
-            max_new_tokens=body.max_tokens,
-            temperature=body.temperature,
-            top_k=body.top_k,
-            top_p=body.top_p,
-            stop_on_eos=stop_on_eos,
-            do_sample=bool(body.do_sample),
-        )
-        usage = estimate_usage(engine, prompt, text)
+        try:
+            request_id = sched_manager.add_request(
+                prompt=prompt,
+                max_new_tokens=body.max_tokens,
+                temperature=body.temperature,
+                top_k=body.top_k,
+                top_p=body.top_p,
+                stop_on_eos=stop_on_eos,
+                do_sample=bool(body.do_sample),
+            )
+        except SchedulerManagerOverloadedError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        completion = "".join(sched_manager.stream_text(request_id))
+        text = prompt + completion
+        usage = estimate_usage(tokenizer, prompt, text)
         resp = ChatCompletionResponse(
             id=completion_id,
             object="chat.completion",
@@ -1106,20 +1099,20 @@ def create_app(
                 event_stream(),
                 media_type="text/event-stream",
             )
-
-        text = engine.generate(
-            prompt=body.prompt,
-            max_new_tokens=body.max_tokens,
-            temperature=body.temperature,
-            top_k=body.top_k,
-            top_p=body.top_p,
-            stop_on_eos=stop_on_eos,
-            do_sample=bool(body.do_sample),
-        )
-        completion_text = (
-            text[len(body.prompt) :] if text.startswith(body.prompt) else text
-        )
-        usage = estimate_usage(engine, body.prompt, completion_text)
+        try:
+            request_id = sched_manager.add_request(
+                prompt=body.prompt,
+                max_new_tokens=body.max_tokens,
+                temperature=body.temperature,
+                top_k=body.top_k,
+                top_p=body.top_p,
+                stop_on_eos=stop_on_eos,
+                do_sample=bool(body.do_sample),
+            )
+        except SchedulerManagerOverloadedError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        completion_text = "".join(sched_manager.stream_text(request_id))
+        usage = estimate_usage(tokenizer, body.prompt, completion_text)
         return CompletionResponse(
             id=completion_id,
             object="text_completion",
@@ -1345,6 +1338,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(fused_kv_append=True)
     parser.add_argument(
+        "--engine-process",
+        dest="engine_process",
+        action="store_true",
+        help="Run engine/scheduler in a dedicated worker process (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-engine-process",
+        dest="engine_process",
+        action="store_false",
+        help="Disable engine worker process; run everything in one process.",
+    )
+    parser.set_defaults(engine_process=True)
+    parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
@@ -1409,62 +1415,106 @@ def main() -> None:
         elif importlib.util.find_spec("flashinfer") is None:
             print("[warn] disabling --chunked-prefill (requires flashinfer)")
             chunked_prefill = False
+
     served_model_name = args.tokenizer_name or "roseinfer"
-    if args.hf_model_id is None:
-        engine = InferenceEngine(
-            checkpoint_path=args.checkpoint_path,
+    max_batch_size = 8
+    use_engine_process = bool(args.engine_process)
+    if use_engine_process:
+        from rosellm.rosetrainer.dataset import build_tokenizer
+
+        tokenizer = build_tokenizer(args.tokenizer_name)
+        if args.hf_model_id is not None:
+            served_model_name = args.hf_model_id
+        engine_args = EngineProcessArgs(
+            checkpoint_path=args.checkpoint_path if args.hf_model_id is None else None,
+            hf_model_id=args.hf_model_id,
             tokenizer_name=args.tokenizer_name,
             device=args.device,
-            use_amp=not args.no_amp,
-            bf16=args.bf16,
-            use_paged_attention=paged_attn,
-            use_cuda_graph=cuda_graph,
+            no_amp=bool(args.no_amp),
+            bf16=bool(args.bf16),
             prefill_attn_backend=str(args.prefill_attn_backend),
             decode_attn_backend=str(args.decode_attn_backend),
-            use_fused_ops=bool(args.fused_ops),
-            use_fused_mlp=bool(args.fused_mlp),
-            use_fused_sampler=bool(args.fused_sampler),
-            use_fused_kv_append=bool(args.fused_kv_append),
+            paged_attn=bool(paged_attn),
+            cuda_graph=bool(cuda_graph),
+            fused_ops=bool(args.fused_ops),
+            fused_mlp=bool(args.fused_mlp),
+            fused_sampler=bool(args.fused_sampler),
+            fused_kv_append=bool(args.fused_kv_append),
+            chunked_prefill=bool(chunked_prefill),
+            prefill_chunk_size=int(args.prefill_chunk_size),
+            prefix_cache=bool(args.prefix_cache),
+            max_batch_size=int(max_batch_size),
+        )
+        sched_manager: SchedulerManager | MPSchedulerManager = MPSchedulerManager(
+            tokenizer,
+            engine_args=engine_args,
+            stream_interval=int(args.stream_interval),
+            max_inflight_requests=args.max_inflight_requests,
         )
     else:
-        from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
-
-        use_amp = bool(not args.no_amp) and device.type == "cuda"
-        if use_amp:
-            dtype = torch.bfloat16 if args.bf16 else torch.float16
+        if args.hf_model_id is None:
+            engine = InferenceEngine(
+                checkpoint_path=args.checkpoint_path,
+                tokenizer_name=args.tokenizer_name,
+                device=args.device,
+                use_amp=not args.no_amp,
+                bf16=args.bf16,
+                use_paged_attention=paged_attn,
+                use_cuda_graph=cuda_graph,
+                prefill_attn_backend=str(args.prefill_attn_backend),
+                decode_attn_backend=str(args.decode_attn_backend),
+                use_fused_ops=bool(args.fused_ops),
+                use_fused_mlp=bool(args.fused_mlp),
+                use_fused_sampler=bool(args.fused_sampler),
+                use_fused_kv_append=bool(args.fused_kv_append),
+            )
+            served_model_name = args.tokenizer_name
         else:
-            dtype = torch.float32
-        model, config, tokenizer = load_gpt2_from_hf_pretrained(
-            args.hf_model_id,
-            device=device,
-            dtype=dtype,
+            from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
+
+            use_amp = bool(not args.no_amp) and device.type == "cuda"
+            if use_amp:
+                dtype = torch.bfloat16 if args.bf16 else torch.float16
+            else:
+                dtype = torch.float32
+            model, config, tokenizer = load_gpt2_from_hf_pretrained(
+                args.hf_model_id,
+                device=device,
+                dtype=dtype,
+            )
+            engine = InferenceEngine(
+                checkpoint_path=None,
+                tokenizer_name=args.tokenizer_name or args.hf_model_id,
+                device=args.device,
+                use_amp=use_amp,
+                bf16=args.bf16,
+                use_paged_attention=paged_attn,
+                use_cuda_graph=cuda_graph,
+                prefill_attn_backend=str(args.prefill_attn_backend),
+                decode_attn_backend=str(args.decode_attn_backend),
+                use_fused_ops=bool(args.fused_ops),
+                use_fused_mlp=bool(args.fused_mlp),
+                use_fused_sampler=bool(args.fused_sampler),
+                use_fused_kv_append=bool(args.fused_kv_append),
+                model=model,
+                config=config,
+                tokenizer=tokenizer,
+            )
+            served_model_name = args.hf_model_id
+        tokenizer = engine.tokenizer
+        sched_manager = SchedulerManager(
+            engine,
+            max_batch_size=int(max_batch_size),
+            max_inflight_requests=args.max_inflight_requests,
+            stream_interval=int(args.stream_interval),
+            chunked_prefill=chunked_prefill,
+            prefill_chunk_size=int(args.prefill_chunk_size),
+            prefix_cache=bool(args.prefix_cache),
         )
-        engine = InferenceEngine(
-            checkpoint_path=None,
-            tokenizer_name=args.tokenizer_name or args.hf_model_id,
-            device=args.device,
-            use_amp=use_amp,
-            bf16=args.bf16,
-            use_paged_attention=paged_attn,
-            use_cuda_graph=cuda_graph,
-            prefill_attn_backend=str(args.prefill_attn_backend),
-            decode_attn_backend=str(args.decode_attn_backend),
-            use_fused_ops=bool(args.fused_ops),
-            use_fused_mlp=bool(args.fused_mlp),
-            use_fused_sampler=bool(args.fused_sampler),
-            use_fused_kv_append=bool(args.fused_kv_append),
-            model=model,
-            config=config,
-            tokenizer=tokenizer,
-        )
-        served_model_name = args.hf_model_id
+
     app = create_app(
-        engine,
-        max_inflight_requests=args.max_inflight_requests,
-        stream_interval=int(args.stream_interval),
-        chunked_prefill=chunked_prefill,
-        prefill_chunk_size=int(args.prefill_chunk_size),
-        prefix_cache=bool(args.prefix_cache),
+        tokenizer,
+        sched_manager,
         served_model_name=served_model_name,
     )
     uvicorn.run(

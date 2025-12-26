@@ -15,6 +15,7 @@ BACKEND_LABELS = {
     "roseinfer+flashinfer": "roseinfer (flashinfer)",
     "roseinfer+flashattn": "roseinfer (flash-attn)",
     "roseinfer+chunked": "roseinfer (chunked prefill)",
+    "roseinfer+inproc": "roseinfer (in-proc)",
     "vllm": "vLLM",
     "sglang": "SGLang",
 }
@@ -33,6 +34,7 @@ BACKEND_MARKERS = {
     "roseinfer+flashinfer": "D",
     "roseinfer+flashattn": "v",
     "roseinfer+chunked": "P",
+    "roseinfer+inproc": "p",
     "vllm": "s",
     "sglang": "^",
 }
@@ -53,6 +55,8 @@ def _backend_label(key: str) -> str:
                 extras.append("naive")
             elif p == "chunked":
                 extras.append("chunked prefill")
+            elif p == "inproc":
+                extras.append("in-proc")
             elif p == "nofuse":
                 extras.append("no fused ops")
             elif p == "nomlp":
@@ -96,6 +100,8 @@ def _backend_marker(key: str) -> str:
             return "*"
         if "nokv" in parts:
             return "h"
+        if "inproc" in parts:
+            return "p"
         if "chunked" in parts:
             return "P"
         if "flashinfer" in parts:

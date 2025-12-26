@@ -21,6 +21,37 @@ def _module_available(name: str) -> bool:
         return False
 
 
+def _append_pythonpath(env: dict[str, str], path: str) -> None:
+    old = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = path if not old else f"{path}{os.pathsep}{old}"
+
+
+def _maybe_add_sglang_source_pythonpath_env(env: dict[str, str]) -> None:
+    if _module_available("sglang") and _module_available("sgl_kernel"):
+        return
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates = (
+        repo_root / ".vscode" / "sglang" / "python",
+        repo_root / ".vscode" / "sglang" / "sgl-kernel" / "python",
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            _append_pythonpath(env, str(candidate))
+
+
+def _maybe_add_sglang_source_sys_path() -> None:
+    if _module_available("sglang") and _module_available("sgl_kernel"):
+        return
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates = (
+        repo_root / ".vscode" / "sglang" / "python",
+        repo_root / ".vscode" / "sglang" / "sgl-kernel" / "python",
+    )
+    for candidate in reversed(candidates):
+        if candidate.is_dir() and str(candidate) not in sys.path:
+            sys.path.insert(0, str(candidate))
+
+
 @dataclass(frozen=True)
 class OfflineResult:
     backend: str
@@ -374,11 +405,15 @@ def _run_vllm(args: argparse.Namespace) -> OfflineResult:
     )
 
     if not bool(args.skip_warmup) and prompt_token_ids:
+        warmup_top_k = 0
+        # vLLM (older versions) uses -1 to disable top-k.
+        if warmup_top_k == 0:
+            warmup_top_k = -1
         warmup = SamplingParams(
             max_tokens=1,
             temperature=0.0,
             top_p=1.0,
-            top_k=0,
+            top_k=int(warmup_top_k),
             ignore_eos=True,
             detokenize=False,
         )
@@ -390,11 +425,14 @@ def _run_vllm(args: argparse.Namespace) -> OfflineResult:
             llm.generate([{"prompt_token_ids": prompt_token_ids[0]}], warmup)
 
     prompts = [{"prompt_token_ids": ids} for ids in prompt_token_ids]
+    top_k = int(args.top_k)
+    if top_k == 0:
+        top_k = -1
     sparams = SamplingParams(
         max_tokens=output_len,
         temperature=float(args.temperature),
         top_p=float(args.top_p),
-        top_k=int(args.top_k),
+        top_k=top_k,
         ignore_eos=bool(args.ignore_eos),
         detokenize=False,
     )
@@ -437,6 +475,7 @@ def _run_vllm(args: argparse.Namespace) -> OfflineResult:
 
 
 def _run_sglang(args: argparse.Namespace) -> OfflineResult:
+    _maybe_add_sglang_source_sys_path()
     from sglang.srt.entrypoints.engine import Engine
 
     num_prompts = int(args.num_prompts)
@@ -459,6 +498,10 @@ def _run_sglang(args: argparse.Namespace) -> OfflineResult:
         "random_seed": int(args.seed),
         "log_level": "error",
     }
+    if getattr(args, "sglang_attention_backend", None):
+        engine_kwargs["attention_backend"] = str(args.sglang_attention_backend)
+    if getattr(args, "sglang_sampling_backend", None):
+        engine_kwargs["sampling_backend"] = str(args.sglang_sampling_backend)
     engine_kwargs.update(_dtype_flag_sglang(str(args.dtype)))
     engine = Engine(**engine_kwargs)
     try:
@@ -538,6 +581,20 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="0",
         help="CUDA_VISIBLE_DEVICES for vLLM/sglang/roseinfer.",
+    )
+    parser.add_argument(
+        "--sglang-attention-backend",
+        type=str,
+        default="triton",
+        choices=["flashinfer", "triton", "torch_native", "fa3", "flashmla"],
+        help="SGLang attention backend (default: triton for broad compatibility).",
+    )
+    parser.add_argument(
+        "--sglang-sampling-backend",
+        type=str,
+        default="flashinfer",
+        choices=["flashinfer", "pytorch"],
+        help="SGLang sampling backend (default: flashinfer).",
     )
     parser.add_argument(
         "--num-prompts", type=int, default=256, help="Number of prompts."
@@ -809,6 +866,7 @@ def _run_compare(args: argparse.Namespace) -> None:
     env["TOKENIZERS_PARALLELISM"] = "false"
     env["OMP_NUM_THREADS"] = str(len(server_cpus))
     env["MKL_NUM_THREADS"] = str(len(server_cpus))
+    _maybe_add_sglang_source_pythonpath_env(env)
 
     results: list[OfflineResult] = []
     backend_wall_s: dict[str, float] = {}

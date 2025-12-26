@@ -36,6 +36,24 @@ def _module_available(name: str) -> bool:
         return False
 
 
+def _append_pythonpath(env: dict[str, str], path: str) -> None:
+    old = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = path if not old else f"{path}{os.pathsep}{old}"
+
+
+def _maybe_add_sglang_source_pythonpath(env: dict[str, str]) -> None:
+    if _module_available("sglang") and _module_available("sgl_kernel"):
+        return
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates = (
+        repo_root / ".vscode" / "sglang" / "python",
+        repo_root / ".vscode" / "sglang" / "sgl-kernel" / "python",
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            _append_pythonpath(env, str(candidate))
+
+
 def _iso_now() -> str:
     return _dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -568,6 +586,7 @@ def _roseinfer_server_cmd(
     fused_mlp: bool | None = None,
     fused_sampler: bool | None = None,
     fused_kv_append: bool | None = None,
+    engine_process: bool | None = None,
 ) -> list[str]:
     prefill_attn_backend = (
         str(prefill_attn_backend)
@@ -598,6 +617,11 @@ def _roseinfer_server_cmd(
         bool(fused_kv_append)
         if fused_kv_append is not None
         else bool(args.roseinfer_fused_kv_append)
+    )
+    engine_process = (
+        bool(engine_process)
+        if engine_process is not None
+        else bool(getattr(args, "roseinfer_engine_process", True))
     )
     cmd = [
         sys.executable,
@@ -640,6 +664,7 @@ def _roseinfer_server_cmd(
     cmd += ["--fused-mlp" if fused_mlp else "--no-fused-mlp"]
     cmd += ["--fused-sampler" if fused_sampler else "--no-fused-sampler"]
     cmd += ["--fused-kv-append" if fused_kv_append else "--no-fused-kv-append"]
+    cmd += ["--engine-process" if engine_process else "--no-engine-process"]
     return cmd
 
 
@@ -688,8 +713,6 @@ def _vllm_server_cmd(
         str(port),
         "--max-model-len",
         str(int(max_context_len)),
-        "--stream-interval",
-        "1",
         "--disable-log-requests",
         "--disable-log-stats",
     ]
@@ -720,6 +743,10 @@ def _sglang_server_cmd(
         "1",
         "--stream-output",
     ]
+    if getattr(args, "sglang_attention_backend", None):
+        cmd += ["--attention-backend", str(args.sglang_attention_backend)]
+    if getattr(args, "sglang_sampling_backend", None):
+        cmd += ["--sampling-backend", str(args.sglang_sampling_backend)]
     cmd += _dtype_flag_sglang(str(args.dtype))
     return cmd
 
@@ -752,6 +779,20 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="0",
         help='CUDA_VISIBLE_DEVICES for all servers (e.g. "0").',
+    )
+    parser.add_argument(
+        "--sglang-attention-backend",
+        type=str,
+        default="triton",
+        choices=["flashinfer", "triton", "torch_native", "fa3", "flashmla"],
+        help="SGLang attention backend (default: triton for broad compatibility).",
+    )
+    parser.add_argument(
+        "--sglang-sampling-backend",
+        type=str,
+        default="flashinfer",
+        choices=["flashinfer", "pytorch"],
+        help="SGLang sampling backend (default: flashinfer).",
     )
     parser.add_argument(
         "--trace-a-url",
@@ -1024,6 +1065,24 @@ def parse_args() -> argparse.Namespace:
         help="Run roseinfer twice: fused KV append on/off (for A/B benchmark).",
     )
     parser.add_argument(
+        "--roseinfer-engine-process",
+        dest="roseinfer_engine_process",
+        action="store_true",
+        help="Run roseinfer engine in a worker process (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-engine-process",
+        dest="roseinfer_engine_process",
+        action="store_false",
+        help="Disable roseinfer engine worker process (run in-process).",
+    )
+    parser.set_defaults(roseinfer_engine_process=True)
+    parser.add_argument(
+        "--roseinfer-compare-engine-process",
+        action="store_true",
+        help="Run roseinfer twice: engine-process on/off (for A/B benchmark).",
+    )
+    parser.add_argument(
         "--timeout-ready-s",
         type=float,
         default=120.0,
@@ -1115,6 +1174,7 @@ def main() -> None:
         base_backend: str
         label: str
         roseinfer_prefill_backend: str | None = None
+        roseinfer_engine_process: bool | None = None
         roseinfer_fused_ops: bool | None = None
         roseinfer_fused_mlp: bool | None = None
         roseinfer_fused_sampler: bool | None = None
@@ -1132,6 +1192,11 @@ def main() -> None:
         base_fused_mlp = bool(args.roseinfer_fused_mlp)
         base_fused_sampler = bool(args.roseinfer_fused_sampler)
         base_fused_kv_append = bool(args.roseinfer_fused_kv_append)
+        base_engine_process = bool(getattr(args, "roseinfer_engine_process", True))
+        engine_cfgs: list[bool] = [base_engine_process]
+        if bool(getattr(args, "roseinfer_compare_engine_process", False)):
+            engine_cfgs.append(not base_engine_process)
+        engine_cfgs = list(dict.fromkeys(engine_cfgs))
         cfgs: list[tuple[bool, bool, bool, bool]] = []
         seen: set[tuple[bool, bool, bool, bool]] = set()
 
@@ -1200,27 +1265,31 @@ def main() -> None:
                 if prefill_backend == "auto"
                 else f"roseinfer+{prefill_backend}"
             )
-            for fused_ops, fused_mlp, fused_sampler, fused_kv_append in cfgs:
-                label = base_label
-                if not fused_ops:
-                    label += "+nofuse"
-                if not fused_mlp:
-                    label += "+nomlp"
-                if not fused_sampler:
-                    label += "+nosampler"
-                if not fused_kv_append:
-                    label += "+nokv"
-                run_specs.append(
-                    RunSpec(
-                        base_backend="roseinfer",
-                        label=label,
-                        roseinfer_prefill_backend=prefill_backend,
-                        roseinfer_fused_ops=bool(fused_ops),
-                        roseinfer_fused_mlp=bool(fused_mlp),
-                        roseinfer_fused_sampler=bool(fused_sampler),
-                        roseinfer_fused_kv_append=bool(fused_kv_append),
+            for engine_process in engine_cfgs:
+                for fused_ops, fused_mlp, fused_sampler, fused_kv_append in cfgs:
+                    label = base_label
+                    if not bool(engine_process):
+                        label += "+inproc"
+                    if not fused_ops:
+                        label += "+nofuse"
+                    if not fused_mlp:
+                        label += "+nomlp"
+                    if not fused_sampler:
+                        label += "+nosampler"
+                    if not fused_kv_append:
+                        label += "+nokv"
+                    run_specs.append(
+                        RunSpec(
+                            base_backend="roseinfer",
+                            label=label,
+                            roseinfer_prefill_backend=prefill_backend,
+                            roseinfer_engine_process=bool(engine_process),
+                            roseinfer_fused_ops=bool(fused_ops),
+                            roseinfer_fused_mlp=bool(fused_mlp),
+                            roseinfer_fused_sampler=bool(fused_sampler),
+                            roseinfer_fused_kv_append=bool(fused_kv_append),
+                        )
                     )
-                )
 
     if not run_specs:
         raise ValueError("no backends to run (all candidates were skipped)")
@@ -1237,6 +1306,7 @@ def main() -> None:
         base_backend = spec.base_backend
         backend = spec.label
         prefill_backend = spec.roseinfer_prefill_backend
+        engine_process = spec.roseinfer_engine_process
         fused_ops = spec.roseinfer_fused_ops
         fused_mlp = spec.roseinfer_fused_mlp
         fused_sampler = spec.roseinfer_fused_sampler
@@ -1259,6 +1329,7 @@ def main() -> None:
                 host=args.host,
                 port=port,
                 prefill_attn_backend=prefill_backend,
+                engine_process=engine_process,
                 fused_ops=fused_ops,
                 fused_mlp=fused_mlp,
                 fused_sampler=fused_sampler,
@@ -1269,6 +1340,7 @@ def main() -> None:
                 args, host=args.host, port=port, max_context_len=max_ctx
             )
         elif base_backend == "sglang":
+            _maybe_add_sglang_source_pythonpath(env)
             cmd = _sglang_server_cmd(
                 args, host=args.host, port=port, max_context_len=max_ctx
             )

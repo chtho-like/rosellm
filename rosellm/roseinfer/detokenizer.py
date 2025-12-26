@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import codecs
-from typing import List
+from typing import Any, List
 
 from transformers import PreTrainedTokenizerBase
 
@@ -107,3 +107,23 @@ class PrefixDiffDetokenizer(BaseDetokenizer):
         delta = full[len(self.last_text) :]
         self.last_text = full
         return delta
+
+
+def build_detokenizer(
+    tokenizer: Any,
+    *,
+    tokenizer_name: str | None = None,
+) -> BaseDetokenizer:
+    tok_name = tokenizer_name
+    if tok_name is None:
+        tok_name = getattr(tokenizer, "name_or_path", "")
+    if (
+        isinstance(tok_name, str)
+        and tok_name.startswith("gpt2")
+        and tiktoken is not None
+    ):
+        try:
+            return GPT2ByteDetokenizer(tokenizer)
+        except Exception as e:
+            print(f"failed to create GPT2ByteDetokenizer: {e}")
+    return PrefixDiffDetokenizer(tokenizer)

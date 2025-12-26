@@ -1,0 +1,2 @@
+class SchedulerManagerOverloadedError(RuntimeError):
+    pass
