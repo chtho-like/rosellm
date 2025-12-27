@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import queue
 import threading
 import time
@@ -46,6 +47,7 @@ class EngineProcessArgs:
     chunked_prefill: bool
     prefill_chunk_size: int
     prefix_cache: bool
+    overlap_schedule: bool
     max_batch_size: int
     toy: ToyEngineSpec | None = None
 
@@ -68,11 +70,26 @@ class CancelRequestCmd:
 
 
 @dataclass(frozen=True)
+class StartProfileCmd:
+    profile_id: int
+    tool: str
+    output_dir: str | None = None
+
+
+@dataclass(frozen=True)
+class StopProfileCmd:
+    profile_id: int
+    tool: str
+
+
+@dataclass(frozen=True)
 class ShutdownCmd:
     pass
 
 
-EngineCommand = AddRequestCmd | CancelRequestCmd | ShutdownCmd
+EngineCommand = (
+    AddRequestCmd | CancelRequestCmd | StartProfileCmd | StopProfileCmd | ShutdownCmd
+)
 
 
 @dataclass(frozen=True)
@@ -93,7 +110,16 @@ class ErrorEvent:
     message: str
 
 
-EngineEvent = ReadyEvent | TokensEvent | ErrorEvent
+@dataclass(frozen=True)
+class ProfileEvent:
+    profile_id: int
+    action: str
+    tool: str
+    ok: bool
+    message: str | None = None
+
+
+EngineEvent = ReadyEvent | TokensEvent | ErrorEvent | ProfileEvent
 
 
 def _build_engine(args: EngineProcessArgs) -> InferenceEngine:
@@ -190,6 +216,7 @@ def _engine_process_main(
                     prefill_chunk_size=int(args.prefill_chunk_size),
                     prefill_max_batch_size=int(args.max_batch_size),
                     use_prefix_cache=bool(args.prefix_cache),
+                    overlap_schedule=bool(args.overlap_schedule),
                 )
             )
         else:
@@ -197,6 +224,7 @@ def _engine_process_main(
                 engine,
                 max_batch_size=int(args.max_batch_size),
                 use_prefix_cache=bool(args.prefix_cache),
+                overlap_schedule=bool(args.overlap_schedule),
             )
         engine.warmup_paged_attention_decode()
         evt_q.put(
@@ -208,6 +236,66 @@ def _engine_process_main(
 
         pending: "Deque[AddRequestCmd]" = deque()
         pending_by_rid: dict[int, AddRequestCmd] = {}
+        torch_prof: Any | None = None
+        torch_prof_dir: str | None = None
+        cuda_prof_active = False
+
+        def start_profile(cmd: StartProfileCmd) -> None:
+            nonlocal torch_prof, torch_prof_dir, cuda_prof_active
+            tool = str(cmd.tool).lower()
+            if tool == "torch":
+                if torch_prof is not None:
+                    raise RuntimeError("torch profiler already running")
+                if cmd.output_dir is None:
+                    raise ValueError("output_dir is required for torch profiler")
+                out_dir = str(cmd.output_dir)
+                os.makedirs(out_dir, exist_ok=True)
+                activities = [torch.profiler.ProfilerActivity.CPU]
+                if torch.cuda.is_available():
+                    activities.append(torch.profiler.ProfilerActivity.CUDA)
+                prof = torch.profiler.profile(
+                    activities=activities,
+                    record_shapes=True,
+                    profile_memory=True,
+                    with_stack=True,
+                )
+                prof.__enter__()
+                torch_prof = prof
+                torch_prof_dir = out_dir
+                return
+            if tool == "cuda":
+                if cuda_prof_active:
+                    raise RuntimeError("cuda profiler already running")
+                if torch.cuda.is_available():
+                    torch.cuda.profiler.start()
+                cuda_prof_active = True
+                return
+            raise ValueError("tool must be torch|cuda")
+
+        def stop_profile(cmd: StopProfileCmd) -> None:
+            nonlocal torch_prof, torch_prof_dir, cuda_prof_active
+            tool = str(cmd.tool).lower()
+            if tool == "torch":
+                if torch_prof is None or torch_prof_dir is None:
+                    raise RuntimeError("torch profiler not running")
+                prof = torch_prof
+                out_dir = torch_prof_dir
+                torch_prof = None
+                torch_prof_dir = None
+                prof.__exit__(None, None, None)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                prof.export_chrome_trace(os.path.join(out_dir, "trace.json"))
+                return
+            if tool == "cuda":
+                if not cuda_prof_active:
+                    raise RuntimeError("cuda profiler not running")
+                cuda_prof_active = False
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.profiler.stop()
+                return
+            raise ValueError("tool must be torch|cuda")
 
         def cancel_request(request_id: int) -> None:
             pending_by_rid.pop(request_id, None)
@@ -218,6 +306,42 @@ def _engine_process_main(
                 cmd = cmd_q.get()
                 if isinstance(cmd, ShutdownCmd):
                     return
+                if isinstance(cmd, StartProfileCmd):
+                    ok = True
+                    msg: str | None = None
+                    try:
+                        start_profile(cmd)
+                    except Exception as exc:
+                        ok = False
+                        msg = str(exc)
+                    evt_q.put(
+                        ProfileEvent(
+                            profile_id=int(cmd.profile_id),
+                            action="start",
+                            tool=str(cmd.tool),
+                            ok=ok,
+                            message=msg,
+                        )
+                    )
+                    continue
+                if isinstance(cmd, StopProfileCmd):
+                    ok = True
+                    msg: str | None = None
+                    try:
+                        stop_profile(cmd)
+                    except Exception as exc:
+                        ok = False
+                        msg = str(exc)
+                    evt_q.put(
+                        ProfileEvent(
+                            profile_id=int(cmd.profile_id),
+                            action="stop",
+                            tool=str(cmd.tool),
+                            ok=ok,
+                            message=msg,
+                        )
+                    )
+                    continue
                 if isinstance(cmd, CancelRequestCmd):
                     cancel_request(int(cmd.request_id))
                     continue
@@ -232,6 +356,40 @@ def _engine_process_main(
                             return
                         if isinstance(cmd, CancelRequestCmd):
                             cancel_request(int(cmd.request_id))
+                        elif isinstance(cmd, StartProfileCmd):
+                            ok = True
+                            msg: str | None = None
+                            try:
+                                start_profile(cmd)
+                            except Exception as exc:
+                                ok = False
+                                msg = str(exc)
+                            evt_q.put(
+                                ProfileEvent(
+                                    profile_id=int(cmd.profile_id),
+                                    action="start",
+                                    tool=str(cmd.tool),
+                                    ok=ok,
+                                    message=msg,
+                                )
+                            )
+                        elif isinstance(cmd, StopProfileCmd):
+                            ok = True
+                            msg: str | None = None
+                            try:
+                                stop_profile(cmd)
+                            except Exception as exc:
+                                ok = False
+                                msg = str(exc)
+                            evt_q.put(
+                                ProfileEvent(
+                                    profile_id=int(cmd.profile_id),
+                                    action="stop",
+                                    tool=str(cmd.tool),
+                                    ok=ok,
+                                    message=msg,
+                                )
+                            )
                         elif isinstance(cmd, AddRequestCmd):
                             pending.append(cmd)
                             pending_by_rid[int(cmd.request_id)] = cmd
@@ -331,6 +489,9 @@ class MPSchedulerManager:
         self._detoks: Dict[int, BaseDetokenizer] = {}
         self._stream_states: Dict[int, _StreamState] = {}
         self._max_context: int | None = None
+        self._profile_seq: int = 0
+        self._profile_waiters: dict[int, threading.Event] = {}
+        self._profile_results: dict[int, ProfileEvent] = {}
 
         ctx = mp.get_context("spawn")
         self._cmd_q: "mp.Queue[EngineCommand]" = ctx.Queue()
@@ -371,10 +532,15 @@ class MPSchedulerManager:
             if not self._running:
                 return
             self._running = False
+            waiters = list(self._profile_waiters.values())
+            self._profile_waiters.clear()
+            self._profile_results.clear()
             queues = list(self._queues.values())
             self._queues.clear()
             self._detoks.clear()
             self._stream_states.clear()
+        for ev in waiters:
+            ev.set()
         for q in queues:
             q.put(None)
         try:
@@ -472,6 +638,69 @@ class MPSchedulerManager:
                 self._stream_states.pop(request_id, None)
             self._cancel_backend(request_id)
 
+    def start_profile(
+        self,
+        *,
+        tool: str,
+        output_dir: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> None:
+        tool = str(tool).lower()
+        if tool not in ("torch", "cuda"):
+            raise ValueError("tool must be torch|cuda")
+        if tool == "torch" and output_dir is None:
+            raise ValueError("output_dir is required for torch profiler")
+
+        waiter = threading.Event()
+        with self._lock:
+            if not self._running:
+                raise RuntimeError("MPSchedulerManager is closed")
+            profile_id = int(self._profile_seq)
+            self._profile_seq += 1
+            self._profile_waiters[profile_id] = waiter
+        self._cmd_q.put(
+            StartProfileCmd(
+                profile_id=profile_id,
+                tool=tool,
+                output_dir=str(output_dir) if output_dir is not None else None,
+            )
+        )
+        if not waiter.wait(timeout=timeout_s):
+            raise TimeoutError("start_profile timed out")
+        with self._lock:
+            evt = self._profile_results.pop(profile_id, None)
+        if evt is None:
+            raise RuntimeError("missing profile ack event")
+        if not bool(evt.ok):
+            raise RuntimeError(evt.message or "start_profile failed")
+
+    def stop_profile(
+        self,
+        *,
+        tool: str,
+        timeout_s: float = 30.0,
+    ) -> None:
+        tool = str(tool).lower()
+        if tool not in ("torch", "cuda"):
+            raise ValueError("tool must be torch|cuda")
+
+        waiter = threading.Event()
+        with self._lock:
+            if not self._running:
+                raise RuntimeError("MPSchedulerManager is closed")
+            profile_id = int(self._profile_seq)
+            self._profile_seq += 1
+            self._profile_waiters[profile_id] = waiter
+        self._cmd_q.put(StopProfileCmd(profile_id=profile_id, tool=tool))
+        if not waiter.wait(timeout=timeout_s):
+            raise TimeoutError("stop_profile timed out")
+        with self._lock:
+            evt = self._profile_results.pop(profile_id, None)
+        if evt is None:
+            raise RuntimeError("missing profile ack event")
+        if not bool(evt.ok):
+            raise RuntimeError(evt.message or "stop_profile failed")
+
     def _event_loop(self) -> None:
         try:
             while True:
@@ -480,13 +709,25 @@ class MPSchedulerManager:
                     return
                 if isinstance(evt, ReadyEvent):
                     continue
+                if isinstance(evt, ProfileEvent):
+                    with self._lock:
+                        waiter = self._profile_waiters.pop(int(evt.profile_id), None)
+                        if waiter is not None:
+                            self._profile_results[int(evt.profile_id)] = evt
+                            waiter.set()
+                    continue
                 if isinstance(evt, ErrorEvent):
                     with self._lock:
+                        waiters = list(self._profile_waiters.values())
+                        self._profile_waiters.clear()
+                        self._profile_results.clear()
                         queues = list(self._queues.values())
                         self._queues.clear()
                         self._detoks.clear()
                         self._stream_states.clear()
                         self._running = False
+                    for ev in waiters:
+                        ev.set()
                     for q in queues:
                         q.put(None)
                     return
@@ -567,10 +808,15 @@ class MPSchedulerManager:
         except Exception:
             traceback.print_exc()
             with self._lock:
+                waiters = list(self._profile_waiters.values())
+                self._profile_waiters.clear()
+                self._profile_results.clear()
                 queues = list(self._queues.values())
                 self._queues.clear()
                 self._detoks.clear()
                 self._stream_states.clear()
                 self._running = False
+            for ev in waiters:
+                ev.set()
             for q in queues:
                 q.put(None)

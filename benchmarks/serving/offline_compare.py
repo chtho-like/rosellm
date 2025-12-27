@@ -6,9 +6,11 @@ import importlib.util
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -50,6 +52,56 @@ def _maybe_add_sglang_source_sys_path() -> None:
     for candidate in reversed(candidates):
         if candidate.is_dir() and str(candidate) not in sys.path:
             sys.path.insert(0, str(candidate))
+
+
+def _maybe_add_trtllm_source_pythonpath_env(env: dict[str, str]) -> None:
+    if _module_available("tensorrt_llm"):
+        return
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate = repo_root / ".vscode" / "TensorRT-LLM"
+    if candidate.is_dir():
+        _append_pythonpath(env, str(candidate))
+
+
+def _maybe_add_trtllm_source_sys_path() -> None:
+    if _module_available("tensorrt_llm"):
+        return
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate = repo_root / ".vscode" / "TensorRT-LLM"
+    if candidate.is_dir() and str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+
+
+def _trtllm_available() -> bool:
+    cached: bool | None = getattr(_trtllm_available, "_cached", None)
+    if cached is not None:
+        return cached
+    if _module_available("tensorrt_llm"):
+        setattr(_trtllm_available, "_cached", True)
+        return True
+    if shutil.which("trtllm-serve") is not None:
+        setattr(_trtllm_available, "_cached", True)
+        return True
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate_root = repo_root / ".vscode" / "TensorRT-LLM"
+    if not candidate_root.is_dir():
+        setattr(_trtllm_available, "_cached", False)
+        return False
+
+    env = os.environ.copy()
+    _append_pythonpath(env, str(candidate_root))
+    try:
+        subprocess.check_output(
+            [sys.executable, "-c", "import tensorrt_llm"],
+            env=env,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+        )
+        setattr(_trtllm_available, "_cached", True)
+        return True
+    except Exception:
+        setattr(_trtllm_available, "_cached", False)
+        return False
 
 
 @dataclass(frozen=True)
@@ -128,6 +180,7 @@ def _collect_versions() -> dict[str, str]:
             "rosellm",
             "vllm",
             "sglang",
+            "tensorrt_llm",
             "torch",
             "transformers",
             "fastapi",
@@ -216,8 +269,75 @@ def _dtype_flag_sglang(dtype: str) -> dict[str, Any]:
     raise ValueError(f"unsupported dtype for SGLang: {dtype}")
 
 
+def _dtype_flag_trtllm(dtype: str) -> dict[str, Any]:
+    dtype = dtype.lower()
+    if dtype == "auto":
+        return {}
+    if dtype == "fp16":
+        return {"dtype": "float16"}
+    if dtype == "bf16":
+        return {"dtype": "bfloat16"}
+    if dtype == "fp32":
+        return {"dtype": "float32"}
+    raise ValueError(f"unsupported dtype for TensorRT-LLM: {dtype}")
+
+
+@contextmanager
+def _maybe_cuda_profiler(enabled: bool):
+    if not enabled:
+        yield
+        return
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.profiler.start()
+    try:
+        yield
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.profiler.stop()
+
+
+@contextmanager
+def _maybe_torch_profiler(enabled: bool, *, out_dir: Path, trace_name: str):
+    if not enabled:
+        yield
+        return
+    import torch
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+    with torch.profiler.profile(
+        activities=activities,
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+    ) as prof:
+        yield
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    prof.export_chrome_trace(str(out_dir / f"{trace_name}.trace.json"))
+
+
 def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
     import torch
+
+    profile_mode = str(getattr(args, "profile", "none")).lower()
+    if profile_mode == "both":
+        raise ValueError("--profile=both is only supported in compare mode")
+    torch_profile = profile_mode == "torch"
+    nsys_profile = profile_mode == "nsys"
+    profile_dir = getattr(args, "profile_dir", None)
+    if (torch_profile or nsys_profile) and profile_dir is None:
+        raise ValueError("--profile-dir is required when --profile!=none")
+    profile_out_dir = (
+        Path(str(profile_dir)).expanduser().resolve()
+        if profile_dir is not None
+        else None
+    )
 
     from rosellm.roseinfer.engine import (
         ChunkedOnlineScheduler,
@@ -269,6 +389,7 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
     use_chunked = bool(args.roseinfer_chunked_prefill)
     prefill_chunk_size = int(args.roseinfer_prefill_chunk_size)
     use_prefix_cache = bool(args.roseinfer_prefix_cache)
+    overlap_schedule = bool(getattr(args, "roseinfer_overlap_schedule", True))
     if use_chunked and not bool(args.roseinfer_paged_attn):
         print("[warn] disabling roseinfer chunked prefill (requires paged attention)")
         use_chunked = False
@@ -305,12 +426,14 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
                 max_batch_size=int(args.max_batch_size),
                 prefill_chunk_size=prefill_chunk_size,
                 use_prefix_cache=use_prefix_cache,
+                overlap_schedule=overlap_schedule,
             )
         else:
             scheduler = OnlineScheduler(
                 engine,
                 max_batch_size=int(args.max_batch_size),
                 use_prefix_cache=use_prefix_cache,
+                overlap_schedule=overlap_schedule,
             )
         warmup_reqs = make_requests(
             min(int(args.warmup_prompts), int(args.num_prompts)),
@@ -328,22 +451,29 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
             max_batch_size=int(args.max_batch_size),
             prefill_chunk_size=prefill_chunk_size,
             use_prefix_cache=use_prefix_cache,
+            overlap_schedule=overlap_schedule,
         )
     else:
         scheduler = OnlineScheduler(
             engine,
             max_batch_size=int(args.max_batch_size),
             use_prefix_cache=use_prefix_cache,
+            overlap_schedule=overlap_schedule,
         )
     reqs = make_requests(int(args.num_prompts), output_len=int(args.output_len))
     total_input_tokens = sum(len(r.prompt_token_ids or []) for r in reqs)
 
-    t0 = time.perf_counter()
-    scheduler.add_requests(reqs)
-    t1 = time.perf_counter()
-    while scheduler.has_unfinished():
-        scheduler.step()
-    t2 = time.perf_counter()
+    with _maybe_torch_profiler(
+        torch_profile,
+        out_dir=profile_out_dir or Path("."),
+        trace_name="trace",
+    ), _maybe_cuda_profiler(nsys_profile):
+        t0 = time.perf_counter()
+        scheduler.add_requests(reqs)
+        t1 = time.perf_counter()
+        while scheduler.has_unfinished():
+            scheduler.step()
+        t2 = time.perf_counter()
 
     total_output_tokens = 0
     for sess in scheduler._sessions.values():  # type: ignore[attr-defined]
@@ -379,12 +509,27 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
             "fused_ops": bool(args.roseinfer_fused_ops),
             "fused_sampler": bool(args.roseinfer_fused_sampler),
             "fused_kv_append": bool(args.roseinfer_fused_kv_append),
+            "overlap_schedule": overlap_schedule,
         },
     )
 
 
 def _run_vllm(args: argparse.Namespace) -> OfflineResult:
     from vllm import LLM, SamplingParams
+
+    profile_mode = str(getattr(args, "profile", "none")).lower()
+    if profile_mode == "both":
+        raise ValueError("--profile=both is only supported in compare mode")
+    torch_profile = profile_mode == "torch"
+    nsys_profile = profile_mode == "nsys"
+    profile_dir = getattr(args, "profile_dir", None)
+    if (torch_profile or nsys_profile) and profile_dir is None:
+        raise ValueError("--profile-dir is required when --profile!=none")
+    profile_out_dir = (
+        Path(str(profile_dir)).expanduser().resolve()
+        if profile_dir is not None
+        else None
+    )
 
     num_prompts = int(args.num_prompts)
     input_len = int(args.input_len)
@@ -437,12 +582,17 @@ def _run_vllm(args: argparse.Namespace) -> OfflineResult:
         detokenize=False,
     )
 
-    t0 = time.perf_counter()
-    try:
-        outputs = llm.generate(prompts, sparams, use_tqdm=False)
-    except TypeError:
-        outputs = llm.generate(prompts, sparams)
-    t1 = time.perf_counter()
+    with _maybe_torch_profiler(
+        torch_profile,
+        out_dir=profile_out_dir or Path("."),
+        trace_name="trace",
+    ), _maybe_cuda_profiler(nsys_profile):
+        t0 = time.perf_counter()
+        try:
+            outputs = llm.generate(prompts, sparams, use_tqdm=False)
+        except TypeError:
+            outputs = llm.generate(prompts, sparams)
+        t1 = time.perf_counter()
 
     total_input_tokens = sum(len(ids) for ids in prompt_token_ids)
     total_output_tokens = 0
@@ -477,6 +627,20 @@ def _run_vllm(args: argparse.Namespace) -> OfflineResult:
 def _run_sglang(args: argparse.Namespace) -> OfflineResult:
     _maybe_add_sglang_source_sys_path()
     from sglang.srt.entrypoints.engine import Engine
+
+    profile_mode = str(getattr(args, "profile", "none")).lower()
+    if profile_mode == "both":
+        raise ValueError("--profile=both is only supported in compare mode")
+    torch_profile = profile_mode == "torch"
+    nsys_profile = profile_mode == "nsys"
+    profile_dir = getattr(args, "profile_dir", None)
+    if (torch_profile or nsys_profile) and profile_dir is None:
+        raise ValueError("--profile-dir is required when --profile!=none")
+    profile_out_dir = (
+        Path(str(profile_dir)).expanduser().resolve()
+        if profile_dir is not None
+        else None
+    )
 
     num_prompts = int(args.num_prompts)
     input_len = int(args.input_len)
@@ -534,12 +698,17 @@ def _run_sglang(args: argparse.Namespace) -> OfflineResult:
             }
             for _ in range(num_prompts)
         ]
-        t0 = time.perf_counter()
-        outputs = engine.generate(
-            input_ids=prompt_token_ids,
-            sampling_params=sampling,
-        )
-        t1 = time.perf_counter()
+        with _maybe_torch_profiler(
+            torch_profile,
+            out_dir=profile_out_dir or Path("."),
+            trace_name="trace",
+        ), _maybe_cuda_profiler(nsys_profile):
+            t0 = time.perf_counter()
+            outputs = engine.generate(
+                input_ids=prompt_token_ids,
+                sampling_params=sampling,
+            )
+            t1 = time.perf_counter()
     finally:
         engine.shutdown()
 
@@ -568,9 +737,111 @@ def _run_sglang(args: argparse.Namespace) -> OfflineResult:
     )
 
 
+def _run_trtllm(args: argparse.Namespace) -> OfflineResult:
+    _maybe_add_trtllm_source_sys_path()
+    from tensorrt_llm import LLM, SamplingParams
+
+    profile_mode = str(getattr(args, "profile", "none")).lower()
+    if profile_mode == "both":
+        raise ValueError("--profile=both is only supported in compare mode")
+    torch_profile = profile_mode == "torch"
+    nsys_profile = profile_mode == "nsys"
+    profile_dir = getattr(args, "profile_dir", None)
+    if (torch_profile or nsys_profile) and profile_dir is None:
+        raise ValueError("--profile-dir is required when --profile!=none")
+    profile_out_dir = (
+        Path(str(profile_dir)).expanduser().resolve()
+        if profile_dir is not None
+        else None
+    )
+
+    num_prompts = int(args.num_prompts)
+    input_len = int(args.input_len)
+    output_len = int(args.output_len)
+    vocab_size = _resolve_vocab_size(args.model)
+    prompt_token_ids = _make_prompt_token_ids(
+        num_prompts=num_prompts,
+        input_len=input_len,
+        seed=int(args.seed),
+        vocab_size=vocab_size,
+    )
+
+    llm = LLM(
+        model=args.model,
+        tensor_parallel_size=int(args.tensor_parallel_size),
+        trust_remote_code=True,
+        skip_tokenizer_init=True,
+        **_dtype_flag_trtllm(str(args.dtype)),
+    )
+    try:
+        if not bool(args.skip_warmup) and prompt_token_ids:
+            warmup = SamplingParams(
+                max_tokens=1,
+                temperature=0.0,
+                top_p=1.0,
+                top_k=1,
+                ignore_eos=True,
+                detokenize=False,
+            )
+            llm.generate(
+                [{"prompt_token_ids": prompt_token_ids[0]}],
+                warmup,
+                use_tqdm=False,
+            )
+
+        prompts = [{"prompt_token_ids": ids} for ids in prompt_token_ids]
+        sparams = SamplingParams(
+            max_tokens=output_len,
+            temperature=float(args.temperature),
+            top_p=float(args.top_p),
+            top_k=int(args.top_k),
+            ignore_eos=bool(args.ignore_eos),
+            detokenize=False,
+        )
+        with _maybe_torch_profiler(
+            torch_profile,
+            out_dir=profile_out_dir or Path("."),
+            trace_name="trace",
+        ), _maybe_cuda_profiler(nsys_profile):
+            t0 = time.perf_counter()
+            outputs = llm.generate(prompts, sparams, use_tqdm=False)
+            t1 = time.perf_counter()
+    finally:
+        llm.shutdown()
+
+    total_input_tokens = sum(len(ids) for ids in prompt_token_ids)
+    total_output_tokens = 0
+    for out in outputs if isinstance(outputs, list) else [outputs]:
+        try:
+            total_output_tokens += len(out.outputs[0].token_ids)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    total_s = float(t1 - t0)
+
+    return OfflineResult(
+        backend="trtllm",
+        model=args.model,
+        device="cuda",
+        num_prompts=num_prompts,
+        input_len=input_len,
+        output_len=output_len,
+        total_input_tokens=total_input_tokens,
+        total_output_tokens=total_output_tokens,
+        prefill_s=None,
+        decode_s=None,
+        total_s=total_s,
+        request_throughput_rps=float(num_prompts / max(total_s, 1e-9)),
+        output_throughput_tps=float(total_output_tokens / max(total_s, 1e-9)),
+        total_throughput_tps=float(
+            (total_input_tokens + total_output_tokens) / max(total_s, 1e-9)
+        ),
+        extra={},
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Offline throughput benchmark: roseinfer vs vLLM vs sglang.",
+        description="Offline throughput benchmark: roseinfer vs vLLM vs sglang vs TensorRT-LLM.",
     )
     parser.add_argument("--model", type=str, default="gpt2", help="HF model ID.")
     parser.add_argument(
@@ -580,7 +851,7 @@ def parse_args() -> argparse.Namespace:
         "--gpu",
         type=str,
         default="0",
-        help="CUDA_VISIBLE_DEVICES for vLLM/sglang/roseinfer.",
+        help="CUDA_VISIBLE_DEVICES for vLLM/sglang/trtllm/roseinfer.",
     )
     parser.add_argument(
         "--sglang-attention-backend",
@@ -610,7 +881,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="fp16",
         choices=["auto", "fp16", "bf16", "fp32"],
-        help="DType for vLLM/SGLang and roseinfer AMP (best-effort).",
+        help="DType for vLLM/SGLang/TensorRT-LLM and roseinfer AMP (best-effort).",
     )
     parser.add_argument(
         "--temperature", type=float, default=0.7, help="Sampling temperature."
@@ -624,7 +895,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument(
-        "--tensor-parallel-size", type=int, default=1, help="TP size for vLLM/sglang."
+        "--tensor-parallel-size",
+        type=int,
+        default=1,
+        help="TP size for vLLM/sglang/trtllm.",
     )
     parser.add_argument(
         "--max-batch-size",
@@ -803,6 +1077,24 @@ def parse_args() -> argparse.Namespace:
         help="Run roseinfer twice: fused KV append on/off (for A/B benchmark).",
     )
     parser.add_argument(
+        "--roseinfer-overlap-schedule",
+        dest="roseinfer_overlap_schedule",
+        action="store_true",
+        help="Enable CPU/GPU overlap scheduling for roseinfer (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-overlap-schedule",
+        dest="roseinfer_overlap_schedule",
+        action="store_false",
+        help="Disable CPU/GPU overlap scheduling for roseinfer.",
+    )
+    parser.set_defaults(roseinfer_overlap_schedule=True)
+    parser.add_argument(
+        "--roseinfer-compare-overlap-schedule",
+        action="store_true",
+        help="Run roseinfer twice: overlap scheduling on/off (for A/B benchmark).",
+    )
+    parser.add_argument(
         "--roseinfer-label",
         type=str,
         default="roseinfer",
@@ -815,6 +1107,45 @@ def parse_args() -> argparse.Namespace:
         help="Directory to store intermediate files and combined results.",
     )
     parser.add_argument(
+        "--profile",
+        type=str,
+        default="none",
+        choices=["none", "torch", "nsys", "both"],
+        help=(
+            "Extra profiling stage (separate run; not included in offline_results.json). "
+            "Use --profile-only to skip the throughput benchmark."
+        ),
+    )
+    parser.add_argument(
+        "--profile-only",
+        action="store_true",
+        help="Skip throughput benchmark; only run the profiling stage.",
+    )
+    parser.add_argument(
+        "--profile-num-prompts",
+        type=int,
+        default=8,
+        help="Number of prompts for the profiling stage (default: 8).",
+    )
+    parser.add_argument(
+        "--profile-input-len",
+        type=int,
+        default=256,
+        help="Prompt length for the profiling stage (default: 256).",
+    )
+    parser.add_argument(
+        "--profile-output-len",
+        type=int,
+        default=32,
+        help="Output length for the profiling stage (default: 32).",
+    )
+    parser.add_argument(
+        "--profile-dir",
+        type=str,
+        default=None,
+        help="(Internal) Output dir for a single-backend profiling run.",
+    )
+    parser.add_argument(
         "--server-cpus",
         type=str,
         default=None,
@@ -824,13 +1155,13 @@ def parse_args() -> argparse.Namespace:
         "--backends",
         type=str,
         default="roseinfer,vllm,sglang",
-        help="Comma-separated backends to run in compare mode.",
+        help="Comma-separated backends to run in compare mode (roseinfer,vllm,sglang,trtllm).",
     )
     parser.add_argument(
         "--backend",
         type=str,
         default=None,
-        choices=["roseinfer", "vllm", "sglang"],
+        choices=["roseinfer", "vllm", "sglang", "trtllm"],
         help="Run a single backend and print JSON to stdout (internal).",
     )
     return parser.parse_args()
@@ -845,6 +1176,8 @@ def _run_single_backend(args: argparse.Namespace) -> OfflineResult:
         return _run_vllm(args)
     if args.backend == "sglang":
         return _run_sglang(args)
+    if args.backend == "trtllm":
+        return _run_trtllm(args)
     raise ValueError(f"unknown backend: {args.backend}")
 
 
@@ -867,6 +1200,7 @@ def _run_compare(args: argparse.Namespace) -> None:
     env["OMP_NUM_THREADS"] = str(len(server_cpus))
     env["MKL_NUM_THREADS"] = str(len(server_cpus))
     _maybe_add_sglang_source_pythonpath_env(env)
+    _maybe_add_trtllm_source_pythonpath_env(env)
 
     results: list[OfflineResult] = []
     backend_wall_s: dict[str, float] = {}
@@ -890,10 +1224,14 @@ def _run_compare(args: argparse.Namespace) -> None:
         roseinfer_fused_mlp: bool | None = None
         roseinfer_fused_sampler: bool | None = None
         roseinfer_fused_kv_append: bool | None = None
+        roseinfer_overlap_schedule: bool | None = None
 
     run_specs: list[RunSpec] = []
     for backend in base_backends:
         if backend != "roseinfer":
+            if backend == "trtllm" and not _trtllm_available():
+                print("[warn] tensorrt_llm not available; skipping backend 'trtllm'")
+                continue
             run_specs.append(RunSpec(base_backend=backend, label=backend))
             continue
         variants = roseinfer_prefill_backends or [
@@ -903,20 +1241,23 @@ def _run_compare(args: argparse.Namespace) -> None:
         base_fused_mlp = bool(args.roseinfer_fused_mlp)
         base_fused_sampler = bool(args.roseinfer_fused_sampler)
         base_fused_kv_append = bool(args.roseinfer_fused_kv_append)
-        cfgs: list[tuple[bool, bool, bool, bool]] = []
-        seen: set[tuple[bool, bool, bool, bool]] = set()
+        base_overlap = bool(getattr(args, "roseinfer_overlap_schedule", True))
+        cfgs: list[tuple[bool, bool, bool, bool, bool]] = []
+        seen: set[tuple[bool, bool, bool, bool, bool]] = set()
 
         def add_cfg(
             fused_ops: bool,
             fused_mlp: bool,
             fused_sampler: bool,
             fused_kv_append: bool,
+            overlap_schedule: bool,
         ) -> None:
             cfg = (
                 bool(fused_ops),
                 bool(fused_mlp),
                 bool(fused_sampler),
                 bool(fused_kv_append),
+                bool(overlap_schedule),
             )
             if cfg in seen:
                 return
@@ -924,7 +1265,11 @@ def _run_compare(args: argparse.Namespace) -> None:
             cfgs.append(cfg)
 
         add_cfg(
-            base_fused_ops, base_fused_mlp, base_fused_sampler, base_fused_kv_append
+            base_fused_ops,
+            base_fused_mlp,
+            base_fused_sampler,
+            base_fused_kv_append,
+            base_overlap,
         )
         if bool(getattr(args, "roseinfer_compare_fused_ops", False)):
             add_cfg(
@@ -932,6 +1277,7 @@ def _run_compare(args: argparse.Namespace) -> None:
                 base_fused_mlp,
                 base_fused_sampler,
                 base_fused_kv_append,
+                base_overlap,
             )
         if bool(getattr(args, "roseinfer_compare_fused_mlp", False)):
             add_cfg(
@@ -939,6 +1285,7 @@ def _run_compare(args: argparse.Namespace) -> None:
                 (not base_fused_mlp),
                 base_fused_sampler,
                 base_fused_kv_append,
+                base_overlap,
             )
         if bool(getattr(args, "roseinfer_compare_fused_sampler", False)):
             add_cfg(
@@ -946,6 +1293,7 @@ def _run_compare(args: argparse.Namespace) -> None:
                 base_fused_mlp,
                 (not base_fused_sampler),
                 base_fused_kv_append,
+                base_overlap,
             )
         if bool(getattr(args, "roseinfer_compare_fused_kv_append", False)):
             add_cfg(
@@ -953,6 +1301,15 @@ def _run_compare(args: argparse.Namespace) -> None:
                 base_fused_mlp,
                 base_fused_sampler,
                 (not base_fused_kv_append),
+                base_overlap,
+            )
+        if bool(getattr(args, "roseinfer_compare_overlap_schedule", False)):
+            add_cfg(
+                base_fused_ops,
+                base_fused_mlp,
+                base_fused_sampler,
+                base_fused_kv_append,
+                (not base_overlap),
             )
         for prefill_backend in variants:
             prefill_backend = str(prefill_backend)
@@ -971,7 +1328,7 @@ def _run_compare(args: argparse.Namespace) -> None:
                 if prefill_backend == "auto"
                 else f"roseinfer+{prefill_backend}"
             )
-            for fused_ops, fused_mlp, fused_sampler, fused_kv_append in cfgs:
+            for fused_ops, fused_mlp, fused_sampler, fused_kv_append, overlap in cfgs:
                 label = base_label
                 if not fused_ops:
                     label += "+nofuse"
@@ -981,6 +1338,8 @@ def _run_compare(args: argparse.Namespace) -> None:
                     label += "+nosampler"
                 if not fused_kv_append:
                     label += "+nokv"
+                if not overlap:
+                    label += "+nooverlap"
                 run_specs.append(
                     RunSpec(
                         base_backend="roseinfer",
@@ -990,11 +1349,242 @@ def _run_compare(args: argparse.Namespace) -> None:
                         roseinfer_fused_mlp=bool(fused_mlp),
                         roseinfer_fused_sampler=bool(fused_sampler),
                         roseinfer_fused_kv_append=bool(fused_kv_append),
+                        roseinfer_overlap_schedule=bool(overlap),
                     )
                 )
 
     if not run_specs:
         raise ValueError("no backends to run (all candidates were skipped)")
+
+    profile_mode = str(getattr(args, "profile", "none")).lower()
+    profile_only = bool(getattr(args, "profile_only", False))
+    if profile_only and profile_mode == "none":
+        raise ValueError("--profile-only requires --profile torch|nsys|both")
+    if profile_mode not in ("none", "torch", "nsys", "both"):
+        raise ValueError("--profile must be one of: none, torch, nsys, both")
+
+    def run_profile_stage() -> None:
+        if profile_mode == "none":
+            return
+        tools = ["torch", "nsys"] if profile_mode == "both" else [profile_mode]
+        profile_num_prompts = int(getattr(args, "profile_num_prompts", 8))
+        profile_input_len = int(getattr(args, "profile_input_len", 256))
+        profile_output_len = int(getattr(args, "profile_output_len", 32))
+        if profile_num_prompts <= 0:
+            raise ValueError("--profile-num-prompts must be >= 1")
+        if profile_input_len <= 0:
+            raise ValueError("--profile-input-len must be >= 1")
+        if profile_output_len <= 0:
+            raise ValueError("--profile-output-len must be >= 1")
+
+        profiles_root = run_dir / "profiles"
+        profiles_root.mkdir(parents=True, exist_ok=True)
+
+        profile_start_time = _iso_now()
+        profile_t0 = time.perf_counter()
+        manifest: dict[str, Any] = {
+            "meta": {
+                "profile": profile_mode,
+                "profile_only": profile_only,
+                "profile_num_prompts": profile_num_prompts,
+                "profile_input_len": profile_input_len,
+                "profile_output_len": profile_output_len,
+                "server_cpus": server_cpus,
+                "tools": tools,
+                "backends": [spec.label for spec in run_specs],
+                "profile_start_time": profile_start_time,
+                "versions": versions,
+            },
+            "runs": [],
+        }
+
+        cpu_str = _format_cpu_set(server_cpus)
+        script_path = str(Path(__file__).resolve())
+        for tool in tools:
+            for spec in run_specs:
+                base_backend = spec.base_backend
+                label = spec.label
+                out_dir = profiles_root / tool / label
+                out_dir.mkdir(parents=True, exist_ok=True)
+
+                profile_env = env.copy()
+                profile_env["ROSEINFER_NVTX"] = "1"
+
+                py_cmd = [
+                    sys.executable,
+                    script_path,
+                    "--backend",
+                    base_backend,
+                    "--model",
+                    args.model,
+                    "--device",
+                    args.device,
+                    "--gpu",
+                    args.gpu,
+                    "--dtype",
+                    str(args.dtype),
+                    "--num-prompts",
+                    str(profile_num_prompts),
+                    "--input-len",
+                    str(profile_input_len),
+                    "--output-len",
+                    str(profile_output_len),
+                    "--temperature",
+                    str(float(args.temperature)),
+                    "--top-p",
+                    str(float(args.top_p)),
+                    "--top-k",
+                    str(int(args.top_k)),
+                    "--seed",
+                    str(int(args.seed)),
+                    "--tensor-parallel-size",
+                    str(int(args.tensor_parallel_size)),
+                    "--max-batch-size",
+                    str(int(args.max_batch_size)),
+                    "--warmup-prompts",
+                    str(int(args.warmup_prompts)),
+                    "--output-dir",
+                    str(run_dir),
+                    "--profile",
+                    tool,
+                    "--profile-dir",
+                    str(out_dir),
+                ]
+                if args.ignore_eos:
+                    py_cmd.append("--ignore-eos")
+                if args.skip_warmup:
+                    py_cmd.append("--skip-warmup")
+                if args.no_amp:
+                    py_cmd.append("--no-amp")
+                if args.bf16:
+                    py_cmd.append("--bf16")
+                if base_backend == "roseinfer":
+                    py_cmd += [
+                        "--roseinfer-prefill-attn-backend",
+                        str(
+                            spec.roseinfer_prefill_backend
+                            or args.roseinfer_prefill_attn_backend
+                        ),
+                        "--roseinfer-decode-attn-backend",
+                        str(args.roseinfer_decode_attn_backend),
+                        "--roseinfer-label",
+                        str(label),
+                    ]
+                    py_cmd.append(
+                        "--roseinfer-paged-attn"
+                        if bool(args.roseinfer_paged_attn)
+                        else "--roseinfer-no-paged-attn"
+                    )
+                    py_cmd.append(
+                        "--roseinfer-cuda-graph"
+                        if bool(args.roseinfer_cuda_graph)
+                        else "--roseinfer-no-cuda-graph"
+                    )
+                    py_cmd.append(
+                        "--roseinfer-chunked-prefill"
+                        if bool(args.roseinfer_chunked_prefill)
+                        else "--roseinfer-no-chunked-prefill"
+                    )
+                    py_cmd += [
+                        "--roseinfer-prefill-chunk-size",
+                        str(int(args.roseinfer_prefill_chunk_size)),
+                    ]
+                    py_cmd.append(
+                        "--roseinfer-prefix-cache"
+                        if bool(args.roseinfer_prefix_cache)
+                        else "--roseinfer-no-prefix-cache"
+                    )
+                    py_cmd.append(
+                        "--roseinfer-fused-ops"
+                        if bool(spec.roseinfer_fused_ops)
+                        else "--roseinfer-no-fused-ops"
+                    )
+                    py_cmd.append(
+                        "--roseinfer-fused-mlp"
+                        if bool(spec.roseinfer_fused_mlp)
+                        else "--roseinfer-no-fused-mlp"
+                    )
+                    py_cmd.append(
+                        "--roseinfer-fused-sampler"
+                        if bool(spec.roseinfer_fused_sampler)
+                        else "--roseinfer-no-fused-sampler"
+                    )
+                    py_cmd.append(
+                        "--roseinfer-fused-kv-append"
+                        if bool(spec.roseinfer_fused_kv_append)
+                        else "--roseinfer-no-fused-kv-append"
+                    )
+                    py_cmd.append(
+                        "--roseinfer-overlap-schedule"
+                        if bool(spec.roseinfer_overlap_schedule)
+                        else "--roseinfer-no-overlap-schedule"
+                    )
+
+                cmd: list[str] = ["taskset", "-c", cpu_str]
+                nsys_prefix = None
+                if tool == "nsys":
+                    nsys_prefix = out_dir / "nsys"
+                    cmd += [
+                        "nsys",
+                        "profile",
+                        "--force-overwrite=true",
+                        "--capture-range=cudaProfilerApi",
+                        "--stop-on-range-end=true",
+                        "--trace=cuda,nvtx,osrt",
+                        "--sample=none",
+                        "--trace-fork-before-exec=true",
+                        "-o",
+                        str(nsys_prefix),
+                    ]
+                cmd += py_cmd
+
+                t0 = time.perf_counter()
+                raw = subprocess.check_output(
+                    cmd, env=profile_env, stderr=subprocess.STDOUT
+                )
+                wall_s = float(time.perf_counter() - t0)
+                (out_dir / "stdout.log").write_bytes(raw)
+
+                parsed: dict[str, Any] | None = None
+                raw_text = raw.decode("utf-8", errors="replace")
+                for line in reversed(raw_text.splitlines()):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        parsed = json.loads(line)
+                        break
+                    except json.JSONDecodeError:
+                        continue
+                if parsed is not None:
+                    (out_dir / "result.json").write_text(
+                        json.dumps(parsed, indent=2), encoding="utf-8"
+                    )
+
+                manifest["runs"].append(
+                    {
+                        "tool": tool,
+                        "backend": label,
+                        "base_backend": base_backend,
+                        "cmd": cmd,
+                        "wall_s": wall_s,
+                        "output_dir": str(out_dir),
+                        "nsys_output_prefix": str(nsys_prefix) if nsys_prefix else None,
+                    }
+                )
+                print(f"[profile:{tool}] {label} wall={wall_s:.2f}s -> {out_dir}")
+
+        profile_wall_s = float(time.perf_counter() - profile_t0)
+        profile_end_time = _iso_now()
+        manifest["meta"]["profile_end_time"] = profile_end_time
+        manifest["meta"]["profile_wall_s"] = profile_wall_s
+        out_manifest = run_dir / "profile_manifest.json"
+        out_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        print(f"Wrote: {out_manifest}")
+
+    if profile_only:
+        run_profile_stage()
+        return
 
     for spec in run_specs:
         base_backend = spec.base_backend
@@ -1004,6 +1594,7 @@ def _run_compare(args: argparse.Namespace) -> None:
         fused_mlp = spec.roseinfer_fused_mlp
         fused_sampler = spec.roseinfer_fused_sampler
         fused_kv_append = spec.roseinfer_fused_kv_append
+        overlap_schedule = spec.roseinfer_overlap_schedule
         cmd = [
             "taskset",
             "-c",
@@ -1104,6 +1695,11 @@ def _run_compare(args: argparse.Namespace) -> None:
                 if bool(fused_kv_append)
                 else "--roseinfer-no-fused-kv-append"
             )
+            cmd.append(
+                "--roseinfer-overlap-schedule"
+                if bool(overlap_schedule)
+                else "--roseinfer-no-overlap-schedule"
+            )
 
         backend_t0 = time.perf_counter()
         raw = subprocess.check_output(cmd, env=env)
@@ -1178,6 +1774,10 @@ def _run_compare(args: argparse.Namespace) -> None:
             "roseinfer_compare_fused_kv_append": bool(
                 args.roseinfer_compare_fused_kv_append
             ),
+            "roseinfer_overlap_schedule": bool(args.roseinfer_overlap_schedule),
+            "roseinfer_compare_overlap_schedule": bool(
+                args.roseinfer_compare_overlap_schedule
+            ),
             "server_cpus": server_cpus,
             "backends": [spec.label for spec in run_specs],
             "run_start_time": run_start_time,
@@ -1191,6 +1791,8 @@ def _run_compare(args: argparse.Namespace) -> None:
     out_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"Wrote: {out_json}")
     print(f"Total wall time: {run_wall_s:.2f}s")
+
+    run_profile_stage()
 
 
 def main() -> None:

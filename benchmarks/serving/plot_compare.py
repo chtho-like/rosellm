@@ -18,6 +18,7 @@ BACKEND_LABELS = {
     "roseinfer+inproc": "roseinfer (in-proc)",
     "vllm": "vLLM",
     "sglang": "SGLang",
+    "trtllm": "TensorRT-LLM",
 }
 
 BACKEND_COLORS = {
@@ -27,6 +28,7 @@ BACKEND_COLORS = {
     "roseinfer+chunked": "#8c564b",
     "vllm": "#ff7f0e",
     "sglang": "#2ca02c",
+    "trtllm": "#4d4d4d",
 }
 
 BACKEND_MARKERS = {
@@ -37,6 +39,7 @@ BACKEND_MARKERS = {
     "roseinfer+inproc": "p",
     "vllm": "s",
     "sglang": "^",
+    "trtllm": "H",
 }
 
 
@@ -65,6 +68,8 @@ def _backend_label(key: str) -> str:
                 extras.append("no fused sampler")
             elif p == "nokv":
                 extras.append("no fused kv append")
+            elif p == "nooverlap":
+                extras.append("no overlap schedule")
         if extras:
             return f"roseinfer ({', '.join(extras)})"
         return "roseinfer"
@@ -77,6 +82,8 @@ def _backend_color(key: str) -> str:
     if key.startswith("roseinfer"):
         if "nofuse" in key.split("+"):
             return "#7f7f7f"
+        if "nooverlap" in key.split("+"):
+            return "#aec7e8"
         if "nomlp" in key.split("+"):
             return "#e377c2"
         if "nosampler" in key.split("+"):
@@ -94,6 +101,8 @@ def _backend_marker(key: str) -> str:
         parts = key.split("+")
         if "nofuse" in parts:
             return "X"
+        if "nooverlap" in parts:
+            return ">"
         if "nomlp" in parts:
             return "8"
         if "nosampler" in parts:
@@ -205,6 +214,7 @@ def _write_online_summary_md(payload: dict[str, Any], out_dir: Path) -> Path:
             "rosellm",
             "vllm",
             "sglang",
+            "tensorrt_llm",
             "torch",
             "transformers",
             "python",
@@ -277,6 +287,7 @@ def _write_offline_summary_md(payload: dict[str, Any], out_dir: Path) -> Path:
             "rosellm",
             "vllm",
             "sglang",
+            "tensorrt_llm",
             "torch",
             "transformers",
             "python",
@@ -459,6 +470,7 @@ def _plot_offline(payload: dict[str, Any], out_dir: Path) -> Path:
             "no fused mlp": "no MLP",
             "no fused sampler": "no samp",
             "no fused kv append": "no KV",
+            "no overlap schedule": "no overlap sched",
         }
         parts = [short.get(p, p) for p in parts]
         if not parts:
@@ -479,8 +491,8 @@ def _plot_offline(payload: dict[str, Any], out_dir: Path) -> Path:
     ]
     for ax, (key, title) in zip(axes, metrics, strict=True):
         vals = [float(r[key]) for r in results]
-        bar_width = 0.75
-        x = np.arange(len(vals), dtype=np.float32) * 1.25
+        bar_width = 0.70
+        x = np.arange(len(vals), dtype=np.float32) * 1.40
         ax.bar(
             x,
             vals,

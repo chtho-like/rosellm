@@ -1,4 +1,5 @@
 import argparse
+import os
 import queue
 import threading
 import time
@@ -142,6 +143,11 @@ class ChatCompletionRequest(BaseModel):
     do_sample: bool = True
     ignore_eos: bool = False
     stream: bool = False
+
+
+class StartProfileRequest(BaseModel):
+    tool: Literal["torch", "cuda"] = "torch"
+    output_dir: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -298,6 +304,7 @@ class SchedulerManager:
         chunked_prefill: bool = False,
         prefill_chunk_size: int = 256,
         prefix_cache: bool = True,
+        overlap_schedule: bool = True,
         prefill_max_batch_size: Optional[int] = None,
         prefill_max_tokens: Optional[int] = None,
         stream_interval: int = 1,
@@ -358,12 +365,14 @@ class SchedulerManager:
                 prefill_chunk_size=int(prefill_chunk_size),
                 prefill_max_batch_size=int(prefill_max_batch_size),
                 use_prefix_cache=bool(prefix_cache),
+                overlap_schedule=bool(overlap_schedule),
             )
         else:
             self.scheduler = OnlineScheduler(
                 engine,
                 max_batch_size=int(max_batch_size),
                 use_prefix_cache=bool(prefix_cache),
+                overlap_schedule=bool(overlap_schedule),
             )
         self.engine.warmup_paged_attention_decode()
         self._lock = threading.Lock()
@@ -383,6 +392,13 @@ class SchedulerManager:
         self._tokenize_threads: list[threading.Thread] = []
         self._next_request_id: int = 0
         self._running = True
+        self._profile_pending: tuple[
+            str, str, str | None, threading.Event
+        ] | None = None
+        self._profile_result: tuple[bool, str | None] | None = None
+        self._torch_prof: object | None = None
+        self._torch_prof_dir: str | None = None
+        self._cuda_prof_active = False
         if self._tokenize_q is not None:
             for i in range(self._tokenize_workers):
                 th = threading.Thread(
@@ -434,6 +450,125 @@ class SchedulerManager:
             return
         for rid in request_ids:
             self.scheduler.discard_request(rid)
+
+    def start_profile(
+        self,
+        *,
+        tool: str,
+        output_dir: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> None:
+        tool = str(tool).lower()
+        if tool not in ("torch", "cuda"):
+            raise ValueError("tool must be torch|cuda")
+        if tool == "torch" and output_dir is None:
+            raise ValueError("output_dir is required for torch profiler")
+
+        ack = threading.Event()
+        with self._lock:
+            if not self._running:
+                raise RuntimeError("SchedulerManager is closed")
+            if self._profile_pending is not None:
+                raise RuntimeError("profile request already pending")
+            self._profile_result = None
+            self._profile_pending = ("start", tool, output_dir, ack)
+            self._wakeup.set()
+        if not ack.wait(timeout=timeout_s):
+            raise TimeoutError("start_profile timed out")
+        with self._lock:
+            result = self._profile_result
+        if result is None:
+            raise RuntimeError("missing profile result")
+        ok, msg = result
+        if not ok:
+            raise RuntimeError(msg or "start_profile failed")
+
+    def stop_profile(
+        self,
+        *,
+        tool: str,
+        timeout_s: float = 30.0,
+    ) -> None:
+        tool = str(tool).lower()
+        if tool not in ("torch", "cuda"):
+            raise ValueError("tool must be torch|cuda")
+
+        ack = threading.Event()
+        with self._lock:
+            if not self._running:
+                raise RuntimeError("SchedulerManager is closed")
+            if self._profile_pending is not None:
+                raise RuntimeError("profile request already pending")
+            self._profile_result = None
+            self._profile_pending = ("stop", tool, None, ack)
+            self._wakeup.set()
+        if not ack.wait(timeout=timeout_s):
+            raise TimeoutError("stop_profile timed out")
+        with self._lock:
+            result = self._profile_result
+        if result is None:
+            raise RuntimeError("missing profile result")
+        ok, msg = result
+        if not ok:
+            raise RuntimeError(msg or "stop_profile failed")
+
+    def _profile_apply(self, action: str, tool: str, output_dir: str | None) -> None:
+        import torch
+
+        tool = str(tool).lower()
+        if action == "start":
+            if tool == "torch":
+                if self._torch_prof is not None:
+                    raise RuntimeError("torch profiler already running")
+                if output_dir is None:
+                    raise ValueError("output_dir is required for torch profiler")
+                os.makedirs(str(output_dir), exist_ok=True)
+                activities = [torch.profiler.ProfilerActivity.CPU]
+                if torch.cuda.is_available():
+                    activities.append(torch.profiler.ProfilerActivity.CUDA)
+                prof = torch.profiler.profile(
+                    activities=activities,
+                    record_shapes=True,
+                    profile_memory=True,
+                    with_stack=True,
+                )
+                prof.__enter__()
+                self._torch_prof = prof
+                self._torch_prof_dir = str(output_dir)
+                return
+            if tool == "cuda":
+                if self._cuda_prof_active:
+                    raise RuntimeError("cuda profiler already running")
+                if torch.cuda.is_available():
+                    torch.cuda.profiler.start()
+                self._cuda_prof_active = True
+                return
+            raise ValueError("tool must be torch|cuda")
+
+        if action == "stop":
+            if tool == "torch":
+                if self._torch_prof is None or self._torch_prof_dir is None:
+                    raise RuntimeError("torch profiler not running")
+                prof = self._torch_prof
+                out_dir = self._torch_prof_dir
+                self._torch_prof = None
+                self._torch_prof_dir = None
+                prof.__exit__(None, None, None)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                prof.export_chrome_trace(os.path.join(out_dir, "trace.json"))
+                return
+            if tool == "cuda":
+                if not self._cuda_prof_active:
+                    raise RuntimeError("cuda profiler not running")
+                self._cuda_prof_active = False
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.profiler.stop()
+                return
+            raise ValueError("tool must be torch|cuda")
+
+        raise ValueError("action must be start|stop")
 
     def add_request(
         self,
@@ -609,6 +744,22 @@ class SchedulerManager:
     def _worker_loop(self) -> None:
         try:
             while True:
+                profile_cmd: tuple[str, str, str | None, threading.Event] | None = None
+                with self._lock:
+                    profile_cmd = self._profile_pending
+                    self._profile_pending = None
+                if profile_cmd is not None:
+                    action, tool, output_dir, ack = profile_cmd
+                    ok = True
+                    msg: str | None = None
+                    try:
+                        self._profile_apply(action, tool, output_dir)
+                    except Exception as exc:
+                        ok = False
+                        msg = str(exc)
+                    with self._lock:
+                        self._profile_result = (ok, msg)
+                    ack.set()
 
                 def run_decode_once() -> None:
                     if not self.scheduler.has_unfinished():
@@ -882,6 +1033,41 @@ def create_app(
                 }
             ],
         }
+
+    @app.post("/start_profile")
+    def start_profile(body: StartProfileRequest) -> dict[str, str]:
+        tool = str(body.tool).lower()
+        try:
+            if tool == "torch":
+                if body.output_dir is None:
+                    raise ValueError("output_dir is required for torch profiler")
+                sched_manager.start_profile(
+                    tool="torch", output_dir=str(body.output_dir)
+                )
+            elif tool == "cuda":
+                sched_manager.start_profile(tool="cuda")
+            else:
+                raise ValueError("tool must be torch|cuda")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok"}
+
+    @app.post("/stop_profile")
+    def stop_profile() -> dict[str, str]:
+        last_error: str | None = None
+        ok = False
+        for tool in ("torch", "cuda"):
+            try:
+                sched_manager.stop_profile(tool=tool)
+                ok = True
+            except Exception as exc:
+                last_error = str(exc)
+        if not ok:
+            raise HTTPException(
+                status_code=400,
+                detail=last_error or "no active profiler",
+            )
+        return {"status": "ok"}
 
     @app.post("/generate", response_model=GenerateResponse)
     def generate(
@@ -1286,6 +1472,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(prefix_cache=True)
     parser.add_argument(
+        "--overlap-schedule",
+        dest="overlap_schedule",
+        action="store_true",
+        help="Enable CPU/GPU overlap scheduling (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-overlap-schedule",
+        dest="overlap_schedule",
+        action="store_false",
+        help="Disable CPU/GPU overlap scheduling.",
+    )
+    parser.set_defaults(overlap_schedule=True)
+    parser.add_argument(
         "--fused-ops",
         dest="fused_ops",
         action="store_true",
@@ -1443,6 +1642,7 @@ def main() -> None:
             chunked_prefill=bool(chunked_prefill),
             prefill_chunk_size=int(args.prefill_chunk_size),
             prefix_cache=bool(args.prefix_cache),
+            overlap_schedule=bool(args.overlap_schedule),
             max_batch_size=int(max_batch_size),
         )
         sched_manager: SchedulerManager | MPSchedulerManager = MPSchedulerManager(
@@ -1510,6 +1710,7 @@ def main() -> None:
             chunked_prefill=chunked_prefill,
             prefill_chunk_size=int(args.prefill_chunk_size),
             prefix_cache=bool(args.prefix_cache),
+            overlap_schedule=bool(args.overlap_schedule),
         )
 
     app = create_app(

@@ -35,6 +35,7 @@ def test_mp_scheduler_manager_streaming_cpu() -> None:
         chunked_prefill=False,
         prefill_chunk_size=256,
         prefix_cache=False,
+        overlap_schedule=True,
         max_batch_size=2,
         toy=ToyEngineSpec(config=cfg, seed=0),
     )

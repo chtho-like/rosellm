@@ -190,6 +190,7 @@ class InferenceEngine:
         block_size = 64
         max_context = max_position_embeddings or self.config.max_position_embeddings
         max_concurrency = max(1, kv_cache_max_concurrency)
+        self.kv_cache_max_concurrency = max_concurrency
         max_total_tokens = max_context * max_concurrency
         max_blocks_per_layer = (max_total_tokens + block_size - 1) // block_size
         self.block_size = block_size
@@ -251,6 +252,7 @@ class InferenceEngine:
         sess.prompt_length = 0
         sess.generated_ids = [token_id]
         sess.step_count = 1
+        sess.committed_step_count = 1
         try:
             self.decode_step_sessions([sess])
             torch.cuda.synchronize()
@@ -436,11 +438,12 @@ class InferenceEngine:
         token_id = int(next_token)
         session.generated_ids.append(token_id)
         session.step_count = 1
+        session.committed_step_count = 1
         if stop_on_eos:
             eos_id = self.eos_token_id
             if eos_id is not None and token_id == eos_id:
                 session.finished = True
-        if max_new_tokens > 0 and session.step_count >= max_new_tokens:
+        if max_new_tokens > 0 and session.committed_step_count >= max_new_tokens:
             session.finished = True
 
     @torch.no_grad()
@@ -1512,6 +1515,10 @@ class InferenceEngine:
     def decode_step_sessions(
         self,
         sessions: list["InferenceSession"],
+        *,
+        input_token_ids: Optional[list[int]] = None,
+        position_ids: Optional[list[int]] = None,
+        future_token_ids_map: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         with record_function("roseinfer.decode_step_sessions.total"):
             assert sessions
@@ -1521,16 +1528,33 @@ class InferenceEngine:
             batch_size = len(sessions)
             kvm = self.kv_manager
 
-            last_ids: list[int] = []
-            seq_lens: list[int] = []
-            for sess in sessions:
-                if sess.finished:
-                    continue
-                assert sess.generated_ids
-                last_ids.append(sess.generated_ids[-1])
-                seq_len = sess.prompt_length + sess.step_count - 1
-                seq_lens.append(seq_len)
-            assert len(last_ids) == batch_size
+            if input_token_ids is None:
+                last_ids: list[int] = []
+                seq_lens: list[int] = []
+                for sess in sessions:
+                    if sess.finished:
+                        continue
+                    assert sess.generated_ids
+                    last_ids.append(int(sess.generated_ids[-1]))
+                    seq_len = int(sess.prompt_length + sess.step_count - 1)
+                    seq_lens.append(seq_len)
+                assert len(last_ids) == batch_size
+            else:
+                if position_ids is None:
+                    raise ValueError(
+                        "position_ids must be set when input_token_ids is set"
+                    )
+                if (
+                    len(input_token_ids) != batch_size
+                    or len(position_ids) != batch_size
+                ):
+                    raise ValueError("input_token_ids/position_ids batch size mismatch")
+                last_ids = [int(x) for x in input_token_ids]
+                seq_lens = [int(x) for x in position_ids]
+
+            need_resolve = future_token_ids_map is not None and any(
+                int(t) < 0 for t in last_ids
+            )
             num_layers = kvm.num_layers
             num_heads = kvm.num_heads
             head_dim = kvm.head_dim
@@ -1616,6 +1640,14 @@ class InferenceEngine:
                     )
                     graph.slot_mapping.copy_(graph.slot_mapping_host, non_blocking=True)
                     graph.context_lens.copy_(graph.context_lens_host, non_blocking=True)
+                    if need_resolve:
+                        assert future_token_ids_map is not None
+                        ids = graph.input_ids
+                        ids[:] = torch.where(
+                            ids < 0,
+                            future_token_ids_map[torch.clamp(-ids, min=0)],
+                            ids,
+                        )
                     with _maybe_nvtx_range(
                         "roseinfer.model.forward.cuda_graph_replay", nvtx
                     ), record_function("roseinfer.model.forward.cuda_graph_replay"):
@@ -1631,6 +1663,13 @@ class InferenceEngine:
                         dtype=torch.long,
                         device=device,
                     ).view(batch_size, 1)
+                    if need_resolve:
+                        assert future_token_ids_map is not None
+                        input_ids[:] = torch.where(
+                            input_ids < 0,
+                            future_token_ids_map[torch.clamp(-input_ids, min=0)],
+                            input_ids,
+                        )
                     position_ids = lens.view(batch_size, 1)
                     slot_mapping = torch.tensor(
                         slot_ids,
@@ -1707,6 +1746,13 @@ class InferenceEngine:
                 dtype=torch.long,
                 device=device,
             ).view(batch_size, 1)
+            if need_resolve:
+                assert future_token_ids_map is not None
+                input_ids[:] = torch.where(
+                    input_ids < 0,
+                    future_token_ids_map[torch.clamp(-input_ids, min=0)],
+                    input_ids,
+                )
             position_ids = lens.view(batch_size, 1)
             max_len = max(seq_lens)
             past_mask = torch.arange(
@@ -1803,6 +1849,7 @@ class InferenceSession:
         self.do_sample: bool = False
         self.stop_on_eos: bool = True
         self.step_count: int = 0
+        self.committed_step_count: int = 0
         self.kv_manager = engine.kv_manager
         self.block_ids_per_layer: list[list[int]] = [
             [] for _ in range(self.kv_manager.num_layers)
@@ -1886,7 +1933,7 @@ class InferenceSession:
         base_ids: list[int] = []
         if self.input_ids is not None:
             base_ids = list(self.input_ids[0].tolist())
-        return base_ids + self.generated_ids
+        return base_ids + [int(t) for t in self.generated_ids if int(t) >= 0]
 
     def decode_text(self) -> str:
         token_ids = self.all_token_ids()
@@ -2048,11 +2095,12 @@ class InferenceSession:
         token_id = int(token_id)
         self.generated_ids.append(token_id)
         self.step_count += 1
+        self.committed_step_count += 1
         if self.stop_on_eos:
             eos_id = eng.eos_token_id
             if eos_id is not None and token_id == eos_id:
                 self.finished = True
-        if self.max_new_tokens > 0 and self.step_count >= self.max_new_tokens:
+        if self.max_new_tokens > 0 and self.committed_step_count >= self.max_new_tokens:
             self.finished = True
         return token_id
 
@@ -2441,12 +2489,32 @@ class OnlineRequest:
     request_id: Optional[int] = None
 
 
+@dataclass(slots=True)
+class _OverlapDecodeBatch:
+    rids: list[int]
+    sessions: list[InferenceSession]
+    placeholder_positions: list[int]
+    next_token_ids_cpu: torch.Tensor
+    copy_done: "torch.cuda.Event"
+
+
+@dataclass(slots=True)
+class _OverlapPrefillBatch:
+    all_rids: list[int]
+    all_sessions: list[InferenceSession]
+    ready_rids: list[int]
+    ready_sessions: list[InferenceSession]
+    next_token_ids_cpu: torch.Tensor
+    copy_done: "torch.cuda.Event"
+
+
 class OnlineScheduler:
     def __init__(
         self,
         engine: "InferenceEngine",
         max_batch_size: int = 8,
         use_prefix_cache: bool = True,
+        overlap_schedule: bool = True,
     ) -> None:
         self.engine = engine
         self.max_batch_size = max_batch_size
@@ -2455,6 +2523,30 @@ class OnlineScheduler:
         self._next_request_id: int = 0
         self._active_rids: deque[int] = deque()
         self._finished_ids: list[int] = []
+
+        self._overlap_schedule = bool(overlap_schedule)
+        self._overlap_schedule = (
+            self._overlap_schedule
+            and engine.device.type == "cuda"
+            and torch.cuda.is_available()
+        )
+        self._overlap_future_token_ids_ct: int = 0
+        self._overlap_future_token_ids_limit: int = 0
+        self._overlap_future_token_ids_map: torch.Tensor | None = None
+        self._overlap_pending: deque[_OverlapDecodeBatch] = deque()
+        self._overlap_inflight: dict[int, int] = {}
+        self._overlap_canceled: set[int] = set()
+        if self._overlap_schedule:
+            max_running = int(getattr(engine, "kv_cache_max_concurrency", 0) or 0)
+            max_running = max(1, max_running)
+            self._overlap_future_token_ids_limit = max_running * 3
+            # Leave headroom so (ct + batch_size) slices never exceed the map.
+            map_size = max_running * 5 + int(self.max_batch_size) + 8
+            self._overlap_future_token_ids_map = torch.empty(
+                (map_size,),
+                dtype=torch.long,
+                device=engine.device,
+            )
 
     @torch.no_grad()
     def add_request(
@@ -2642,6 +2734,7 @@ class OnlineScheduler:
                     tok = int(prefix_suffix_ids[idx][suffix_pos[idx]])
                     sess.generated_ids = [tok]
                     sess.step_count = 1
+                    sess.committed_step_count = 1
                 step_logits = eng.decode_step_sessions(active_sessions)
                 for b, idx in enumerate(active):
                     logits = step_logits[b : b + 1]
@@ -2653,6 +2746,7 @@ class OnlineScheduler:
                 sess = sessions[idx]
                 sess.generated_ids = []
                 sess.step_count = 0
+                sess.committed_step_count = 0
                 logits = last_logits_per_req[idx]
                 if logits is None:
                     raise RuntimeError(
@@ -2699,11 +2793,15 @@ class OnlineScheduler:
             )
             sess.generated_ids.append(int(token_id))
             sess.step_count = 1
+            sess.committed_step_count = 1
             if sess.stop_on_eos:
                 eos_id = eng.eos_token_id
                 if eos_id is not None and int(token_id) == eos_id:
                     sess.finished = True
-            if sess.max_new_tokens > 0 and sess.step_count >= sess.max_new_tokens:
+            if (
+                sess.max_new_tokens > 0
+                and sess.committed_step_count >= sess.max_new_tokens
+            ):
                 sess.finished = True
             if sess.finished:
                 sess.release_kv_blocks()
@@ -2717,6 +2815,8 @@ class OnlineScheduler:
         return rids
 
     def has_unfinished(self) -> bool:
+        if self._overlap_schedule and self._overlap_pending:
+            return True
         while self._active_rids:
             rid = self._active_rids[0]
             sess = self._sessions.get(rid)
@@ -2739,16 +2839,24 @@ class OnlineScheduler:
         session = self._sessions.get(request_id)
         if session is None:
             return []
-        return list(session.generated_ids)
+        return [int(t) for t in session.generated_ids if int(t) >= 0]
 
     def get_step_count(self, request_id: int) -> int:
         session = self._sessions.get(request_id)
         if session is None:
             return 0
-        return int(session.step_count)
+        return int(session.committed_step_count)
 
     @torch.no_grad()
     def step(self) -> dict[int, int]:
+        if self._overlap_schedule:
+            with record_function("roseinfer.scheduler.step.overlap"):
+                return self._step_overlap()
+        with record_function("roseinfer.scheduler.step.sync"):
+            return self._step_sync()
+
+    @torch.no_grad()
+    def _step_sync(self) -> dict[int, int]:
         if not self._active_rids:
             return {}
         selected_pairs: list[tuple[int, InferenceSession]] = []
@@ -2825,6 +2933,202 @@ class OnlineScheduler:
             self._finished_ids.extend(just_finished)
         return step_tokens
 
+    @torch.no_grad()
+    def _step_overlap(self) -> dict[int, int]:
+        eng = self.engine
+        nvtx = eng.device.type == "cuda" and os.environ.get("ROSEINFER_NVTX") == "1"
+        step_tokens: dict[int, int] = {}
+        just_finished: list[int] = []
+
+        # Schedule a new decode batch first.
+        selected_pairs: list[tuple[int, InferenceSession]] = []
+        with _maybe_nvtx_range(
+            "roseinfer.scheduler.overlap.schedule", nvtx
+        ), record_function("roseinfer.scheduler.overlap.schedule"):
+            max_examine = len(self._active_rids)
+            while (
+                len(selected_pairs) < self.max_batch_size
+                and self._active_rids
+                and max_examine > 0
+            ):
+                max_examine -= 1
+                rid = self._active_rids.popleft()
+                sess = self._sessions.get(rid)
+                if sess is None or sess.finished:
+                    continue
+                if not sess.generated_ids:
+                    continue
+                if sess.max_new_tokens > 0 and int(sess.step_count) >= int(
+                    sess.max_new_tokens
+                ):
+                    continue
+                selected_pairs.append((rid, sess))
+
+            if selected_pairs:
+                # Keep round-robin ordering even when overlap is enabled.
+                for rid, _ in selected_pairs:
+                    self._active_rids.append(rid)
+
+                rids = [rid for rid, _ in selected_pairs]
+                sessions = [sess for _, sess in selected_pairs]
+                input_ids = [int(sess.generated_ids[-1]) for sess in sessions]
+                pos_ids = [
+                    int(sess.prompt_length + sess.step_count - 1) for sess in sessions
+                ]
+                future_map = self._overlap_future_token_ids_map
+                if future_map is None:
+                    raise RuntimeError("overlap future token map is not initialized")
+
+                last_logits = eng.decode_step_sessions(
+                    sessions,
+                    input_token_ids=input_ids,
+                    position_ids=pos_ids,
+                    future_token_ids_map=future_map,
+                )
+
+                # Sample next token IDs on device without syncing to CPU.
+                groups: dict[tuple[float, int, float, bool], list[int]] = {}
+                for i, sess in enumerate(sessions):
+                    key = (
+                        float(sess.temperature),
+                        int(sess.top_k),
+                        float(sess.top_p),
+                        bool(sess.do_sample),
+                    )
+                    groups.setdefault(key, []).append(i)
+
+                next_ids = torch.empty(
+                    (len(sessions),),
+                    device=eng.device,
+                    dtype=torch.long,
+                )
+                for (temp, top_k, top_p, do_sample), idxs in groups.items():
+                    if len(idxs) == len(sessions) and idxs == list(
+                        range(len(sessions))
+                    ):
+                        next_ids = eng._sample_next_token_batch(
+                            logits=last_logits,
+                            temperature=temp,
+                            top_k=top_k,
+                            top_p=top_p,
+                            do_sample=do_sample,
+                        )
+                        break
+                    idx_t = torch.tensor(
+                        idxs,
+                        device=eng.device,
+                        dtype=torch.long,
+                    )
+                    logits_g = last_logits.index_select(0, idx_t)
+                    sampled = eng._sample_next_token_batch(
+                        logits=logits_g,
+                        temperature=temp,
+                        top_k=top_k,
+                        top_p=top_p,
+                        do_sample=do_sample,
+                    )
+                    next_ids.index_copy_(0, idx_t, sampled)
+
+                # Allocate placeholders for the next step and update the future map.
+                bs = int(len(sessions))
+                ct = int(self._overlap_future_token_ids_ct)
+                limit = int(self._overlap_future_token_ids_limit)
+                placeholder_positions: list[int] = []
+                for i, sess in enumerate(sessions):
+                    placeholder_positions.append(len(sess.generated_ids))
+                    sess.generated_ids.append(-(ct + i + 1))
+                    sess.step_count += 1
+
+                future_map[ct + 1 : ct + 1 + bs] = next_ids
+                self._overlap_future_token_ids_ct = (ct + bs) % max(1, limit)
+
+                # Async copy results to CPU and record an event for later synchronization.
+                next_ids_cpu = next_ids.to("cpu", non_blocking=True)
+                copy_done = torch.cuda.Event()
+                copy_done.record()
+                self._overlap_pending.append(
+                    _OverlapDecodeBatch(
+                        rids=rids,
+                        sessions=sessions,
+                        placeholder_positions=placeholder_positions,
+                        next_token_ids_cpu=next_ids_cpu,
+                        copy_done=copy_done,
+                    )
+                )
+                for rid in rids:
+                    self._overlap_inflight[rid] = self._overlap_inflight.get(rid, 0) + 1
+
+        # Process the oldest pending decode result (one-step delayed output).
+        with _maybe_nvtx_range(
+            "roseinfer.scheduler.overlap.process_pending", nvtx
+        ), record_function("roseinfer.scheduler.overlap.process_pending"):
+            if self._overlap_pending and (
+                len(self._overlap_pending) > 1 or not selected_pairs
+            ):
+                item = self._overlap_pending.popleft()
+                item.copy_done.synchronize()
+                token_ids = [int(x) for x in item.next_token_ids_cpu.tolist()]
+                for rid, sess, pos, token_id in zip(
+                    item.rids,
+                    item.sessions,
+                    item.placeholder_positions,
+                    token_ids,
+                ):
+                    inflight = self._overlap_inflight.get(rid, 0) - 1
+                    if inflight <= 0:
+                        self._overlap_inflight.pop(rid, None)
+                    else:
+                        self._overlap_inflight[rid] = inflight
+
+                    if rid in self._overlap_canceled:
+                        if pos < 0 or pos >= len(sess.generated_ids):
+                            raise RuntimeError(
+                                "overlap placeholder position out of range"
+                            )
+                        if int(sess.generated_ids[pos]) < 0:
+                            sess.generated_ids[pos] = int(token_id)
+                        if inflight <= 0:
+                            self._overlap_canceled.discard(rid)
+                            sess.release_kv_blocks()
+                            self._sessions.pop(rid, None)
+                        continue
+
+                    if sess.finished:
+                        if 0 <= pos < len(sess.generated_ids):
+                            sess.generated_ids.pop(pos)
+                            sess.step_count -= 1
+                        if inflight <= 0:
+                            just_finished.append(rid)
+                            sess.release_kv_blocks()
+                        continue
+
+                    if pos < 0 or pos >= len(sess.generated_ids):
+                        raise RuntimeError("overlap placeholder position out of range")
+                    if int(sess.generated_ids[pos]) < 0:
+                        sess.generated_ids[pos] = int(token_id)
+                    else:
+                        raise RuntimeError("overlap placeholder already resolved")
+                    sess.committed_step_count += 1
+
+                    if sess.stop_on_eos and eng.eos_token_id is not None:
+                        if int(token_id) == int(eng.eos_token_id):
+                            sess.finished = True
+                    if (
+                        sess.max_new_tokens > 0
+                        and sess.committed_step_count >= sess.max_new_tokens
+                    ):
+                        sess.finished = True
+
+                    step_tokens[rid] = int(token_id)
+
+                    if sess.finished and inflight <= 0:
+                        just_finished.append(rid)
+                        sess.release_kv_blocks()
+
+        if just_finished:
+            self._finished_ids.extend(just_finished)
+        return step_tokens
+
     def pop_finished_ids(self) -> list[int]:
         ids, self._finished_ids = self._finished_ids, []
         return ids
@@ -2839,7 +3143,15 @@ class OnlineScheduler:
         return session.decode_text()
 
     def discard_request(self, request_id: int) -> None:
-        session = self._sessions.pop(request_id, None)
+        rid = int(request_id)
+        session = self._sessions.get(rid)
+        if session is None:
+            return
+        if self._overlap_schedule and self._overlap_inflight.get(rid, 0) > 0:
+            session.finished = True
+            self._overlap_canceled.add(rid)
+            return
+        session = self._sessions.pop(rid, None)
         if session is not None:
             session.release_kv_blocks()
 
@@ -2853,6 +3165,7 @@ class ChunkedOnlineScheduler:
         prefill_chunk_size: int = 256,
         prefill_max_batch_size: Optional[int] = None,
         use_prefix_cache: bool = True,
+        overlap_schedule: bool = True,
     ) -> None:
         if max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
@@ -2880,11 +3193,39 @@ class ChunkedOnlineScheduler:
         self._finished_ids: list[int] = []
         self._next_request_id: int = 0
 
+        self._overlap_schedule = bool(overlap_schedule)
+        self._overlap_schedule = (
+            self._overlap_schedule
+            and engine.device.type == "cuda"
+            and torch.cuda.is_available()
+        )
+        self._overlap_future_token_ids_ct: int = 0
+        self._overlap_future_token_ids_limit: int = 0
+        self._overlap_future_token_ids_map: torch.Tensor | None = None
+        self._overlap_decode_pending: deque[_OverlapDecodeBatch] = deque()
+        self._overlap_prefill_pending: deque[_OverlapPrefillBatch] = deque()
+        self._overlap_inflight: dict[int, int] = {}
+        self._overlap_canceled: set[int] = set()
+        if self._overlap_schedule:
+            max_running = int(getattr(engine, "kv_cache_max_concurrency", 0) or 0)
+            max_running = max(1, max_running)
+            self._overlap_future_token_ids_limit = max_running * 3
+            map_size = max_running * 5 + int(self.max_batch_size) + 8
+            self._overlap_future_token_ids_map = torch.empty(
+                (map_size,),
+                dtype=torch.long,
+                device=engine.device,
+            )
+
     def pop_finished_ids(self) -> list[int]:
         ids, self._finished_ids = self._finished_ids, []
         return ids
 
     def has_unfinished(self) -> bool:
+        if self._overlap_schedule and (
+            self._overlap_decode_pending or self._overlap_prefill_pending
+        ):
+            return True
         while self._decode_rids:
             rid = self._decode_rids[0]
             sess = self._sessions.get(rid)
@@ -2914,13 +3255,13 @@ class ChunkedOnlineScheduler:
         session = self._sessions.get(request_id)
         if session is None:
             return []
-        return list(session.generated_ids)
+        return [int(t) for t in session.generated_ids if int(t) >= 0]
 
     def get_step_count(self, request_id: int) -> int:
         session = self._sessions.get(request_id)
         if session is None:
             return 0
-        return int(session.step_count)
+        return int(session.committed_step_count)
 
     def get_response(self, request_id: int) -> str:
         session = self._sessions[request_id]
@@ -2934,11 +3275,23 @@ class ChunkedOnlineScheduler:
         return session.decode_text()
 
     def discard_request(self, request_id: int) -> None:
-        session = self._sessions.pop(request_id, None)
+        rid = int(request_id)
+        session = self._sessions.get(rid)
+        if session is None:
+            self._prompt_token_ids.pop(rid, None)
+            self._cache_keys.pop(rid, None)
+            return
+        if self._overlap_schedule and self._overlap_inflight.get(rid, 0) > 0:
+            session.finished = True
+            self._overlap_canceled.add(rid)
+            self._prompt_token_ids.pop(rid, None)
+            self._cache_keys.pop(rid, None)
+            return
+        session = self._sessions.pop(rid, None)
         if session is not None:
             session.release_kv_blocks()
-        self._prompt_token_ids.pop(request_id, None)
-        self._cache_keys.pop(request_id, None)
+        self._prompt_token_ids.pop(rid, None)
+        self._cache_keys.pop(rid, None)
 
     @torch.no_grad()
     def add_request(
@@ -3052,13 +3405,17 @@ class ChunkedOnlineScheduler:
                 )
                 sess.generated_ids.append(int(token_id))
                 sess.step_count = 1
+                sess.committed_step_count = 1
                 if (
                     sess.stop_on_eos
                     and eng.eos_token_id is not None
                     and int(token_id) == int(eng.eos_token_id)
                 ):
                     sess.finished = True
-                if sess.max_new_tokens > 0 and sess.step_count >= sess.max_new_tokens:
+                if (
+                    sess.max_new_tokens > 0
+                    and sess.committed_step_count >= sess.max_new_tokens
+                ):
                     sess.finished = True
                 if sess.finished:
                     sess.release_kv_blocks()
@@ -3131,6 +3488,8 @@ class ChunkedOnlineScheduler:
 
     @torch.no_grad()
     def step(self) -> dict[int, int]:
+        if self._overlap_schedule:
+            return self._step_overlap()
         eng = self.engine
         step_tokens: dict[int, int] = {}
         just_finished: list[int] = []
@@ -3268,6 +3627,7 @@ class ChunkedOnlineScheduler:
                     token_id = int(next_token_ids[i])
                     sess.generated_ids.append(token_id)
                     sess.step_count = 1
+                    sess.committed_step_count = 1
                     if (
                         sess.stop_on_eos
                         and eng.eos_token_id is not None
@@ -3276,7 +3636,7 @@ class ChunkedOnlineScheduler:
                         sess.finished = True
                     if (
                         sess.max_new_tokens > 0
-                        and sess.step_count >= sess.max_new_tokens
+                        and sess.committed_step_count >= sess.max_new_tokens
                     ):
                         sess.finished = True
 
@@ -3286,6 +3646,328 @@ class ChunkedOnlineScheduler:
                     else:
                         self._decode_rids.append(rid)
                     step_tokens.setdefault(rid, token_id)
+
+        if just_finished:
+            self._finished_ids.extend(just_finished)
+        return step_tokens
+
+    @torch.no_grad()
+    def _step_overlap(self) -> dict[int, int]:
+        eng = self.engine
+        step_tokens: dict[int, int] = {}
+        just_finished: list[int] = []
+
+        future_map = self._overlap_future_token_ids_map
+        if future_map is None:
+            raise RuntimeError("overlap future token map is not initialized")
+
+        # 1) Schedule decode batch (enqueue GPU work first).
+        decode_pairs: list[tuple[int, InferenceSession]] = []
+        max_examine = len(self._decode_rids)
+        while (
+            len(decode_pairs) < self.max_batch_size
+            and self._decode_rids
+            and max_examine > 0
+        ):
+            max_examine -= 1
+            rid = self._decode_rids.popleft()
+            sess = self._sessions.get(rid)
+            if sess is None or sess.finished:
+                continue
+            if not sess.generated_ids:
+                continue
+            if sess.max_new_tokens > 0 and int(sess.step_count) >= int(
+                sess.max_new_tokens
+            ):
+                continue
+            decode_pairs.append((rid, sess))
+
+        if decode_pairs:
+            for rid, _ in decode_pairs:
+                self._decode_rids.append(rid)
+
+            decode_rids = [rid for rid, _ in decode_pairs]
+            decode_sessions = [sess for _, sess in decode_pairs]
+            input_ids = [int(sess.generated_ids[-1]) for sess in decode_sessions]
+            pos_ids = [
+                int(sess.prompt_length + sess.step_count - 1)
+                for sess in decode_sessions
+            ]
+            last_logits = eng.decode_step_sessions(
+                decode_sessions,
+                input_token_ids=input_ids,
+                position_ids=pos_ids,
+                future_token_ids_map=future_map,
+            )
+
+            groups: dict[tuple[float, int, float, bool], list[int]] = {}
+            for i, sess in enumerate(decode_sessions):
+                key = (
+                    float(sess.temperature),
+                    int(sess.top_k),
+                    float(sess.top_p),
+                    bool(sess.do_sample),
+                )
+                groups.setdefault(key, []).append(i)
+
+            next_ids = torch.empty(
+                (len(decode_sessions),),
+                device=eng.device,
+                dtype=torch.long,
+            )
+            for (temp, top_k, top_p, do_sample), idxs in groups.items():
+                if len(idxs) == len(decode_sessions) and idxs == list(
+                    range(len(decode_sessions))
+                ):
+                    next_ids = eng._sample_next_token_batch(
+                        logits=last_logits,
+                        temperature=temp,
+                        top_k=top_k,
+                        top_p=top_p,
+                        do_sample=do_sample,
+                    )
+                    break
+                idx_t = torch.tensor(idxs, device=eng.device, dtype=torch.long)
+                logits_g = last_logits.index_select(0, idx_t)
+                sampled = eng._sample_next_token_batch(
+                    logits=logits_g,
+                    temperature=temp,
+                    top_k=top_k,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                )
+                next_ids.index_copy_(0, idx_t, sampled)
+
+            bs = int(len(decode_sessions))
+            ct = int(self._overlap_future_token_ids_ct)
+            limit = int(self._overlap_future_token_ids_limit)
+            placeholder_positions: list[int] = []
+            for i, sess in enumerate(decode_sessions):
+                placeholder_positions.append(len(sess.generated_ids))
+                sess.generated_ids.append(-(ct + i + 1))
+                sess.step_count += 1
+
+            future_map[ct + 1 : ct + 1 + bs] = next_ids
+            self._overlap_future_token_ids_ct = (ct + bs) % max(1, limit)
+
+            next_ids_cpu = next_ids.to("cpu", non_blocking=True)
+            copy_done = torch.cuda.Event()
+            copy_done.record()
+            self._overlap_decode_pending.append(
+                _OverlapDecodeBatch(
+                    rids=decode_rids,
+                    sessions=decode_sessions,
+                    placeholder_positions=placeholder_positions,
+                    next_token_ids_cpu=next_ids_cpu,
+                    copy_done=copy_done,
+                )
+            )
+            for rid in decode_rids:
+                self._overlap_inflight[rid] = self._overlap_inflight.get(rid, 0) + 1
+
+        # 2) Schedule one prefill chunk batch.
+        prefill_batch = self._select_prefill_batch()
+        if prefill_batch:
+            prefill_rids = [rid for rid, _, _ in prefill_batch]
+            prefill_sessions = [sess for _, sess, _ in prefill_batch]
+            chunks = [chunk for _, _, chunk in prefill_batch]
+
+            last_logits = eng.prefill_chunk_sessions(
+                sessions=prefill_sessions,
+                chunk_token_ids=chunks,
+            )
+
+            ready_bs: list[int] = []
+            ready_rids: list[int] = []
+            ready_sessions: list[InferenceSession] = []
+            for b, (rid, sess, _) in enumerate(prefill_batch):
+                prompt_ids = self._prompt_token_ids.get(rid) or []
+                if int(sess.prompt_length) < len(prompt_ids):
+                    self._prefill_rids.append(rid)
+                    continue
+                ready_bs.append(b)
+                ready_rids.append(rid)
+                ready_sessions.append(sess)
+
+                if self.use_prefix_cache:
+                    cache_key = self._cache_keys.get(rid)
+                    if cache_key is not None:
+                        eng.prefix_cache.put(cache_key, sess, last_logits[b : b + 1])
+
+            if ready_sessions:
+                logits_ready = last_logits.index_select(
+                    0,
+                    torch.tensor(ready_bs, device=eng.device, dtype=torch.long),
+                )
+                groups: dict[tuple[float, int, float, bool], list[int]] = {}
+                for i, sess in enumerate(ready_sessions):
+                    key = (
+                        float(sess.temperature),
+                        int(sess.top_k),
+                        float(sess.top_p),
+                        bool(sess.do_sample),
+                    )
+                    groups.setdefault(key, []).append(i)
+
+                ready_next = torch.empty(
+                    (len(ready_sessions),),
+                    device=eng.device,
+                    dtype=torch.long,
+                )
+                for (temp, top_k, top_p, do_sample), idxs in groups.items():
+                    if len(idxs) == len(ready_sessions) and idxs == list(
+                        range(len(ready_sessions))
+                    ):
+                        ready_next = eng._sample_next_token_batch(
+                            logits=logits_ready,
+                            temperature=temp,
+                            top_k=top_k,
+                            top_p=top_p,
+                            do_sample=do_sample,
+                        )
+                        break
+                    idx_t = torch.tensor(idxs, device=eng.device, dtype=torch.long)
+                    logits_g = logits_ready.index_select(0, idx_t)
+                    sampled = eng._sample_next_token_batch(
+                        logits=logits_g,
+                        temperature=temp,
+                        top_k=top_k,
+                        top_p=top_p,
+                        do_sample=do_sample,
+                    )
+                    ready_next.index_copy_(0, idx_t, sampled)
+
+                next_ids_cpu = ready_next.to("cpu", non_blocking=True)
+            else:
+                next_ids_cpu = torch.empty((0,), dtype=torch.long, device="cpu")
+
+            copy_done = torch.cuda.Event()
+            copy_done.record()
+            self._overlap_prefill_pending.append(
+                _OverlapPrefillBatch(
+                    all_rids=prefill_rids,
+                    all_sessions=prefill_sessions,
+                    ready_rids=ready_rids,
+                    ready_sessions=ready_sessions,
+                    next_token_ids_cpu=next_ids_cpu,
+                    copy_done=copy_done,
+                )
+            )
+            for rid in prefill_rids:
+                self._overlap_inflight[rid] = self._overlap_inflight.get(rid, 0) + 1
+
+        # 3) Process one pending decode result (delayed output).
+        if self._overlap_decode_pending and (
+            len(self._overlap_decode_pending) > 1 or not decode_pairs
+        ):
+            item = self._overlap_decode_pending.popleft()
+            item.copy_done.synchronize()
+            token_ids = [int(x) for x in item.next_token_ids_cpu.tolist()]
+            for rid, sess, pos, token_id in zip(
+                item.rids,
+                item.sessions,
+                item.placeholder_positions,
+                token_ids,
+            ):
+                inflight = self._overlap_inflight.get(rid, 0) - 1
+                if inflight <= 0:
+                    self._overlap_inflight.pop(rid, None)
+                else:
+                    self._overlap_inflight[rid] = inflight
+
+                if rid in self._overlap_canceled:
+                    if pos < 0 or pos >= len(sess.generated_ids):
+                        raise RuntimeError("overlap placeholder position out of range")
+                    if int(sess.generated_ids[pos]) < 0:
+                        sess.generated_ids[pos] = int(token_id)
+                    if inflight <= 0:
+                        self._overlap_canceled.discard(rid)
+                        sess.release_kv_blocks()
+                        self._sessions.pop(rid, None)
+                        self._prompt_token_ids.pop(rid, None)
+                        self._cache_keys.pop(rid, None)
+                    continue
+
+                if sess.finished:
+                    if 0 <= pos < len(sess.generated_ids):
+                        sess.generated_ids.pop(pos)
+                        sess.step_count -= 1
+                    if inflight <= 0:
+                        just_finished.append(rid)
+                        sess.release_kv_blocks()
+                    continue
+
+                if pos < 0 or pos >= len(sess.generated_ids):
+                    raise RuntimeError("overlap placeholder position out of range")
+                if int(sess.generated_ids[pos]) < 0:
+                    sess.generated_ids[pos] = int(token_id)
+                else:
+                    raise RuntimeError("overlap placeholder already resolved")
+                sess.committed_step_count += 1
+
+                if sess.stop_on_eos and eng.eos_token_id is not None:
+                    if int(token_id) == int(eng.eos_token_id):
+                        sess.finished = True
+                if (
+                    sess.max_new_tokens > 0
+                    and sess.committed_step_count >= sess.max_new_tokens
+                ):
+                    sess.finished = True
+
+                step_tokens[rid] = int(token_id)
+
+                if sess.finished and inflight <= 0:
+                    just_finished.append(rid)
+                    sess.release_kv_blocks()
+
+        # 4) Process one pending prefill chunk completion (token outputs are delayed).
+        if self._overlap_prefill_pending and (
+            len(self._overlap_prefill_pending) > 1 or not prefill_batch
+        ):
+            item = self._overlap_prefill_pending.popleft()
+            item.copy_done.synchronize()
+
+            for rid, sess in zip(item.all_rids, item.all_sessions):
+                inflight = self._overlap_inflight.get(rid, 0) - 1
+                if inflight <= 0:
+                    self._overlap_inflight.pop(rid, None)
+                else:
+                    self._overlap_inflight[rid] = inflight
+
+                if rid in self._overlap_canceled and inflight <= 0:
+                    self._overlap_canceled.discard(rid)
+                    sess.release_kv_blocks()
+                    self._sessions.pop(rid, None)
+                    self._prompt_token_ids.pop(rid, None)
+                    self._cache_keys.pop(rid, None)
+
+            ready_token_ids = [int(x) for x in item.next_token_ids_cpu.tolist()]
+            for rid, sess, token_id in zip(
+                item.ready_rids, item.ready_sessions, ready_token_ids
+            ):
+                if rid in self._overlap_canceled:
+                    continue
+                sess.generated_ids.append(int(token_id))
+                sess.step_count = 1
+                sess.committed_step_count = 1
+                if (
+                    sess.stop_on_eos
+                    and eng.eos_token_id is not None
+                    and int(token_id) == int(eng.eos_token_id)
+                ):
+                    sess.finished = True
+                if (
+                    sess.max_new_tokens > 0
+                    and sess.committed_step_count >= sess.max_new_tokens
+                ):
+                    sess.finished = True
+
+                if sess.finished:
+                    just_finished.append(rid)
+                    sess.release_kv_blocks()
+                else:
+                    self._decode_rids.append(rid)
+                step_tokens.setdefault(rid, int(token_id))
 
         if just_finished:
             self._finished_ids.extend(just_finished)
