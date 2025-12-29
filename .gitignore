@@ -126,11 +126,13 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv-trtllm/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+model.cache
 
 # Spyder project settings
 .spyderproject

@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import os
 import queue
 import threading
@@ -7,7 +8,7 @@ import traceback
 import uuid
 from collections import deque
 from dataclasses import dataclass
-from typing import Dict, Iterator, List, Literal, Optional
+from typing import AsyncIterator, Dict, Iterator, List, Literal, Optional, Sequence
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -21,6 +22,7 @@ from .engine import (
     OnlineScheduler,
 )
 from .errors import SchedulerManagerOverloadedError
+from .hybrid_queue import HybridQueue
 from .mp import EngineProcessArgs, MPSchedulerManager
 
 
@@ -377,7 +379,8 @@ class SchedulerManager:
         self.engine.warmup_paged_attention_decode()
         self._lock = threading.Lock()
         self._wakeup = threading.Event()
-        self._queues: Dict[int, "queue.Queue[Optional[str]]"] = {}
+        self._async_loop: asyncio.AbstractEventLoop | None = None
+        self._queues: Dict[int, "HybridQueue[Optional[str]]"] = {}
         self._detoks: Dict[int, BaseDetokenizer] = {}
         self._stream_states: Dict[int, _StreamState] = {}
         self._record_token_timestamps = bool(record_token_timestamps)
@@ -392,10 +395,6 @@ class SchedulerManager:
         self._tokenize_threads: list[threading.Thread] = []
         self._next_request_id: int = 0
         self._running = True
-        self._profile_pending: tuple[
-            str, str, str | None, threading.Event
-        ] | None = None
-        self._profile_result: tuple[bool, str | None] | None = None
         self._torch_prof: object | None = None
         self._torch_prof_dir: str | None = None
         self._cuda_prof_active = False
@@ -413,6 +412,13 @@ class SchedulerManager:
             daemon=True,
         )
         self._worker.start()
+
+    def set_asyncio_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._async_loop = loop
+        with self._lock:
+            queues = list(self._queues.values())
+        for q in queues:
+            q.set_asyncio_loop(loop)
 
     def close(self) -> None:
         worker = self._worker
@@ -456,61 +462,31 @@ class SchedulerManager:
         *,
         tool: str,
         output_dir: str | None = None,
-        timeout_s: float = 30.0,
+        timeout_s: float = 300.0,
     ) -> None:
         tool = str(tool).lower()
         if tool not in ("torch", "cuda"):
             raise ValueError("tool must be torch|cuda")
         if tool == "torch" and output_dir is None:
             raise ValueError("output_dir is required for torch profiler")
-
-        ack = threading.Event()
         with self._lock:
             if not self._running:
                 raise RuntimeError("SchedulerManager is closed")
-            if self._profile_pending is not None:
-                raise RuntimeError("profile request already pending")
-            self._profile_result = None
-            self._profile_pending = ("start", tool, output_dir, ack)
-            self._wakeup.set()
-        if not ack.wait(timeout=timeout_s):
-            raise TimeoutError("start_profile timed out")
-        with self._lock:
-            result = self._profile_result
-        if result is None:
-            raise RuntimeError("missing profile result")
-        ok, msg = result
-        if not ok:
-            raise RuntimeError(msg or "start_profile failed")
+            self._profile_apply("start", tool, output_dir)
 
     def stop_profile(
         self,
         *,
         tool: str,
-        timeout_s: float = 30.0,
+        timeout_s: float = 300.0,
     ) -> None:
         tool = str(tool).lower()
         if tool not in ("torch", "cuda"):
             raise ValueError("tool must be torch|cuda")
-
-        ack = threading.Event()
         with self._lock:
             if not self._running:
                 raise RuntimeError("SchedulerManager is closed")
-            if self._profile_pending is not None:
-                raise RuntimeError("profile request already pending")
-            self._profile_result = None
-            self._profile_pending = ("stop", tool, None, ack)
-            self._wakeup.set()
-        if not ack.wait(timeout=timeout_s):
-            raise TimeoutError("stop_profile timed out")
-        with self._lock:
-            result = self._profile_result
-        if result is None:
-            raise RuntimeError("missing profile result")
-        ok, msg = result
-        if not ok:
-            raise RuntimeError(msg or "stop_profile failed")
+            self._profile_apply("stop", tool, None)
 
     def _profile_apply(self, action: str, tool: str, output_dir: str | None) -> None:
         import torch
@@ -526,11 +502,12 @@ class SchedulerManager:
                 activities = [torch.profiler.ProfilerActivity.CPU]
                 if torch.cuda.is_available():
                     activities.append(torch.profiler.ProfilerActivity.CUDA)
+                with_stack = os.environ.get("ROSEINFER_TORCH_PROFILE_WITH_STACK") == "1"
                 prof = torch.profiler.profile(
                     activities=activities,
                     record_shapes=True,
                     profile_memory=True,
-                    with_stack=True,
+                    with_stack=with_stack,
                 )
                 prof.__enter__()
                 self._torch_prof = prof
@@ -551,20 +528,20 @@ class SchedulerManager:
                     raise RuntimeError("torch profiler not running")
                 prof = self._torch_prof
                 out_dir = self._torch_prof_dir
-                self._torch_prof = None
-                self._torch_prof_dir = None
                 prof.__exit__(None, None, None)
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 prof.export_chrome_trace(os.path.join(out_dir, "trace.json"))
+                self._torch_prof = None
+                self._torch_prof_dir = None
                 return
             if tool == "cuda":
                 if not self._cuda_prof_active:
                     raise RuntimeError("cuda profiler not running")
-                self._cuda_prof_active = False
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                     torch.cuda.profiler.stop()
+                self._cuda_prof_active = False
                 return
             raise ValueError("tool must be torch|cuda")
 
@@ -591,7 +568,10 @@ class SchedulerManager:
             detok = self.engine._make_detok()
             request_id = self._next_request_id
             self._next_request_id += 1
-            q: "queue.Queue[Optional[str]]" = queue.Queue()
+            q: "HybridQueue[Optional[str]]" = HybridQueue()
+            loop = self._async_loop
+            if loop is not None:
+                q.set_asyncio_loop(loop)
             self._queues[request_id] = q
             self._detoks[request_id] = detok
             self._stream_states[request_id] = _StreamState()
@@ -741,25 +721,26 @@ class SchedulerManager:
                 self._detoks.pop(request_id, None)
                 self._stream_states.pop(request_id, None)
 
+    async def astream_text(self, request_id: int) -> AsyncIterator[str]:
+        with self._lock:
+            q = self._queues.get(request_id)
+        if q is None:
+            return
+        try:
+            while True:
+                piece = await q.aget()
+                if piece is None:
+                    break
+                yield piece
+        finally:
+            with self._lock:
+                self._queues.pop(request_id, None)
+                self._detoks.pop(request_id, None)
+                self._stream_states.pop(request_id, None)
+
     def _worker_loop(self) -> None:
         try:
             while True:
-                profile_cmd: tuple[str, str, str | None, threading.Event] | None = None
-                with self._lock:
-                    profile_cmd = self._profile_pending
-                    self._profile_pending = None
-                if profile_cmd is not None:
-                    action, tool, output_dir, ack = profile_cmd
-                    ok = True
-                    msg: str | None = None
-                    try:
-                        self._profile_apply(action, tool, output_dir)
-                    except Exception as exc:
-                        ok = False
-                        msg = str(exc)
-                    with self._lock:
-                        self._profile_result = (ok, msg)
-                    ack.set()
 
                 def run_decode_once() -> None:
                     if not self.scheduler.has_unfinished():
@@ -771,7 +752,7 @@ class SchedulerManager:
                         tuple[
                             int,
                             int,
-                            "queue.Queue[Optional[str]] | None",
+                            "HybridQueue[Optional[str]] | None",
                             BaseDetokenizer | None,
                             _StreamState | None,
                             list[float] | None,
@@ -780,7 +761,7 @@ class SchedulerManager:
                     finished_records: list[
                         tuple[
                             int,
-                            "queue.Queue[Optional[str]] | None",
+                            "HybridQueue[Optional[str]] | None",
                             BaseDetokenizer | None,
                             _StreamState | None,
                         ]
@@ -1011,9 +992,15 @@ def create_app(
     sched_manager: "SchedulerManager | MPSchedulerManager",
     *,
     served_model_name: str | None = None,
+    async_streaming: bool = True,
 ) -> FastAPI:
     app = FastAPI(title="roseinfer", version="0.1.0")
     app.add_event_handler("shutdown", sched_manager.close)
+
+    async def _startup() -> None:
+        sched_manager.set_asyncio_loop(asyncio.get_running_loop())
+
+    app.add_event_handler("startup", _startup)
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -1035,7 +1022,7 @@ def create_app(
         }
 
     @app.post("/start_profile")
-    def start_profile(body: StartProfileRequest) -> dict[str, str]:
+    async def start_profile(body: StartProfileRequest) -> dict[str, str]:
         tool = str(body.tool).lower()
         try:
             if tool == "torch":
@@ -1053,21 +1040,24 @@ def create_app(
         return {"status": "ok"}
 
     @app.post("/stop_profile")
-    def stop_profile() -> dict[str, str]:
-        last_error: str | None = None
-        ok = False
-        for tool in ("torch", "cuda"):
-            try:
-                sched_manager.stop_profile(tool=tool)
-                ok = True
-            except Exception as exc:
-                last_error = str(exc)
-        if not ok:
-            raise HTTPException(
-                status_code=400,
-                detail=last_error or "no active profiler",
-            )
-        return {"status": "ok"}
+    async def stop_profile() -> dict[str, str]:
+        torch_err: str | None = None
+        try:
+            sched_manager.stop_profile(tool="torch")
+            return {"status": "ok"}
+        except Exception as exc:
+            torch_err = str(exc)
+
+        try:
+            sched_manager.stop_profile(tool="cuda")
+            return {"status": "ok"}
+        except Exception as exc:
+            cuda_err = str(exc)
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"torch: {torch_err or 'unknown'}; cuda: {cuda_err or 'unknown'}",
+        )
 
     @app.post("/generate", response_model=GenerateResponse)
     def generate(
@@ -1087,9 +1077,17 @@ def create_app(
             except SchedulerManagerOverloadedError as exc:
                 raise HTTPException(status_code=429, detail=str(exc)) from exc
 
-            def token_stream() -> Iterator[bytes]:
-                for piece in sched_manager.stream_text(request_id):
-                    yield piece.encode("utf-8")
+            if async_streaming:
+
+                async def token_stream() -> AsyncIterator[bytes]:
+                    async for piece in sched_manager.astream_text(request_id):
+                        yield piece.encode("utf-8")
+
+            else:
+
+                def token_stream() -> Iterator[bytes]:
+                    for piece in sched_manager.stream_text(request_id):
+                        yield piece.encode("utf-8")
 
             return StreamingResponse(
                 token_stream(),
@@ -1133,28 +1131,47 @@ def create_app(
             except SchedulerManagerOverloadedError as exc:
                 raise HTTPException(status_code=429, detail=str(exc)) from exc
 
-            def event_stream():
-                first_chunk = ChatCompletionChunk(
-                    id=completion_id,
-                    object="chat.completion.chunk",
-                    created=created,
-                    model=model_name,
-                    choices=[
-                        ChatCompletionChunkChoice(
-                            index=0,
-                            delta=ChatCompletionChunkDelta(
-                                role="assistant",
-                                content="",
-                            ),
-                            finish_reason=None,
+            if async_streaming:
+
+                async def event_stream() -> AsyncIterator[bytes]:
+                    first_chunk = ChatCompletionChunk(
+                        id=completion_id,
+                        object="chat.completion.chunk",
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                index=0,
+                                delta=ChatCompletionChunkDelta(
+                                    role="assistant",
+                                    content="",
+                                ),
+                                finish_reason=None,
+                            )
+                        ],
+                    )
+                    yield f"data: {first_chunk.model_dump_json()}\n\n".encode("utf-8")
+                    async for piece in sched_manager.astream_text(request_id):
+                        if not piece:
+                            continue
+                        chunk = ChatCompletionChunk(
+                            id=completion_id,
+                            object="chat.completion.chunk",
+                            created=created,
+                            model=model_name,
+                            choices=[
+                                ChatCompletionChunkChoice(
+                                    index=0,
+                                    delta=ChatCompletionChunkDelta(
+                                        role=None,
+                                        content=piece,
+                                    ),
+                                    finish_reason=None,
+                                )
+                            ],
                         )
-                    ],
-                )
-                yield f"data: {first_chunk.model_dump_json()}\n\n".encode("utf-8")
-                for piece in sched_manager.stream_text(request_id):
-                    if not piece:
-                        continue
-                    chunk = ChatCompletionChunk(
+                        yield f"data: {chunk.model_dump_json()}\n\n".encode("utf-8")
+                    final_chunk = ChatCompletionChunk(
                         id=completion_id,
                         object="chat.completion.chunk",
                         created=created,
@@ -1164,31 +1181,73 @@ def create_app(
                                 index=0,
                                 delta=ChatCompletionChunkDelta(
                                     role=None,
-                                    content=piece,
+                                    content=None,
+                                ),
+                                finish_reason="stop",
+                            )
+                        ],
+                    )
+                    yield f"data: {final_chunk.model_dump_json()}\n\n".encode("utf-8")
+                    yield b"data: [DONE]\n\n"
+
+            else:
+
+                def event_stream() -> Iterator[bytes]:
+                    first_chunk = ChatCompletionChunk(
+                        id=completion_id,
+                        object="chat.completion.chunk",
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                index=0,
+                                delta=ChatCompletionChunkDelta(
+                                    role="assistant",
+                                    content="",
                                 ),
                                 finish_reason=None,
                             )
                         ],
                     )
-                    yield f"data: {chunk.model_dump_json()}\n\n".encode("utf-8")
-                final_chunk = ChatCompletionChunk(
-                    id=completion_id,
-                    object="chat.completion.chunk",
-                    created=created,
-                    model=model_name,
-                    choices=[
-                        ChatCompletionChunkChoice(
-                            index=0,
-                            delta=ChatCompletionChunkDelta(
-                                role=None,
-                                content=None,
-                            ),
-                            finish_reason="stop",
+                    yield f"data: {first_chunk.model_dump_json()}\n\n".encode("utf-8")
+                    for piece in sched_manager.stream_text(request_id):
+                        if not piece:
+                            continue
+                        chunk = ChatCompletionChunk(
+                            id=completion_id,
+                            object="chat.completion.chunk",
+                            created=created,
+                            model=model_name,
+                            choices=[
+                                ChatCompletionChunkChoice(
+                                    index=0,
+                                    delta=ChatCompletionChunkDelta(
+                                        role=None,
+                                        content=piece,
+                                    ),
+                                    finish_reason=None,
+                                )
+                            ],
                         )
-                    ],
-                )
-                yield f"data: {final_chunk.model_dump_json()}\n\n".encode("utf-8")
-                yield b"data: [DONE]\n\n"
+                        yield f"data: {chunk.model_dump_json()}\n\n".encode("utf-8")
+                    final_chunk = ChatCompletionChunk(
+                        id=completion_id,
+                        object="chat.completion.chunk",
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                index=0,
+                                delta=ChatCompletionChunkDelta(
+                                    role=None,
+                                    content=None,
+                                ),
+                                finish_reason="stop",
+                            )
+                        ],
+                    )
+                    yield f"data: {final_chunk.model_dump_json()}\n\n".encode("utf-8")
+                    yield b"data: [DONE]\n\n"
 
             return StreamingResponse(
                 event_stream(),
@@ -1247,11 +1306,27 @@ def create_app(
             except SchedulerManagerOverloadedError as exc:
                 raise HTTPException(status_code=429, detail=str(exc)) from exc
 
-            def event_stream():
-                for piece in sched_manager.stream_text(request_id):
-                    if not piece:
-                        continue
-                    chunk = CompletionChunk(
+            if async_streaming:
+
+                async def event_stream() -> AsyncIterator[bytes]:
+                    async for piece in sched_manager.astream_text(request_id):
+                        if not piece:
+                            continue
+                        chunk = CompletionChunk(
+                            id=completion_id,
+                            object="text_completion",
+                            created=created,
+                            model=model_name,
+                            choices=[
+                                CompletionChunkChoice(
+                                    index=0,
+                                    text=piece,
+                                    finish_reason=None,
+                                )
+                            ],
+                        )
+                        yield f"data: {chunk.model_dump_json()}\n\n".encode("utf-8")
+                    final_chunk = CompletionChunk(
                         id=completion_id,
                         object="text_completion",
                         created=created,
@@ -1259,27 +1334,49 @@ def create_app(
                         choices=[
                             CompletionChunkChoice(
                                 index=0,
-                                text=piece,
-                                finish_reason=None,
+                                text="",
+                                finish_reason="stop",
                             )
                         ],
                     )
-                    yield f"data: {chunk.model_dump_json()}\n\n".encode("utf-8")
-                final_chunk = CompletionChunk(
-                    id=completion_id,
-                    object="text_completion",
-                    created=created,
-                    model=model_name,
-                    choices=[
-                        CompletionChunkChoice(
-                            index=0,
-                            text="",
-                            finish_reason="stop",
+                    yield f"data: {final_chunk.model_dump_json()}\n\n".encode("utf-8")
+                    yield b"data: [DONE]\n\n"
+
+            else:
+
+                def event_stream() -> Iterator[bytes]:
+                    for piece in sched_manager.stream_text(request_id):
+                        if not piece:
+                            continue
+                        chunk = CompletionChunk(
+                            id=completion_id,
+                            object="text_completion",
+                            created=created,
+                            model=model_name,
+                            choices=[
+                                CompletionChunkChoice(
+                                    index=0,
+                                    text=piece,
+                                    finish_reason=None,
+                                )
+                            ],
                         )
-                    ],
-                )
-                yield f"data: {final_chunk.model_dump_json()}\n\n".encode("utf-8")
-                yield b"data: [DONE]\n\n"
+                        yield f"data: {chunk.model_dump_json()}\n\n".encode("utf-8")
+                    final_chunk = CompletionChunk(
+                        id=completion_id,
+                        object="text_completion",
+                        created=created,
+                        model=model_name,
+                        choices=[
+                            CompletionChunkChoice(
+                                index=0,
+                                text="",
+                                finish_reason="stop",
+                            )
+                        ],
+                    )
+                    yield f"data: {final_chunk.model_dump_json()}\n\n".encode("utf-8")
+                    yield b"data: [DONE]\n\n"
 
             return StreamingResponse(
                 event_stream(),
@@ -1447,10 +1544,38 @@ def parse_args() -> argparse.Namespace:
         help="Top-p sampling",
     )
     parser.add_argument(
+        "--async-streaming",
+        dest="async_streaming",
+        action="store_true",
+        help="Use async token/SSE streaming to avoid one thread per stream (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-async-streaming",
+        dest="async_streaming",
+        action="store_false",
+        help="Disable async token/SSE streaming (falls back to sync generators).",
+    )
+    parser.set_defaults(async_streaming=True)
+    parser.add_argument(
         "--max-inflight-requests",
         type=int,
         default=None,
         help="Max inflight requests accepted by SchedulerManager (default: unlimited).",
+    )
+    parser.add_argument(
+        "--kv-cache-max-concurrency",
+        type=int,
+        default=0,
+        help=(
+            "Max concurrent sessions for KV cache allocation; 0 selects an automatic value "
+            "(default: 0)."
+        ),
+    )
+    parser.add_argument(
+        "--prefix-cache-max-entries",
+        type=int,
+        default=256,
+        help="Max entries in prefix cache (default: 256).",
     )
     parser.add_argument(
         "--stream-interval",
@@ -1550,6 +1675,88 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(engine_process=True)
     parser.add_argument(
+        "--mp-ipc",
+        type=str,
+        default="pipe",
+        help="IPC transport between API and engine process: queue|pipe (default: pipe).",
+    )
+    parser.add_argument(
+        "--mp-max-recv-per-iter",
+        type=int,
+        default=64,
+        help=(
+            "Max number of commands to drain per engine loop iteration when busy; "
+            "0 disables the budget (default: 64)."
+        ),
+    )
+    parser.add_argument(
+        "--mp-fill-target",
+        dest="mp_fill_target",
+        action="store_true",
+        help=(
+            "When the engine is ramping up below the target concurrency, temporarily "
+            "bypass the cmd drain budget to fill to target (default: enabled)."
+        ),
+    )
+    parser.add_argument(
+        "--no-mp-fill-target",
+        dest="mp_fill_target",
+        action="store_false",
+        help="Disable ramp-up fill-to-target behavior for multiprocess mode.",
+    )
+    parser.set_defaults(mp_fill_target=True)
+    parser.add_argument(
+        "--mp-flat-events",
+        dest="mp_flat_events",
+        action="store_true",
+        help="Use flat token-pair events in engine IPC (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-mp-flat-events",
+        dest="mp_flat_events",
+        action="store_false",
+        help="Disable flat token-pair events (use legacy dict-of-lists IPC).",
+    )
+    parser.set_defaults(mp_flat_events=True)
+    parser.add_argument(
+        "--mp-thread-cap",
+        dest="mp_thread_cap",
+        action="store_true",
+        help="Cap torch intra/inter-op threads to 1 in API/engine processes (default: enabled for CUDA).",
+    )
+    parser.add_argument(
+        "--no-mp-thread-cap",
+        dest="mp_thread_cap",
+        action="store_false",
+        help="Disable torch thread capping for multiprocess mode.",
+    )
+    parser.set_defaults(mp_thread_cap=True)
+    parser.add_argument(
+        "--mp-affinity",
+        dest="mp_affinity",
+        action="store_true",
+        help="Split CPU affinity between API and engine processes (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-mp-affinity",
+        dest="mp_affinity",
+        action="store_false",
+        help="Disable CPU affinity splitting for multiprocess mode.",
+    )
+    parser.set_defaults(mp_affinity=True)
+    parser.add_argument(
+        "--mp-api-cpus",
+        type=str,
+        default=None,
+        help="CPU set for API process, e.g. '0-7,16-23' (default: auto-split).",
+    )
+    parser.add_argument(
+        "--mp-engine-cpus",
+        type=str,
+        default=None,
+        help="CPU set for engine process, e.g. '8-15,24-31' (default: auto-split).",
+    )
+    parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
@@ -1571,6 +1778,130 @@ def parse_args() -> argparse.Namespace:
         if args.tokenizer_name is None:
             args.tokenizer_name = args.hf_model_id
     return args
+
+
+def _parse_cpu_set(spec: str) -> list[int]:
+    cpus: set[int] = set()
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo_s, hi_s = part.split("-", 1)
+            lo = int(lo_s.strip())
+            hi = int(hi_s.strip())
+            if hi < lo:
+                raise ValueError(f"invalid CPU range: {part}")
+            cpus.update(range(lo, hi + 1))
+        else:
+            cpus.add(int(part))
+    if not cpus:
+        raise ValueError("empty CPU set")
+    return sorted(cpus)
+
+
+def _cpu_core_groups(cpus: Sequence[int]) -> list[list[int]]:
+    """Group logical CPUs by physical core (thread siblings).
+
+    This helps avoid binding two processes to different hyperthreads of the same
+    core, which can regress latency/throughput under load.
+    """
+
+    cpus = sorted(int(c) for c in cpus)
+    available = set(cpus)
+    groups: list[list[int]] = []
+    seen: set[tuple[int, ...]] = set()
+    for cpu in cpus:
+        sibs: list[int]
+        try:
+            path = f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
+            with open(path, "r", encoding="utf-8") as f:
+                sibs = _parse_cpu_set(f.read().strip())
+        except Exception:
+            sibs = [cpu]
+        sibs = [c for c in sibs if c in available]
+        if not sibs:
+            sibs = [cpu]
+        key = tuple(sorted(sibs))
+        if key in seen:
+            continue
+        seen.add(key)
+        groups.append(list(key))
+    groups.sort(key=lambda g: min(g))
+    return groups
+
+
+def _auto_split_cpu_affinity(cpus: Sequence[int]) -> tuple[list[int], list[int]]:
+    cpus = list(cpus)
+    if not cpus:
+        return [], []
+    if len(cpus) <= 2:
+        return cpus[:1], (cpus[1:] or cpus[:1])
+    if len(cpus) <= 8:
+        # On small CPU counts it is easy to starve either side; split roughly evenly.
+        engine_ct = max(1, len(cpus) // 2)
+    elif len(cpus) <= 16:
+        # Still small enough that the engine can be CPU-sensitive (IPC + scheduler).
+        engine_ct = max(4, len(cpus) // 2)
+    else:
+        # The engine process is GPU-bound, but still needs enough CPU for:
+        # - scheduler bookkeeping
+        # - IPC encode/decode
+        # - sampling + KV index math
+        # Give it a meaningful slice so MP doesn't regress vs in-proc.
+        engine_ct = max(6, min(16, len(cpus) // 3))
+        # Keep at least 2 CPUs for API-side tokenize/detokenize + HTTP/SSE.
+        engine_ct = min(engine_ct, max(1, len(cpus) - 2))
+    if len(cpus) - engine_ct <= 0:
+        engine_ct = max(1, len(cpus) - 1)
+
+    groups = _cpu_core_groups(cpus)
+    smt_groups = [g for g in groups if len(g) > 1]
+    solo_groups = [g for g in groups if len(g) == 1]
+
+    engine_set: set[int] = set()
+    # Prefer SMT cores (often "P-cores" on hybrid CPUs) for the engine process.
+    for g in reversed(smt_groups):
+        if len(engine_set) >= engine_ct:
+            break
+        engine_set.update(g)
+    for g in reversed(solo_groups):
+        if len(engine_set) >= engine_ct:
+            break
+        engine_set.update(g)
+
+    engine = sorted(engine_set) or cpus[:1]
+    api = [c for c in cpus if c not in set(engine)]
+    if not api:
+        api = engine[:1]
+    return api, engine
+
+
+def _resolve_mp_cpu_sets(
+    *,
+    mp_affinity: bool,
+    api_spec: str | None,
+    engine_spec: str | None,
+) -> tuple[list[int] | None, list[int] | None]:
+    if not bool(mp_affinity):
+        return None, None
+    available = sorted(os.sched_getaffinity(0))
+    if api_spec or engine_spec:
+        api = _parse_cpu_set(api_spec) if api_spec else []
+        engine = _parse_cpu_set(engine_spec) if engine_spec else []
+        if api and engine:
+            overlap = set(api).intersection(engine)
+            if overlap:
+                raise ValueError(f"mp cpu sets overlap: {sorted(overlap)}")
+            return api, engine
+        if api and not engine:
+            rest = [c for c in available if c not in set(api)]
+            return api, rest or api[:1]
+        if engine and not api:
+            rest = [c for c in available if c not in set(engine)]
+            return rest or engine[:1], engine
+        return None, None
+    return _auto_split_cpu_affinity(available)
 
 
 def main() -> None:
@@ -1617,6 +1948,18 @@ def main() -> None:
 
     served_model_name = args.tokenizer_name or "roseinfer"
     max_batch_size = 8
+    kv_cache_max_concurrency = int(getattr(args, "kv_cache_max_concurrency", 0))
+    if kv_cache_max_concurrency <= 0:
+        if args.max_inflight_requests is not None:
+            kv_cache_max_concurrency = int(args.max_inflight_requests)
+        else:
+            kv_cache_max_concurrency = 256
+    if args.max_inflight_requests is not None and kv_cache_max_concurrency < int(
+        args.max_inflight_requests
+    ):
+        raise ValueError(
+            "--kv-cache-max-concurrency must be >= --max-inflight-requests when set"
+        )
     use_engine_process = bool(args.engine_process)
     if use_engine_process:
         from rosellm.rosetrainer.dataset import build_tokenizer
@@ -1624,6 +1967,26 @@ def main() -> None:
         tokenizer = build_tokenizer(args.tokenizer_name)
         if args.hf_model_id is not None:
             served_model_name = args.hf_model_id
+
+        api_cpus, engine_cpus = _resolve_mp_cpu_sets(
+            mp_affinity=bool(getattr(args, "mp_affinity", True)),
+            api_spec=getattr(args, "mp_api_cpus", None),
+            engine_spec=getattr(args, "mp_engine_cpus", None),
+        )
+
+        if bool(getattr(args, "mp_thread_cap", True)) and device.type == "cuda":
+            os.environ["OMP_NUM_THREADS"] = "1"
+            os.environ["MKL_NUM_THREADS"] = "1"
+            torch.set_num_threads(1)
+            try:
+                torch.set_num_interop_threads(1)
+            except Exception:
+                pass
+        engine_torch_threads = (
+            1
+            if bool(getattr(args, "mp_thread_cap", True)) and device.type == "cuda"
+            else None
+        )
         engine_args = EngineProcessArgs(
             checkpoint_path=args.checkpoint_path if args.hf_model_id is None else None,
             hf_model_id=args.hf_model_id,
@@ -1644,13 +2007,29 @@ def main() -> None:
             prefix_cache=bool(args.prefix_cache),
             overlap_schedule=bool(args.overlap_schedule),
             max_batch_size=int(max_batch_size),
+            kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+            prefix_cache_max_entries=int(
+                getattr(args, "prefix_cache_max_entries", 256)
+            ),
+            mp_torch_num_threads=engine_torch_threads,
+            mp_torch_num_interop_threads=engine_torch_threads,
+            mp_cpu_affinity=tuple(engine_cpus) if engine_cpus else None,
+            mp_fill_target=bool(getattr(args, "mp_fill_target", True)),
+            mp_max_recv_per_iter=int(getattr(args, "mp_max_recv_per_iter", 64)),
+            mp_flat_events=bool(getattr(args, "mp_flat_events", True)),
         )
         sched_manager: SchedulerManager | MPSchedulerManager = MPSchedulerManager(
             tokenizer,
             engine_args=engine_args,
             stream_interval=int(args.stream_interval),
             max_inflight_requests=args.max_inflight_requests,
+            ipc_mode=str(getattr(args, "mp_ipc", "pipe")),
         )
+        if api_cpus:
+            try:
+                os.sched_setaffinity(0, set(int(c) for c in api_cpus))
+            except Exception:
+                pass
     else:
         if args.hf_model_id is None:
             engine = InferenceEngine(
@@ -1659,6 +2038,10 @@ def main() -> None:
                 device=args.device,
                 use_amp=not args.no_amp,
                 bf16=args.bf16,
+                kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                prefix_cache_max_entries=int(
+                    getattr(args, "prefix_cache_max_entries", 256)
+                ),
                 use_paged_attention=paged_attn,
                 use_cuda_graph=cuda_graph,
                 prefill_attn_backend=str(args.prefill_attn_backend),
@@ -1688,6 +2071,10 @@ def main() -> None:
                 device=args.device,
                 use_amp=use_amp,
                 bf16=args.bf16,
+                kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                prefix_cache_max_entries=int(
+                    getattr(args, "prefix_cache_max_entries", 256)
+                ),
                 use_paged_attention=paged_attn,
                 use_cuda_graph=cuda_graph,
                 prefill_attn_backend=str(args.prefill_attn_backend),
@@ -1717,6 +2104,7 @@ def main() -> None:
         tokenizer,
         sched_manager,
         served_model_name=served_model_name,
+        async_streaming=bool(getattr(args, "async_streaming", True)),
     )
     uvicorn.run(
         app,

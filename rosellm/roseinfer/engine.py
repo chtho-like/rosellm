@@ -809,6 +809,7 @@ class InferenceEngine:
             raise ValueError(
                 f"logits must be 2D [B, V], got shape={tuple(logits.shape)}"
             )
+        vocab = int(logits.size(-1))
         if (not do_sample) or temperature <= 0.0:
             return torch.argmax(logits, dim=-1)
 
@@ -825,7 +826,7 @@ class InferenceEngine:
             scaled = (
                 logits if float(temperature) == 1.0 else logits / float(temperature)
             )
-            return flashinfer.sampling.top_k_top_p_sampling_from_logits(
+            sampled = flashinfer.sampling.top_k_top_p_sampling_from_logits(
                 scaled,
                 top_k=top_k,
                 top_p=top_p,
@@ -833,8 +834,9 @@ class InferenceEngine:
                 deterministic=True,
                 generator=self._sampling_generator,
             )
+            # Guard against rare out-of-range ids (would crash embedding lookup).
+            return sampled.clamp(min=0, max=max(0, vocab - 1))
         scaled = logits / float(temperature)
-        vocab = int(scaled.size(-1))
         top_k = int(top_k)
 
         if top_p <= 0.0 or top_p >= 1.0:
@@ -858,6 +860,19 @@ class InferenceEngine:
         probs = probs.masked_fill(mask, 0.0).clamp_min(1e-9)
         choice = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
         return sorted_idx.gather(-1, choice.unsqueeze(-1)).squeeze(-1)
+
+    @staticmethod
+    def _resolve_future_token_ids(
+        input_ids: torch.Tensor,
+        future_token_ids_map: torch.Tensor,
+    ) -> torch.Tensor:
+        if input_ids.dtype != torch.long:
+            input_ids = input_ids.to(torch.long)
+        if input_ids.numel() == 0:
+            return input_ids
+        max_idx = int(future_token_ids_map.numel() - 1)
+        idx = torch.clamp(-input_ids, min=0, max=max_idx)
+        return torch.where(input_ids < 0, future_token_ids_map[idx], input_ids)
 
     @torch.no_grad()
     def generate(
@@ -1643,10 +1658,8 @@ class InferenceEngine:
                     if need_resolve:
                         assert future_token_ids_map is not None
                         ids = graph.input_ids
-                        ids[:] = torch.where(
-                            ids < 0,
-                            future_token_ids_map[torch.clamp(-ids, min=0)],
-                            ids,
+                        ids[:] = self._resolve_future_token_ids(
+                            ids, future_token_ids_map
                         )
                     with _maybe_nvtx_range(
                         "roseinfer.model.forward.cuda_graph_replay", nvtx
@@ -1665,10 +1678,9 @@ class InferenceEngine:
                     ).view(batch_size, 1)
                     if need_resolve:
                         assert future_token_ids_map is not None
-                        input_ids[:] = torch.where(
-                            input_ids < 0,
-                            future_token_ids_map[torch.clamp(-input_ids, min=0)],
+                        input_ids[:] = self._resolve_future_token_ids(
                             input_ids,
+                            future_token_ids_map,
                         )
                     position_ids = lens.view(batch_size, 1)
                     slot_mapping = torch.tensor(
@@ -1748,10 +1760,8 @@ class InferenceEngine:
             ).view(batch_size, 1)
             if need_resolve:
                 assert future_token_ids_map is not None
-                input_ids[:] = torch.where(
-                    input_ids < 0,
-                    future_token_ids_map[torch.clamp(-input_ids, min=0)],
-                    input_ids,
+                input_ids[:] = self._resolve_future_token_ids(
+                    input_ids, future_token_ids_map
                 )
             position_ids = lens.view(batch_size, 1)
             max_len = max(seq_lens)
@@ -2542,7 +2552,9 @@ class OnlineScheduler:
             self._overlap_future_token_ids_limit = max_running * 3
             # Leave headroom so (ct + batch_size) slices never exceed the map.
             map_size = max_running * 5 + int(self.max_batch_size) + 8
-            self._overlap_future_token_ids_map = torch.empty(
+            # Use zeros to avoid undefined reads if a placeholder index is ever
+            # referenced before being written (should be rare, but crashing is worse).
+            self._overlap_future_token_ids_map = torch.zeros(
                 (map_size,),
                 dtype=torch.long,
                 device=engine.device,
@@ -2643,7 +2655,11 @@ class OnlineScheduler:
                     add_special_tokens=False,
                 )
             else:
-                ids = list(req.prompt_token_ids)
+                ids = (
+                    req.prompt_token_ids
+                    if isinstance(req.prompt_token_ids, list)
+                    else list(req.prompt_token_ids)
+                )
             if not ids:
                 ids = [eng.eos_token_id]
             max_pos = int(eng.config.max_position_embeddings)
@@ -3211,7 +3227,9 @@ class ChunkedOnlineScheduler:
             max_running = max(1, max_running)
             self._overlap_future_token_ids_limit = max_running * 3
             map_size = max_running * 5 + int(self.max_batch_size) + 8
-            self._overlap_future_token_ids_map = torch.empty(
+            # Use zeros to avoid undefined reads if a placeholder index is ever
+            # referenced before being written (should be rare, but crashing is worse).
+            self._overlap_future_token_ids_map = torch.zeros(
                 (map_size,),
                 dtype=torch.long,
                 device=engine.device,
@@ -3358,7 +3376,11 @@ class ChunkedOnlineScheduler:
                 ids = eng.tokenizer.encode(req.prompt, add_special_tokens=False)
                 cache_key: PrefixCacheKey = req.prompt
             else:
-                ids = list(req.prompt_token_ids)
+                ids = (
+                    req.prompt_token_ids
+                    if isinstance(req.prompt_token_ids, list)
+                    else list(req.prompt_token_ids)
+                )
                 cache_key = tuple(ids)
             if not ids:
                 ids = [eng.eos_token_id]
@@ -3388,7 +3410,7 @@ class ChunkedOnlineScheduler:
             )
 
             self._sessions[rid] = sess
-            self._prompt_token_ids[rid] = list(ids)
+            self._prompt_token_ids[rid] = ids
             self._cache_keys[rid] = cache_key
 
             cached_logits: torch.Tensor | None = None

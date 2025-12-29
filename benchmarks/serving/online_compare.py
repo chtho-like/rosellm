@@ -9,6 +9,7 @@ import os
 import random
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -64,36 +65,87 @@ def _maybe_add_trtllm_source_pythonpath(env: dict[str, str]) -> None:
         _append_pythonpath(env, str(candidate))
 
 
-def _trtllm_available() -> bool:
-    cached: bool | None = getattr(_trtllm_available, "_cached", None)
-    if cached is not None:
-        return cached
-    if _module_available("tensorrt_llm"):
-        setattr(_trtllm_available, "_cached", True)
-        return True
-    if shutil.which("trtllm-serve") is not None:
-        setattr(_trtllm_available, "_cached", True)
-        return True
+def _resolve_trtllm_python(args: argparse.Namespace) -> str | None:
+    if getattr(args, "trtllm_python", None):
+        return str(args.trtllm_python)
+    env_val = os.environ.get("ROSELLM_TRTLLM_PYTHON") or os.environ.get("TRTLLM_PYTHON")
+    if env_val:
+        return str(env_val)
     repo_root = Path(__file__).resolve().parents[2]
-    candidate_root = repo_root / ".vscode" / "TensorRT-LLM"
-    if not candidate_root.is_dir():
-        setattr(_trtllm_available, "_cached", False)
-        return False
+    candidate = repo_root / ".venv-trtllm" / "bin" / "python"
+    if candidate.is_file():
+        return str(candidate)
+    return None
 
-    env = os.environ.copy()
-    _append_pythonpath(env, str(candidate_root))
-    try:
-        subprocess.check_output(
-            [sys.executable, "-c", "import tensorrt_llm"],
-            env=env,
-            stderr=subprocess.STDOUT,
-            timeout=30,
-        )
-        setattr(_trtllm_available, "_cached", True)
-        return True
-    except Exception:
-        setattr(_trtllm_available, "_cached", False)
-        return False
+
+def _trtllm_runtime_env(*, python_exe: str, base_env: dict[str, str]) -> dict[str, str]:
+    env = dict(base_env)
+    # NOTE: venv `python` is often a symlink to system Python; avoid `.resolve()`.
+    venv_root = Path(python_exe).absolute().parent.parent
+    site_pkgs = next(venv_root.glob("lib/python*/site-packages"), None)
+    if site_pkgs is None:
+        return env
+
+    lib_dirs: list[str] = []
+    tensorrt_libs = site_pkgs / "tensorrt_libs"
+    if tensorrt_libs.is_dir():
+        lib_dirs.append(str(tensorrt_libs))
+    nvidia_root = site_pkgs / "nvidia"
+    if nvidia_root.is_dir():
+        for child in nvidia_root.iterdir():
+            lib_dir = child / "lib"
+            if lib_dir.is_dir():
+                lib_dirs.append(str(lib_dir))
+
+    old = env.get("LD_LIBRARY_PATH", "")
+    joined = ":".join(lib_dirs)
+    env["LD_LIBRARY_PATH"] = joined if not old else f"{joined}:{old}"
+    return env
+
+
+def _trtllm_available(*, python_exe: str | None = None) -> bool:
+    cache: dict[str, bool] = getattr(_trtllm_available, "_cache", {})
+    cache_key = python_exe or "<current>"
+    if cache_key in cache:
+        return cache[cache_key]
+
+    ok = False
+    if _module_available("tensorrt_llm"):
+        ok = True
+    elif python_exe:
+        env = _trtllm_runtime_env(python_exe=python_exe, base_env=os.environ.copy())
+        try:
+            subprocess.check_output(
+                [python_exe, "-c", "import tensorrt_llm"],
+                env=env,
+                stderr=subprocess.STDOUT,
+                timeout=60,
+            )
+            ok = True
+        except Exception:
+            ok = False
+    elif shutil.which("trtllm-serve") is not None:
+        ok = True
+    else:
+        repo_root = Path(__file__).resolve().parents[2]
+        candidate_root = repo_root / ".vscode" / "TensorRT-LLM"
+        if candidate_root.is_dir():
+            env = os.environ.copy()
+            _append_pythonpath(env, str(candidate_root))
+            try:
+                subprocess.check_output(
+                    [sys.executable, "-c", "import tensorrt_llm"],
+                    env=env,
+                    stderr=subprocess.STDOUT,
+                    timeout=30,
+                )
+                ok = True
+            except Exception:
+                ok = False
+
+    cache[cache_key] = ok
+    setattr(_trtllm_available, "_cache", cache)
+    return ok
 
 
 def _iso_now() -> str:
@@ -113,7 +165,7 @@ def _try_git_rev() -> str | None:
         return None
 
 
-def _collect_versions() -> dict[str, str]:
+def _collect_versions(*, trtllm_python: str | None = None) -> dict[str, str]:
     versions: dict[str, str] = {"python": sys.version.split()[0]}
     try:
         import importlib.metadata as md
@@ -136,6 +188,27 @@ def _collect_versions() -> dict[str, str]:
                 versions[pkg] = "not installed"
     except Exception:
         pass
+
+    if (
+        trtllm_python
+        and versions.get("tensorrt_llm") == "not installed"
+        and Path(str(trtllm_python)).is_file()
+    ):
+        try:
+            out = subprocess.check_output(
+                [
+                    str(trtllm_python),
+                    "-c",
+                    "import importlib.metadata as md; print(md.version('tensorrt_llm'))",
+                ],
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+            probed = out.decode("utf-8", errors="replace").strip()
+            if probed:
+                versions["tensorrt_llm"] = probed
+        except Exception:
+            pass
     git_rev = _try_git_rev()
     if git_rev:
         versions["git_rev"] = git_rev
@@ -558,15 +631,20 @@ def _summarize(
     e2e_ms = [m.e2e_s * 1000 for m in ok]
     tpot_ms = [m.tpot_s * 1000 for m in ok if m.tpot_s is not None]
     itl_ms = [dt * 1000 for dt in itl_all]
-    if not ttft_ms:
-        raise ValueError("no TTFT samples collected; did the server stream tokens?")
-    if not tpot_ms:
-        raise ValueError("no TPOT samples collected; did the server stream >1 token?")
-    if not itl_ms:
-        raise ValueError("no ITL samples collected; did the server stream >1 token?")
+
+    def nan_stats() -> SummaryStats:
+        nan = float("nan")
+        return SummaryStats(mean=nan, p50=nan, p90=nan, p99=nan, max=nan)
 
     total_events = sum(m.num_stream_events for m in ok)
-    duration_s = (max(m.end_s for m in ok) - min(m.start_s for m in ok)) or 1e-9
+    if ok:
+        duration_s = (max(m.end_s for m in ok) - min(m.start_s for m in ok)) or 1e-9
+    else:
+        duration_s = (
+            (max(m.end_s for m in req_metrics) - min(m.start_s for m in req_metrics))
+            if req_metrics
+            else 1e-9
+        ) or 1e-9
     req_per_s = len(ok) / duration_s
     tok_per_s = total_events / duration_s
     return OnlineBenchmarkSummary(
@@ -580,10 +658,10 @@ def _summarize(
         duration_s=float(duration_s),
         req_per_s=float(req_per_s),
         tok_per_s=float(tok_per_s),
-        ttft_ms=_percentiles(ttft_ms),
-        e2e_ms=_percentiles(e2e_ms),
-        tpot_ms=_percentiles(tpot_ms),
-        itl_ms=_percentiles(itl_ms),
+        ttft_ms=_percentiles(ttft_ms) if ttft_ms else nan_stats(),
+        e2e_ms=_percentiles(e2e_ms) if e2e_ms else nan_stats(),
+        tpot_ms=_percentiles(tpot_ms) if tpot_ms else nan_stats(),
+        itl_ms=_percentiles(itl_ms) if itl_ms else nan_stats(),
     )
 
 
@@ -618,11 +696,31 @@ def _terminate_process(p: subprocess.Popen[bytes], *, timeout_s: float = 15.0) -
         p.wait(timeout=timeout_s)
 
 
+def _pick_free_port(host: str, preferred: int, used: set[int]) -> int:
+    port = int(preferred)
+    for _ in range(256):
+        if port in used:
+            port += 1
+            continue
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind((host, port))
+        except OSError:
+            port += 1
+            continue
+        finally:
+            sock.close()
+        used.add(port)
+        return port
+    raise RuntimeError(f"could not find a free TCP port near {preferred}")
+
+
 def _roseinfer_server_cmd(
     args: argparse.Namespace,
     *,
     host: str,
     port: int,
+    async_streaming: bool | None = None,
     prefill_attn_backend: str | None = None,
     decode_attn_backend: str | None = None,
     fused_ops: bool | None = None,
@@ -631,6 +729,14 @@ def _roseinfer_server_cmd(
     fused_kv_append: bool | None = None,
     overlap_schedule: bool | None = None,
     engine_process: bool | None = None,
+    kv_cache_max_concurrency: int | None = None,
+    prefix_cache_max_entries: int | None = None,
+    mp_ipc: str | None = None,
+    mp_thread_cap: bool | None = None,
+    mp_affinity: bool | None = None,
+    mp_max_recv_per_iter: int | None = None,
+    mp_fill_target: bool | None = None,
+    mp_flat_events: bool | None = None,
 ) -> list[str]:
     prefill_attn_backend = (
         str(prefill_attn_backend)
@@ -646,6 +752,16 @@ def _roseinfer_server_cmd(
     cuda_graph = bool(args.roseinfer_cuda_graph)
     chunked_prefill = bool(args.roseinfer_chunked_prefill)
     prefix_cache = bool(args.roseinfer_prefix_cache)
+    kv_cache_max_concurrency = (
+        int(kv_cache_max_concurrency)
+        if kv_cache_max_concurrency is not None
+        else int(getattr(args, "roseinfer_kv_cache_max_concurrency", 0))
+    )
+    prefix_cache_max_entries = (
+        int(prefix_cache_max_entries)
+        if prefix_cache_max_entries is not None
+        else int(getattr(args, "roseinfer_prefix_cache_max_entries", 256))
+    )
     fused_ops = (
         bool(fused_ops) if fused_ops is not None else bool(args.roseinfer_fused_ops)
     )
@@ -667,10 +783,45 @@ def _roseinfer_server_cmd(
         if overlap_schedule is not None
         else bool(getattr(args, "roseinfer_overlap_schedule", True))
     )
+    async_streaming = (
+        bool(async_streaming)
+        if async_streaming is not None
+        else bool(getattr(args, "roseinfer_async_streaming", True))
+    )
     engine_process = (
         bool(engine_process)
         if engine_process is not None
         else bool(getattr(args, "roseinfer_engine_process", True))
+    )
+    mp_ipc = (
+        str(mp_ipc)
+        if mp_ipc is not None
+        else str(getattr(args, "roseinfer_mp_ipc", "pipe"))
+    )
+    mp_thread_cap = (
+        bool(mp_thread_cap)
+        if mp_thread_cap is not None
+        else bool(getattr(args, "roseinfer_mp_thread_cap", True))
+    )
+    mp_affinity = (
+        bool(mp_affinity)
+        if mp_affinity is not None
+        else bool(getattr(args, "roseinfer_mp_affinity", True))
+    )
+    mp_max_recv_per_iter = (
+        int(mp_max_recv_per_iter)
+        if mp_max_recv_per_iter is not None
+        else int(getattr(args, "roseinfer_mp_max_recv_per_iter", 64))
+    )
+    mp_fill_target = (
+        bool(mp_fill_target)
+        if mp_fill_target is not None
+        else bool(getattr(args, "roseinfer_mp_fill_target", True))
+    )
+    mp_flat_events = (
+        bool(mp_flat_events)
+        if mp_flat_events is not None
+        else bool(getattr(args, "roseinfer_mp_flat_events", True))
     )
     cmd = [
         sys.executable,
@@ -695,6 +846,8 @@ def _roseinfer_server_cmd(
     ]
     if args.max_inflight_requests is not None:
         cmd += ["--max-inflight-requests", str(args.max_inflight_requests)]
+    cmd += ["--kv-cache-max-concurrency", str(int(kv_cache_max_concurrency))]
+    cmd += ["--prefix-cache-max-entries", str(int(prefix_cache_max_entries))]
     if args.dtype == "fp32":
         cmd += ["--no-amp"]
     elif args.dtype == "bf16":
@@ -703,6 +856,8 @@ def _roseinfer_server_cmd(
         cmd += ["--no-amp"]
     if args.bf16:
         cmd += ["--bf16"]
+    if not async_streaming:
+        cmd += ["--no-async-streaming"]
     cmd += ["--paged-attn" if paged_attn else "--no-paged-attn"]
     cmd += ["--cuda-graph" if cuda_graph else "--no-cuda-graph"]
     cmd += ["--chunked-prefill" if chunked_prefill else "--no-chunked-prefill"]
@@ -715,6 +870,13 @@ def _roseinfer_server_cmd(
     cmd += ["--fused-kv-append" if fused_kv_append else "--no-fused-kv-append"]
     cmd += ["--overlap-schedule" if overlap_schedule else "--no-overlap-schedule"]
     cmd += ["--engine-process" if engine_process else "--no-engine-process"]
+    if engine_process:
+        cmd += ["--mp-ipc", str(mp_ipc)]
+        cmd += ["--mp-max-recv-per-iter", str(int(mp_max_recv_per_iter))]
+        cmd += ["--mp-fill-target" if mp_fill_target else "--no-mp-fill-target"]
+        cmd += ["--mp-flat-events" if mp_flat_events else "--no-mp-flat-events"]
+        cmd += ["--mp-thread-cap" if mp_thread_cap else "--no-mp-thread-cap"]
+        cmd += ["--mp-affinity" if mp_affinity else "--no-mp-affinity"]
     return cmd
 
 
@@ -776,9 +938,12 @@ def _trtllm_server_cmd(
     host: str,
     port: int,
     max_context_len: int,
+    python_exe: str | None = None,
+    backend: str | None = None,
 ) -> list[str]:
+    py = python_exe or sys.executable
     cmd = [
-        sys.executable,
+        py,
         "-m",
         "tensorrt_llm.commands.serve",
         args.model,
@@ -787,7 +952,11 @@ def _trtllm_server_cmd(
         "--port",
         str(port),
         "--backend",
-        str(getattr(args, "trtllm_backend", "pytorch")),
+        str(
+            backend
+            if backend is not None
+            else getattr(args, "trtllm_backend", "pytorch")
+        ),
         "--max_seq_len",
         str(int(max_context_len)),
         "--log_level",
@@ -873,9 +1042,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--trtllm-backend",
         type=str,
-        default="pytorch",
+        default="tensorrt",
         choices=["pytorch", "tensorrt", "trt", "_autodeploy"],
-        help="TensorRT-LLM backend for OpenAI server (default: pytorch).",
+        help="TensorRT-LLM backend for OpenAI server (default: tensorrt).",
+    )
+    parser.add_argument(
+        "--trtllm-python",
+        type=str,
+        default=None,
+        help=(
+            "Python executable for the TensorRT-LLM backend. "
+            "Default: auto-detect `./.venv-trtllm/bin/python` or use current interpreter."
+        ),
     )
     parser.add_argument(
         "--trace-a-url",
@@ -995,6 +1173,19 @@ def parse_args() -> argparse.Namespace:
         help="Use bf16 AMP for roseinfer.",
     )
     parser.add_argument(
+        "--roseinfer-async-streaming",
+        dest="roseinfer_async_streaming",
+        action="store_true",
+        help="Enable roseinfer async token/SSE streaming (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-async-streaming",
+        dest="roseinfer_async_streaming",
+        action="store_false",
+        help="Disable roseinfer async token/SSE streaming.",
+    )
+    parser.set_defaults(roseinfer_async_streaming=True)
+    parser.add_argument(
         "--roseinfer-prefill-attn-backend",
         type=str,
         default="auto",
@@ -1075,6 +1266,18 @@ def parse_args() -> argparse.Namespace:
         help="Disable prefix caching for roseinfer.",
     )
     parser.set_defaults(roseinfer_prefix_cache=True)
+    parser.add_argument(
+        "--roseinfer-kv-cache-max-concurrency",
+        type=int,
+        default=0,
+        help="roseinfer --kv-cache-max-concurrency (default: 0 = auto).",
+    )
+    parser.add_argument(
+        "--roseinfer-prefix-cache-max-entries",
+        type=int,
+        default=256,
+        help="roseinfer --prefix-cache-max-entries (default: 256).",
+    )
     parser.add_argument(
         "--roseinfer-fused-ops",
         dest="roseinfer_fused_ops",
@@ -1184,6 +1387,81 @@ def parse_args() -> argparse.Namespace:
         help="Run roseinfer twice: engine-process on/off (for A/B benchmark).",
     )
     parser.add_argument(
+        "--roseinfer-mp-ipc",
+        type=str,
+        default="pipe",
+        help="roseinfer multiprocess IPC transport: queue|pipe (default: pipe).",
+    )
+    parser.add_argument(
+        "--roseinfer-mp-max-recv-per-iter",
+        type=int,
+        default=64,
+        help=(
+            "roseinfer mp: max commands drained per engine loop iteration when busy; "
+            "0 disables the budget (default: 64)."
+        ),
+    )
+    parser.add_argument(
+        "--roseinfer-mp-fill-target",
+        dest="roseinfer_mp_fill_target",
+        action="store_true",
+        help="roseinfer mp: bypass cmd budget while ramping up below target concurrency (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-mp-fill-target",
+        dest="roseinfer_mp_fill_target",
+        action="store_false",
+        help="roseinfer mp: disable ramp-up fill-to-target behavior.",
+    )
+    parser.set_defaults(roseinfer_mp_fill_target=True)
+    parser.add_argument(
+        "--roseinfer-mp-flat-events",
+        dest="roseinfer_mp_flat_events",
+        action="store_true",
+        help="roseinfer mp: use flat token-pair IPC events (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-mp-flat-events",
+        dest="roseinfer_mp_flat_events",
+        action="store_false",
+        help="roseinfer mp: disable flat token-pair IPC events.",
+    )
+    parser.set_defaults(roseinfer_mp_flat_events=True)
+    parser.add_argument(
+        "--roseinfer-mp-thread-cap",
+        dest="roseinfer_mp_thread_cap",
+        action="store_true",
+        help="roseinfer mp: cap torch threads to 1 (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-mp-thread-cap",
+        dest="roseinfer_mp_thread_cap",
+        action="store_false",
+        help="roseinfer mp: disable torch thread capping.",
+    )
+    parser.set_defaults(roseinfer_mp_thread_cap=True)
+    parser.add_argument(
+        "--roseinfer-mp-affinity",
+        dest="roseinfer_mp_affinity",
+        action="store_true",
+        help="roseinfer mp: split CPU affinity between API and engine (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-mp-affinity",
+        dest="roseinfer_mp_affinity",
+        action="store_false",
+        help="roseinfer mp: disable CPU affinity split.",
+    )
+    parser.set_defaults(roseinfer_mp_affinity=True)
+    parser.add_argument(
+        "--roseinfer-compare-mp-ablations",
+        action="store_true",
+        help=(
+            "Add roseinfer mp ablation variants (disable one mp optimization at a time). "
+            "Use with --roseinfer-engine-process."
+        ),
+    )
+    parser.add_argument(
         "--timeout-ready-s",
         type=float,
         default=120.0,
@@ -1249,7 +1527,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backends",
         type=str,
-        default="roseinfer,vllm,sglang",
+        default="roseinfer,vllm,sglang,trtllm",
         help="Comma-separated backends to run (roseinfer,vllm,sglang,trtllm).",
     )
     return parser.parse_args()
@@ -1263,7 +1541,9 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     run_start_time = _iso_now()
     run_wall_t0 = time.perf_counter()
-    versions = _collect_versions()
+
+    trtllm_python = _resolve_trtllm_python(args)
+    versions = _collect_versions(trtllm_python=trtllm_python)
     print(f"[meta] start={run_start_time}, versions={versions}")
 
     profile_mode = str(getattr(args, "profile", "none")).lower()
@@ -1315,17 +1595,26 @@ def main() -> None:
         base_backend: str
         label: str
         roseinfer_prefill_backend: str | None = None
+        roseinfer_async_streaming: bool | None = None
         roseinfer_engine_process: bool | None = None
+        roseinfer_kv_cache_max_concurrency: int | None = None
+        roseinfer_prefix_cache_max_entries: int | None = None
         roseinfer_fused_ops: bool | None = None
         roseinfer_fused_mlp: bool | None = None
         roseinfer_fused_sampler: bool | None = None
         roseinfer_fused_kv_append: bool | None = None
         roseinfer_overlap_schedule: bool | None = None
+        roseinfer_mp_ipc: str | None = None
+        roseinfer_mp_thread_cap: bool | None = None
+        roseinfer_mp_affinity: bool | None = None
+        roseinfer_mp_max_recv_per_iter: int | None = None
+        roseinfer_mp_fill_target: bool | None = None
+        roseinfer_mp_flat_events: bool | None = None
 
     run_specs: list[RunSpec] = []
     for backend in backends:
         if backend != "roseinfer":
-            if backend == "trtllm" and not _trtllm_available():
+            if backend == "trtllm" and not _trtllm_available(python_exe=trtllm_python):
                 print("[warn] tensorrt_llm not available; skipping backend 'trtllm'")
                 continue
             run_specs.append(RunSpec(base_backend=backend, label=backend))
@@ -1339,6 +1628,17 @@ def main() -> None:
         base_fused_kv_append = bool(args.roseinfer_fused_kv_append)
         base_overlap = bool(getattr(args, "roseinfer_overlap_schedule", True))
         base_engine_process = bool(getattr(args, "roseinfer_engine_process", True))
+        base_async_streaming = bool(getattr(args, "roseinfer_async_streaming", True))
+        base_kv_conc = int(getattr(args, "roseinfer_kv_cache_max_concurrency", 0))
+        base_prefix_entries = int(
+            getattr(args, "roseinfer_prefix_cache_max_entries", 256)
+        )
+        base_mp_ipc = str(getattr(args, "roseinfer_mp_ipc", "pipe"))
+        base_mp_thread_cap = bool(getattr(args, "roseinfer_mp_thread_cap", True))
+        base_mp_affinity = bool(getattr(args, "roseinfer_mp_affinity", True))
+        base_mp_max_recv = int(getattr(args, "roseinfer_mp_max_recv_per_iter", 64))
+        base_mp_fill_target = bool(getattr(args, "roseinfer_mp_fill_target", True))
+        base_mp_flat_events = bool(getattr(args, "roseinfer_mp_flat_events", True))
         engine_cfgs: list[bool] = [base_engine_process]
         if bool(getattr(args, "roseinfer_compare_engine_process", False)):
             engine_cfgs.append(not base_engine_process)
@@ -1455,14 +1755,68 @@ def main() -> None:
                             base_backend="roseinfer",
                             label=label,
                             roseinfer_prefill_backend=prefill_backend,
+                            roseinfer_async_streaming=bool(base_async_streaming),
                             roseinfer_engine_process=bool(engine_process),
+                            roseinfer_kv_cache_max_concurrency=int(base_kv_conc),
+                            roseinfer_prefix_cache_max_entries=int(base_prefix_entries),
                             roseinfer_fused_ops=bool(fused_ops),
                             roseinfer_fused_mlp=bool(fused_mlp),
                             roseinfer_fused_sampler=bool(fused_sampler),
                             roseinfer_fused_kv_append=bool(fused_kv_append),
                             roseinfer_overlap_schedule=bool(overlap_schedule),
+                            roseinfer_mp_ipc=base_mp_ipc,
+                            roseinfer_mp_thread_cap=base_mp_thread_cap,
+                            roseinfer_mp_affinity=base_mp_affinity,
+                            roseinfer_mp_max_recv_per_iter=base_mp_max_recv,
+                            roseinfer_mp_fill_target=base_mp_fill_target,
+                            roseinfer_mp_flat_events=base_mp_flat_events,
                         )
                     )
+
+    if bool(getattr(args, "roseinfer_compare_mp_ablations", False)):
+        extra: list[RunSpec] = []
+        seen_labels = {spec.label for spec in run_specs}
+        for spec in list(run_specs):
+            if spec.base_backend != "roseinfer" or not bool(
+                spec.roseinfer_engine_process
+            ):
+                continue
+
+            def add_variant(*, suffix: str, **updates: Any) -> None:
+                label = f"{spec.label}{suffix}"
+                if label in seen_labels:
+                    return
+                seen_labels.add(label)
+                payload = asdict(spec)
+                payload.update(updates)
+                payload["label"] = label
+                extra.append(RunSpec(**payload))
+
+            if bool(spec.roseinfer_mp_thread_cap):
+                add_variant(suffix="+nothr", roseinfer_mp_thread_cap=False)
+            if bool(spec.roseinfer_mp_affinity):
+                add_variant(suffix="+noaff", roseinfer_mp_affinity=False)
+            if bool(spec.roseinfer_mp_fill_target):
+                add_variant(suffix="+nofill", roseinfer_mp_fill_target=False)
+            if int(spec.roseinfer_mp_max_recv_per_iter or 0) != 0:
+                add_variant(suffix="+nodrain", roseinfer_mp_max_recv_per_iter=0)
+            if str(spec.roseinfer_mp_ipc or "").lower() != "queue":
+                add_variant(suffix="+queueipc", roseinfer_mp_ipc="queue")
+            if bool(spec.roseinfer_mp_flat_events):
+                add_variant(suffix="+noflat", roseinfer_mp_flat_events=False)
+            if bool(spec.roseinfer_async_streaming):
+                add_variant(suffix="+noasync", roseinfer_async_streaming=False)
+            if (
+                int(spec.roseinfer_kv_cache_max_concurrency or 0) == 0
+                and args.max_inflight_requests is not None
+                and int(args.max_inflight_requests) != 256
+            ):
+                add_variant(
+                    suffix="+kv256",
+                    roseinfer_kv_cache_max_concurrency=256,
+                )
+
+        run_specs.extend(extra)
 
     if not run_specs:
         raise ValueError("no backends to run (all candidates were skipped)")
@@ -1538,10 +1892,20 @@ def main() -> None:
         }
 
         def http_post(url: str, *, json_body: dict[str, Any] | None = None) -> None:
-            r = httpx.post(url, json=json_body, timeout=30.0)
+            r = httpx.post(url, json=json_body, timeout=300.0)
             if r.status_code != 200:
                 raise RuntimeError(f"POST {url} failed: {r.status_code} {r.text}")
 
+        def http_post_ok(
+            url: str, *, json_body: dict[str, Any] | None = None
+        ) -> str | None:
+            try:
+                http_post(url, json_body=json_body)
+                return None
+            except Exception as exc:
+                return str(exc)
+
+        used_ports: set[int] = set()
         for tool in tools:
             for i, spec in enumerate(run_specs):
                 base_backend = spec.base_backend
@@ -1553,8 +1917,14 @@ def main() -> None:
                 fused_sampler = spec.roseinfer_fused_sampler
                 fused_kv_append = spec.roseinfer_fused_kv_append
                 overlap_schedule = spec.roseinfer_overlap_schedule
+                mp_ipc = spec.roseinfer_mp_ipc
+                mp_thread_cap = spec.roseinfer_mp_thread_cap
+                mp_affinity = spec.roseinfer_mp_affinity
+                mp_max_recv_per_iter = spec.roseinfer_mp_max_recv_per_iter
+                mp_fill_target = spec.roseinfer_mp_fill_target
+                mp_flat_events = spec.roseinfer_mp_flat_events
 
-                port = int(args.port_base) + i
+                port = _pick_free_port(args.host, int(args.port_base) + i, used_ports)
                 root_url = f"http://{args.host}:{port}"
                 base_url = f"{root_url}/v1"
                 out_dir = profiles_root / tool / backend
@@ -1571,11 +1941,10 @@ def main() -> None:
                 if base_backend == "vllm":
                     if tool == "torch":
                         env["VLLM_TORCH_PROFILER_DIR"] = str(out_dir)
-                    elif tool == "nsys":
-                        env["VLLM_TORCH_CUDA_PROFILE"] = "1"
                 elif base_backend == "trtllm":
                     env["TLLM_LLMAPI_ENABLE_NVTX"] = "1"
                     env["TLLM_PROFILE_START_STOP"] = "1-20"
+                    env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
                     if tool == "torch":
                         env["TLLM_TORCH_PROFILE_TRACE"] = str(out_dir / "trace.json")
 
@@ -1584,13 +1953,22 @@ def main() -> None:
                         args,
                         host=args.host,
                         port=port,
+                        async_streaming=spec.roseinfer_async_streaming,
                         prefill_attn_backend=prefill_backend,
                         engine_process=engine_process,
+                        kv_cache_max_concurrency=spec.roseinfer_kv_cache_max_concurrency,
+                        prefix_cache_max_entries=spec.roseinfer_prefix_cache_max_entries,
                         fused_ops=fused_ops,
                         fused_mlp=fused_mlp,
                         fused_sampler=fused_sampler,
                         fused_kv_append=fused_kv_append,
                         overlap_schedule=overlap_schedule,
+                        mp_ipc=mp_ipc,
+                        mp_thread_cap=mp_thread_cap,
+                        mp_affinity=mp_affinity,
+                        mp_max_recv_per_iter=mp_max_recv_per_iter,
+                        mp_fill_target=mp_fill_target,
+                        mp_flat_events=mp_flat_events,
                     )
                 elif base_backend == "vllm":
                     cmd = _vllm_server_cmd(
@@ -1602,9 +1980,19 @@ def main() -> None:
                         args, host=args.host, port=port, max_context_len=max_ctx
                     )
                 elif base_backend == "trtllm":
-                    _maybe_add_trtllm_source_pythonpath(env)
+                    if trtllm_python:
+                        env = _trtllm_runtime_env(
+                            python_exe=trtllm_python, base_env=env
+                        )
+                    else:
+                        _maybe_add_trtllm_source_pythonpath(env)
                     cmd = _trtllm_server_cmd(
-                        args, host=args.host, port=port, max_context_len=max_ctx
+                        args,
+                        host=args.host,
+                        port=port,
+                        max_context_len=max_ctx,
+                        python_exe=trtllm_python,
+                        backend=str(getattr(args, "trtllm_backend", "tensorrt")),
                     )
                 else:
                     raise ValueError(f"unknown backend: {base_backend}")
@@ -1612,12 +2000,16 @@ def main() -> None:
                 nsys_prefix = None
                 if tool == "nsys":
                     nsys_prefix = out_dir / "nsys"
+                    capture_range = "cudaProfilerApi"
+                    capture_range_end = "stop-shutdown"
+                    if base_backend in ("vllm", "trtllm"):
+                        capture_range = "none"
+                        capture_range_end = None
                     cmd = [
                         "nsys",
                         "profile",
                         "--force-overwrite=true",
-                        "--capture-range=cudaProfilerApi",
-                        "--stop-on-range-end=true",
+                        f"--capture-range={capture_range}",
                         "--trace=cuda,nvtx,osrt",
                         "--sample=none",
                         "--cuda-graph-trace=node",
@@ -1626,98 +2018,165 @@ def main() -> None:
                         str(nsys_prefix),
                         *cmd,
                     ]
+                    if capture_range_end is not None:
+                        cmd.insert(5, f"--capture-range-end={capture_range_end}")
 
                 server = _start_process(
                     cmd=cmd, env=env, cpu_set=server_cpus, log_path=log_path
                 )
                 stage_t0 = time.perf_counter()
                 try:
-                    asyncio.run(
-                        _wait_ready(root_url, timeout_s=float(args.timeout_ready_s))
-                    )
+                    profile_err: str | None = None
+                    try:
+                        asyncio.run(
+                            _wait_ready(root_url, timeout_s=float(args.timeout_ready_s))
+                        )
+                    except Exception as exc:
+                        profile_err = f"server not ready: {exc}"
+
                     warmup_n = int(args.warmup_requests)
                     if base_backend == "trtllm":
                         warmup_n = 0
-                    if warmup_n > 0:
-                        effective_ctx = max(
-                            2,
-                            int(max_ctx) - int(args.prompt_overhead_tokens) - 1,
-                        )
-                        warmup_in = int(
-                            min(
-                                int(args.warmup_input_len),
-                                max(1, effective_ctx - int(args.warmup_output_len)),
+                    if profile_err is None and warmup_n > 0:
+                        try:
+                            effective_ctx = max(
+                                2,
+                                int(max_ctx) - int(args.prompt_overhead_tokens) - 1,
                             )
-                        )
-                        warmup_ids = _make_base_prompt_ids(
-                            tokenizer, warmup_in, seed=int(args.seed)
-                        )
-                        warmup_prompt = tokenizer.decode(warmup_ids)
-                        asyncio.run(
-                            _warmup(
-                                base_url=base_url,
-                                model=args.model,
-                                prompt=warmup_prompt,
-                                output_len=int(args.warmup_output_len),
-                                num_requests=warmup_n,
-                                temperature=float(args.temperature),
-                                top_p=float(args.top_p),
-                                top_k=int(args.top_k),
-                                ignore_eos=bool(args.ignore_eos),
+                            warmup_in = int(
+                                min(
+                                    int(args.warmup_input_len),
+                                    max(
+                                        1,
+                                        effective_ctx - int(args.warmup_output_len),
+                                    ),
+                                )
                             )
-                        )
+                            warmup_ids = _make_base_prompt_ids(
+                                tokenizer, warmup_in, seed=int(args.seed)
+                            )
+                            warmup_prompt = tokenizer.decode(warmup_ids)
+                            asyncio.run(
+                                _warmup(
+                                    base_url=base_url,
+                                    model=args.model,
+                                    prompt=warmup_prompt,
+                                    output_len=int(args.warmup_output_len),
+                                    num_requests=warmup_n,
+                                    temperature=float(args.temperature),
+                                    top_p=float(args.top_p),
+                                    top_k=int(args.top_k),
+                                    ignore_eos=bool(args.ignore_eos),
+                                )
+                            )
+                        except Exception as exc:
+                            profile_err = f"warmup failed: {exc}"
 
-                    if base_backend == "vllm":
-                        http_post(f"{root_url}/start_profile")
-                    elif base_backend == "sglang":
-                        if tool == "torch":
-                            http_post(
-                                f"{root_url}/start_profile",
-                                json_body={
-                                    "output_dir": str(out_dir),
-                                    "activities": ["CPU", "GPU"],
-                                    "start_step": 0,
-                                    "num_steps": 20,
-                                    "with_stack": True,
-                                    "record_shapes": True,
-                                },
-                            )
+                    if profile_err is None:
+                        if base_backend == "vllm":
+                            if tool == "torch":
+                                err = http_post_ok(f"{root_url}/start_profile")
+                            else:
+                                err = None
+                        elif base_backend == "sglang":
+                            if tool == "torch":
+                                err = http_post_ok(
+                                    f"{root_url}/start_profile",
+                                    json_body={
+                                        "output_dir": str(out_dir),
+                                        "activities": ["CPU", "GPU"],
+                                        "with_stack": True,
+                                        "record_shapes": True,
+                                    },
+                                )
+                            else:
+                                err = http_post_ok(
+                                    f"{root_url}/start_profile",
+                                    json_body={
+                                        "output_dir": str(out_dir),
+                                        "activities": ["CUDA_PROFILER"],
+                                    },
+                                )
+                        elif base_backend == "roseinfer":
+                            if tool == "torch":
+                                err = http_post_ok(
+                                    f"{root_url}/start_profile",
+                                    json_body={
+                                        "tool": "torch",
+                                        "output_dir": str(out_dir),
+                                    },
+                                )
+                            else:
+                                err = http_post_ok(
+                                    f"{root_url}/start_profile",
+                                    json_body={"tool": "cuda"},
+                                )
                         else:
-                            http_post(
-                                f"{root_url}/start_profile",
-                                json_body={
-                                    "output_dir": str(out_dir),
-                                    "activities": ["CUDA_PROFILER"],
-                                    "start_step": 0,
-                                    "num_steps": 20,
-                                },
+                            err = None
+
+                        if err is not None:
+                            profile_err = f"start_profile failed: {err}"
+
+                    if profile_err is None:
+                        try:
+                            asyncio.run(
+                                run_trace_benchmark(
+                                    base_url=base_url,
+                                    model=args.model,
+                                    traces=traces,
+                                    temperature=float(args.temperature),
+                                    top_p=float(args.top_p),
+                                    top_k=int(args.top_k),
+                                    ignore_eos=bool(args.ignore_eos),
+                                )
                             )
-                    elif base_backend == "roseinfer":
-                        if tool == "torch":
-                            http_post(
-                                f"{root_url}/start_profile",
-                                json_body={"tool": "torch", "output_dir": str(out_dir)},
-                            )
-                        else:
-                            http_post(
-                                f"{root_url}/start_profile",
-                                json_body={"tool": "cuda"},
+                        except Exception as exc:
+                            profile_err = f"trace benchmark failed: {exc}"
+
+                    if (
+                        profile_err is None
+                        and base_backend == "trtllm"
+                        and tool == "torch"
+                    ):
+                        trace_path = out_dir / "trace.json"
+                        deadline = time.time() + 15.0
+                        while time.time() < deadline and not trace_path.exists():
+                            time.sleep(0.25)
+                        if not trace_path.exists():
+                            profile_err = (
+                                "torch trace not produced (TensorRT backend); "
+                                "use nsys for GPU profiling"
                             )
 
-                    asyncio.run(
-                        run_trace_benchmark(
-                            base_url=base_url,
-                            model=args.model,
-                            traces=traces,
-                            temperature=float(args.temperature),
-                            top_p=float(args.top_p),
-                            top_k=int(args.top_k),
-                            ignore_eos=bool(args.ignore_eos),
-                        )
-                    )
-
-                    if base_backend in ("vllm", "sglang", "roseinfer"):
-                        http_post(f"{root_url}/stop_profile")
+                    if profile_err is None:
+                        if base_backend == "vllm":
+                            if tool == "torch":
+                                err = http_post_ok(f"{root_url}/stop_profile")
+                                if err is not None:
+                                    profile_err = f"stop_profile failed: {err}"
+                                else:
+                                    # vLLM may flush traces asynchronously.
+                                    time.sleep(5.0)
+                        elif base_backend == "sglang":
+                            err = http_post_ok(f"{root_url}/stop_profile")
+                            if err is not None:
+                                profile_err = f"stop_profile failed: {err}"
+                            elif tool == "torch":
+                                # SGLang exports traces asynchronously; give it a moment
+                                # before terminating the server process.
+                                time.sleep(5.0)
+                            else:
+                                time.sleep(1.0)
+                        elif base_backend == "roseinfer":
+                            if tool != "nsys":
+                                err = http_post_ok(f"{root_url}/stop_profile")
+                                if err is not None:
+                                    profile_err = f"stop_profile failed: {err}"
+                            else:
+                                # For nsys capture-range=cudaProfilerApi, stopping via HTTP can
+                                # deadlock under engine->API IPC backpressure. Let the capture
+                                # end on shutdown (capture-range-end=stop-shutdown).
+                                pass
 
                     wall_s = float(time.perf_counter() - stage_t0)
                     manifest["runs"].append(
@@ -1733,9 +2192,17 @@ def main() -> None:
                                 str(nsys_prefix) if nsys_prefix is not None else None
                             ),
                             "wall_s": wall_s,
+                            "profile_error": profile_err,
                         }
                     )
-                    print(f"[profile:{tool}] {backend} wall={wall_s:.2f}s -> {out_dir}")
+                    if profile_err is None:
+                        print(
+                            f"[profile:{tool}] {backend} wall={wall_s:.2f}s -> {out_dir}"
+                        )
+                    else:
+                        print(
+                            f"[profile:{tool}] {backend} error={profile_err} -> {out_dir}"
+                        )
                 finally:
                     _terminate_process(
                         server, timeout_s=60.0 if tool == "nsys" else 15.0
@@ -1751,6 +2218,7 @@ def main() -> None:
         run_profile_stage()
         return
 
+    used_ports: set[int] = set()
     for i, spec in enumerate(run_specs):
         base_backend = spec.base_backend
         backend = spec.label
@@ -1761,9 +2229,15 @@ def main() -> None:
         fused_sampler = spec.roseinfer_fused_sampler
         fused_kv_append = spec.roseinfer_fused_kv_append
         overlap_schedule = spec.roseinfer_overlap_schedule
+        mp_ipc = spec.roseinfer_mp_ipc
+        mp_thread_cap = spec.roseinfer_mp_thread_cap
+        mp_affinity = spec.roseinfer_mp_affinity
+        mp_max_recv_per_iter = spec.roseinfer_mp_max_recv_per_iter
+        mp_fill_target = spec.roseinfer_mp_fill_target
+        mp_flat_events = spec.roseinfer_mp_flat_events
         backend_wall_t0 = time.perf_counter()
         backend_start_time = _iso_now()
-        port = int(args.port_base) + i
+        port = _pick_free_port(args.host, int(args.port_base) + i, used_ports)
         base_url = f"http://{args.host}:{port}/v1"
         log_path = run_dir / f"{backend}.server.log"
 
@@ -1778,13 +2252,22 @@ def main() -> None:
                 args,
                 host=args.host,
                 port=port,
+                async_streaming=spec.roseinfer_async_streaming,
                 prefill_attn_backend=prefill_backend,
                 engine_process=engine_process,
+                kv_cache_max_concurrency=spec.roseinfer_kv_cache_max_concurrency,
+                prefix_cache_max_entries=spec.roseinfer_prefix_cache_max_entries,
                 fused_ops=fused_ops,
                 fused_mlp=fused_mlp,
                 fused_sampler=fused_sampler,
                 fused_kv_append=fused_kv_append,
                 overlap_schedule=overlap_schedule,
+                mp_ipc=mp_ipc,
+                mp_thread_cap=mp_thread_cap,
+                mp_affinity=mp_affinity,
+                mp_max_recv_per_iter=mp_max_recv_per_iter,
+                mp_fill_target=mp_fill_target,
+                mp_flat_events=mp_flat_events,
             )
         elif base_backend == "vllm":
             cmd = _vllm_server_cmd(
@@ -1796,9 +2279,17 @@ def main() -> None:
                 args, host=args.host, port=port, max_context_len=max_ctx
             )
         elif base_backend == "trtllm":
-            _maybe_add_trtllm_source_pythonpath(env)
+            env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+            if trtllm_python:
+                env = _trtllm_runtime_env(python_exe=trtllm_python, base_env=env)
+            else:
+                _maybe_add_trtllm_source_pythonpath(env)
             cmd = _trtllm_server_cmd(
-                args, host=args.host, port=port, max_context_len=max_ctx
+                args,
+                host=args.host,
+                port=port,
+                max_context_len=max_ctx,
+                python_exe=trtllm_python,
             )
         else:
             raise ValueError(f"unknown backend: {base_backend}")
@@ -1968,6 +2459,12 @@ def main() -> None:
             "roseinfer_chunked_prefill": bool(args.roseinfer_chunked_prefill),
             "roseinfer_prefill_chunk_size": int(args.roseinfer_prefill_chunk_size),
             "roseinfer_prefix_cache": bool(args.roseinfer_prefix_cache),
+            "roseinfer_kv_cache_max_concurrency": int(
+                getattr(args, "roseinfer_kv_cache_max_concurrency", 0)
+            ),
+            "roseinfer_prefix_cache_max_entries": int(
+                getattr(args, "roseinfer_prefix_cache_max_entries", 256)
+            ),
             "roseinfer_fused_ops": bool(args.roseinfer_fused_ops),
             "roseinfer_compare_fused_ops": bool(
                 getattr(args, "roseinfer_compare_fused_ops", False)
@@ -1989,6 +2486,32 @@ def main() -> None:
             ),
             "roseinfer_compare_overlap_schedule": bool(
                 getattr(args, "roseinfer_compare_overlap_schedule", False)
+            ),
+            "roseinfer_engine_process": bool(
+                getattr(args, "roseinfer_engine_process", True)
+            ),
+            "roseinfer_compare_engine_process": bool(
+                getattr(args, "roseinfer_compare_engine_process", False)
+            ),
+            "roseinfer_async_streaming": bool(
+                getattr(args, "roseinfer_async_streaming", True)
+            ),
+            "roseinfer_mp_ipc": str(getattr(args, "roseinfer_mp_ipc", "pipe")),
+            "roseinfer_mp_max_recv_per_iter": int(
+                getattr(args, "roseinfer_mp_max_recv_per_iter", 64)
+            ),
+            "roseinfer_mp_fill_target": bool(
+                getattr(args, "roseinfer_mp_fill_target", True)
+            ),
+            "roseinfer_mp_thread_cap": bool(
+                getattr(args, "roseinfer_mp_thread_cap", True)
+            ),
+            "roseinfer_mp_affinity": bool(getattr(args, "roseinfer_mp_affinity", True)),
+            "roseinfer_mp_flat_events": bool(
+                getattr(args, "roseinfer_mp_flat_events", True)
+            ),
+            "roseinfer_compare_mp_ablations": bool(
+                getattr(args, "roseinfer_compare_mp_ablations", False)
             ),
             "trace_path": str(trace_path),
             "run_start_time": run_start_time,

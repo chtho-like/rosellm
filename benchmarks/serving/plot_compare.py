@@ -61,15 +61,37 @@ def _backend_label(key: str) -> str:
             elif p == "inproc":
                 extras.append("in-proc")
             elif p == "nofuse":
-                extras.append("no fused ops")
+                extras.append("-fused ops")
             elif p == "nomlp":
-                extras.append("no fused mlp")
+                extras.append("-fused MLP")
             elif p == "nosampler":
-                extras.append("no fused sampler")
+                extras.append("-fused sampler")
             elif p == "nokv":
-                extras.append("no fused kv append")
+                extras.append("-fused KV")
             elif p == "nooverlap":
-                extras.append("no overlap schedule")
+                extras.append("-overlap sched")
+            elif p == "nothr":
+                extras.append("-thr cap")
+            elif p == "noaff":
+                extras.append("-affinity")
+            elif p == "noasync":
+                extras.append("-async stream")
+            elif p == "nofill":
+                extras.append("-fill tgt")
+            elif p == "nodrain":
+                extras.append("-cmd budg")
+            elif p == "queueipc":
+                extras.append("+queue ipc")
+            elif p == "nobatch":
+                extras.append("-batch send")
+            elif p.startswith("kv") and p[2:].isdigit():
+                extras.append(f"+kv{int(p[2:])}")
+            elif p == "noflat":
+                extras.append("-flat evts")
+            elif p == "streamtok":
+                extras.append("+stream tok")
+            elif p == "slowcnt":
+                extras.append("-fast cnt")
         if extras:
             return f"roseinfer ({', '.join(extras)})"
         return "roseinfer"
@@ -82,8 +104,30 @@ def _backend_color(key: str) -> str:
     if key.startswith("roseinfer"):
         if "nofuse" in key.split("+"):
             return "#7f7f7f"
+        if "queueipc" in key.split("+"):
+            return "#17becf"
+        if "nobatch" in key.split("+"):
+            return "#c7c7c7"
+        if "nothr" in key.split("+"):
+            return "#9467bd"
+        if "noaff" in key.split("+"):
+            return "#8c564b"
+        if "noasync" in key.split("+"):
+            return "#c5b0d5"
+        if "nofill" in key.split("+"):
+            return "#9edae5"
+        if "nodrain" in key.split("+"):
+            return "#e377c2"
+        if any(p.startswith("kv") and p[2:].isdigit() for p in key.split("+")):
+            return "#ffbb78"
+        if "noflat" in key.split("+"):
+            return "#ff9896"
+        if "streamtok" in key.split("+"):
+            return "#c7c7c7"
         if "nooverlap" in key.split("+"):
             return "#aec7e8"
+        if "slowcnt" in key.split("+"):
+            return "#bcbd22"
         if "nomlp" in key.split("+"):
             return "#e377c2"
         if "nosampler" in key.split("+"):
@@ -100,9 +144,31 @@ def _backend_marker(key: str) -> str:
     if key.startswith("roseinfer"):
         parts = key.split("+")
         if "nofuse" in parts:
-            return "X"
+            return "s"
+        if "queueipc" in parts:
+            return "D"
+        if "nobatch" in parts:
+            return "o"
+        if "nothr" in parts:
+            return "d"
+        if "noaff" in parts:
+            return "<"
+        if "noasync" in parts:
+            return "s"
+        if "nofill" in parts:
+            return "o"
+        if "nodrain" in parts:
+            return "v"
+        if any(p.startswith("kv") and p[2:].isdigit() for p in parts):
+            return "^"
+        if "noflat" in parts:
+            return "8"
+        if "streamtok" in parts:
+            return "s"
         if "nooverlap" in parts:
             return ">"
+        if "slowcnt" in parts:
+            return "h"
         if "nomlp" in parts:
             return "8"
         if "nosampler" in parts:
@@ -163,6 +229,29 @@ def _paper_rcparams() -> None:
             "lines.markersize": 6,
         }
     )
+
+
+def _paper_rcparams_compact(*, dpi: int = 250) -> dict[str, Any]:
+    return {
+        "figure.dpi": dpi,
+        "savefig.dpi": dpi,
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.grid": False,
+        "axes.linewidth": 1.0,
+        "axes.labelsize": 10,
+        "axes.titlesize": 11,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "legend.fontsize": 9,
+        "legend.frameon": False,
+        "lines.linewidth": 1.4,
+        "lines.markersize": 5,
+    }
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -454,34 +543,132 @@ def _plot_online_single(payload: dict[str, Any], out_dir: Path) -> list[Path]:
     return out_paths
 
 
+def _plot_online_percentile_only(
+    payload: dict[str, Any],
+    out_dir: Path,
+    *,
+    percentile: str,
+) -> Path:
+    rows = _flatten_online_summaries(payload)
+    if not rows:
+        raise ValueError("no online summaries found")
+    backends = sorted({r["backend"] for r in rows})
+
+    p = percentile.strip().lower()
+    if p in ("90", "p90"):
+        p = "p90"
+    elif p in ("99", "p99"):
+        p = "p99"
+    else:
+        raise ValueError("percentile must be p90 or p99")
+
+    def series(backend: str, key: str) -> tuple[np.ndarray, np.ndarray]:
+        pts = sorted((r["scale"], r[key]) for r in rows if r["backend"] == backend)
+        x = np.array([p[0] for p in pts], dtype=np.float64)
+        y = np.array([p[1] for p in pts], dtype=np.float64)
+        return x, y
+
+    with plt.rc_context(_paper_rcparams_compact()):
+        fig, axes = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=False)
+        axes = axes.reshape(-1)
+        specs = [
+            ("ttft_ms", "TTFT", "TTFT (ms)"),
+            ("tpot_ms", "TPOT", "TPOT (ms/token)"),
+            ("itl_ms", "ITL", "ITL (ms/token)"),
+            ("e2e_ms", "E2E", "E2E (ms)"),
+        ]
+        for idx, (ax, (metric, title, ylabel)) in enumerate(
+            zip(axes, specs, strict=True)
+        ):
+            for backend in backends:
+                label = _backend_label(backend)
+                color = _backend_color(backend)
+                marker = _backend_marker(backend)
+                x, y = series(backend, f"{metric}_{p}")
+                ax.plot(x, y, marker=marker, color=color, label=label)
+
+            if idx in (2, 3):
+                ax.set_xlabel("Trace time scale (smaller = higher load)")
+            ax.set_ylabel(ylabel)
+            ax.set_title(f"{title} ({p.upper()})")
+
+        handles, labels = axes[0].get_legend_handles_labels()
+        fig.tight_layout(rect=(0.0, 0.0, 0.80, 1.0))
+        fig.legend(
+            handles,
+            labels,
+            loc="center left",
+            bbox_to_anchor=(0.81, 0.5),
+            ncol=1,
+            handlelength=2.0,
+            labelspacing=0.55,
+        )
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"online_latency_{p}_only.png"
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+        return out_path
+
+
 def _plot_offline(payload: dict[str, Any], out_dir: Path) -> Path:
     results = payload.get("results", [])
     if not results:
         raise ValueError("no offline results found")
 
-    def tick_label(backend: str) -> str:
+    def tick_label(result: dict[str, Any]) -> str:
+        backend = str(result.get("backend", ""))
         label = _backend_label(backend)
         if not label.startswith("roseinfer (") or not label.endswith(")"):
             return label
         inner = label[len("roseinfer (") : -1]
         parts = [p.strip() for p in inner.split(",") if p.strip()]
         short = {
-            "no fused ops": "no ops",
-            "no fused mlp": "no MLP",
-            "no fused sampler": "no samp",
-            "no fused kv append": "no KV",
-            "no overlap schedule": "no overlap sched",
+            "-fused ops": "-ops",
+            "-fused MLP": "-MLP",
+            "-fused sampler": "-samp",
+            "-fused KV": "-KV",
+            "-overlap sched": "-overlap",
+            "-thr cap": "-thr cap",
+            "-affinity": "-affinity",
+            "-async stream": "-async",
+            "-fill tgt": "-fill tgt",
+            "-cmd budg": "-cmd budg",
+            "+queue ipc": "+queue ipc",
+            "-batch send": "-batch",
+            "-flat evts": "-flat",
+            "+stream tok": "+stream tok",
+            "-fast cnt": "-fast cnt",
         }
-        parts = [short.get(p, p) for p in parts]
+        rewritten: list[str] = []
+        for part in parts:
+            if part.startswith("+kv"):
+                suffix = part[len("+kv") :].strip()
+                if suffix.isdigit():
+                    rewritten.append(f"+kv{suffix}")
+                    continue
+            rewritten.append(short.get(part, part))
+        parts = rewritten
         if not parts:
             return "roseinfer"
-        return "\n".join(parts)
+        suffix = ""
+        if float(result.get("output_throughput_tps", 0.0) or 0.0) <= 0.0:
+            err = str((result.get("extra") or {}).get("error") or "")
+            if "out of memory" in err.lower():
+                suffix = "\nOOM"
+            elif err:
+                suffix = "\nERR"
+        return "\n".join(parts) + suffix
 
     _paper_rcparams()
-    fig, axes = plt.subplots(1, 3, figsize=(12.5, 3.6), constrained_layout=True)
+    n_rows = len(results)
+    height = max(4.6, min(12.0, 0.46 * n_rows))
+    fig, axes = plt.subplots(
+        1, 3, figsize=(13.5, height), constrained_layout=True, sharey=True
+    )
 
     backends = [r["backend"] for r in results]
-    labels = [tick_label(str(b)) for b in backends]
+    labels = [tick_label(r) for r in results]
     colors = [_backend_color(str(b)) for b in backends]
 
     metrics = [
@@ -489,24 +676,36 @@ def _plot_offline(payload: dict[str, Any], out_dir: Path) -> Path:
         ("request_throughput_rps", "Request Throughput (req/s)"),
         ("total_throughput_tps", "Total Throughput (tok/s)"),
     ]
+    y = np.arange(len(backends), dtype=np.float32)
     for ax, (key, title) in zip(axes, metrics, strict=True):
         vals = [float(r[key]) for r in results]
-        bar_width = 0.70
-        x = np.arange(len(vals), dtype=np.float32) * 1.40
-        ax.bar(
-            x,
+        ax.barh(
+            y,
             vals,
-            width=bar_width,
+            height=0.64,
             color=colors,
             edgecolor="black",
             linewidth=0.8,
         )
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=8)
-        ax.tick_params(axis="x", pad=4)
-        ax.set_xlim(x[0] - bar_width, x[-1] + bar_width)
         ax.set_title(title)
-        ax.set_ylabel(title.split(" (", 1)[-1].rstrip(")"))
+        ax.set_xlabel(title.split(" (", 1)[-1].rstrip(")"))
+        ax.grid(axis="x", linestyle="--", linewidth=0.6, alpha=0.35)
+        max_val = max(vals) if vals else 1.0
+        ax.set_xlim(0.0, max_val * 1.08)
+
+    axes[0].set_yticks(y)
+    if n_rows <= 16:
+        y_fontsize = 8
+    elif n_rows <= 22:
+        y_fontsize = 7
+    else:
+        y_fontsize = 6
+    axes[0].set_yticklabels(labels, fontsize=y_fontsize)
+    axes[0].tick_params(axis="y", pad=8)
+    for ax in axes[1:]:
+        ax.tick_params(axis="y", left=False, labelleft=False)
+
+    axes[0].invert_yaxis()
 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "offline_throughput_compare.png"
@@ -521,6 +720,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--online", type=str, default=None, help="Path to online_results.json."
+    )
+    parser.add_argument(
+        "--online-no-default",
+        action="store_true",
+        help="Only write extra online percentile plots (do not overwrite default figures/summaries).",
+    )
+    parser.add_argument(
+        "--online-percentiles",
+        type=str,
+        default="",
+        help='Comma-separated percentiles for percentile-only plots (e.g. "p90,p99").',
     )
     parser.add_argument(
         "--offline", type=str, default=None, help="Path to offline_results.json."
@@ -540,12 +750,24 @@ def main() -> None:
     if args.online:
         online_path = Path(args.online).expanduser().resolve()
         online_payload = _load_json(online_path)
-        out_path = _plot_online(online_payload, out_dir)
-        for p in _plot_online_single(online_payload, out_dir):
-            print(f"Wrote: {p}")
-        md_path = _write_online_summary_md(online_payload, out_dir)
-        print(f"Wrote: {md_path}")
-        print(f"Wrote: {out_path}")
+        if not bool(getattr(args, "online_no_default", False)):
+            out_path = _plot_online(online_payload, out_dir)
+            for p in _plot_online_single(online_payload, out_dir):
+                print(f"Wrote: {p}")
+            md_path = _write_online_summary_md(online_payload, out_dir)
+            print(f"Wrote: {md_path}")
+            print(f"Wrote: {out_path}")
+
+        percentiles = [
+            p.strip()
+            for p in str(getattr(args, "online_percentiles", "")).split(",")
+            if p.strip()
+        ]
+        for percentile in percentiles:
+            out_path = _plot_online_percentile_only(
+                online_payload, out_dir, percentile=percentile
+            )
+            print(f"Wrote: {out_path}")
     if args.offline:
         offline_path = Path(args.offline).expanduser().resolve()
         offline_payload = _load_json(offline_path)
