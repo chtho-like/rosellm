@@ -740,6 +740,8 @@ def _roseinfer_server_cmd(
     mp_max_recv_per_iter: int | None = None,
     mp_fill_target: bool | None = None,
     mp_flat_events: bool | None = None,
+    mp_async_admit: bool | None = None,
+    mp_tokenize_workers: int | None = None,
 ) -> list[str]:
     prefill_attn_backend = (
         str(prefill_attn_backend)
@@ -841,6 +843,16 @@ def _roseinfer_server_cmd(
         if mp_flat_events is not None
         else bool(getattr(args, "roseinfer_mp_flat_events", True))
     )
+    mp_async_admit = (
+        bool(mp_async_admit)
+        if mp_async_admit is not None
+        else bool(getattr(args, "roseinfer_mp_async_admit", False))
+    )
+    mp_tokenize_workers = (
+        int(mp_tokenize_workers)
+        if mp_tokenize_workers is not None
+        else int(getattr(args, "roseinfer_mp_tokenize_workers", 0))
+    )
     cmd = [
         sys.executable,
         "-m",
@@ -901,6 +913,9 @@ def _roseinfer_server_cmd(
         cmd += ["--mp-flat-events" if mp_flat_events else "--no-mp-flat-events"]
         cmd += ["--mp-thread-cap" if mp_thread_cap else "--no-mp-thread-cap"]
         cmd += ["--mp-affinity" if mp_affinity else "--no-mp-affinity"]
+        cmd += ["--mp-async-admit" if mp_async_admit else "--no-mp-async-admit"]
+        if int(mp_tokenize_workers) > 0:
+            cmd += ["--mp-tokenize-workers", str(int(mp_tokenize_workers))]
     return cmd
 
 
@@ -1213,7 +1228,7 @@ def parse_args() -> argparse.Namespace:
         "--roseinfer-prefill-attn-backend",
         type=str,
         default="auto",
-        choices=["auto", "naive", "flashinfer", "flashattn"],
+        choices=["auto", "auto2", "naive", "flashinfer", "flashattn"],
         help="Prefill attention backend for roseinfer (default: auto).",
     )
     parser.add_argument(
@@ -1510,6 +1525,28 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(roseinfer_mp_affinity=True)
     parser.add_argument(
+        "--roseinfer-mp-async-admit",
+        dest="roseinfer_mp_async_admit",
+        action="store_true",
+        help="roseinfer mp: enable API-side async admit threads (--mp-async-admit).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-mp-async-admit",
+        dest="roseinfer_mp_async_admit",
+        action="store_false",
+        help="roseinfer mp: disable API-side async admit threads.",
+    )
+    parser.set_defaults(roseinfer_mp_async_admit=True)
+    parser.add_argument(
+        "--roseinfer-mp-tokenize-workers",
+        type=int,
+        default=4,
+        help=(
+            "roseinfer mp: API-side tokenization worker threads (--mp-tokenize-workers) "
+            "when --mp-async-admit is enabled (default: 4)."
+        ),
+    )
+    parser.add_argument(
         "--roseinfer-compare-mp-ablations",
         action="store_true",
         help=(
@@ -1669,6 +1706,8 @@ def main() -> None:
         roseinfer_mp_max_recv_per_iter: int | None = None
         roseinfer_mp_fill_target: bool | None = None
         roseinfer_mp_flat_events: bool | None = None
+        roseinfer_mp_async_admit: bool | None = None
+        roseinfer_mp_tokenize_workers: int | None = None
 
     run_specs: list[RunSpec] = []
     for backend in backends:
@@ -1701,6 +1740,10 @@ def main() -> None:
         base_mp_max_recv = int(getattr(args, "roseinfer_mp_max_recv_per_iter", 64))
         base_mp_fill_target = bool(getattr(args, "roseinfer_mp_fill_target", True))
         base_mp_flat_events = bool(getattr(args, "roseinfer_mp_flat_events", True))
+        base_mp_async_admit = bool(getattr(args, "roseinfer_mp_async_admit", False))
+        base_mp_tokenize_workers = int(
+            getattr(args, "roseinfer_mp_tokenize_workers", 0)
+        )
         engine_cfgs: list[bool] = [base_engine_process]
         if bool(getattr(args, "roseinfer_compare_engine_process", False)):
             engine_cfgs.append(not base_engine_process)
@@ -1818,6 +1861,18 @@ def main() -> None:
                         label += "+nogc"
                     if not base_fast_sse:
                         label += "+nofastsse"
+                    default_mp_async_admit = True
+                    default_mp_tokenize_workers = 4
+                    if base_mp_async_admit != default_mp_async_admit:
+                        label += "+nompasync"
+                    if base_mp_async_admit:
+                        tok_workers = (
+                            int(base_mp_tokenize_workers)
+                            if int(base_mp_tokenize_workers) > 0
+                            else 1
+                        )
+                        if tok_workers != int(default_mp_tokenize_workers):
+                            label += f"+tok{tok_workers}"
                     run_specs.append(
                         RunSpec(
                             base_backend="roseinfer",
@@ -1841,6 +1896,8 @@ def main() -> None:
                             roseinfer_mp_max_recv_per_iter=base_mp_max_recv,
                             roseinfer_mp_fill_target=base_mp_fill_target,
                             roseinfer_mp_flat_events=base_mp_flat_events,
+                            roseinfer_mp_async_admit=base_mp_async_admit,
+                            roseinfer_mp_tokenize_workers=base_mp_tokenize_workers,
                         )
                     )
 
@@ -1994,6 +2051,8 @@ def main() -> None:
                 mp_max_recv_per_iter = spec.roseinfer_mp_max_recv_per_iter
                 mp_fill_target = spec.roseinfer_mp_fill_target
                 mp_flat_events = spec.roseinfer_mp_flat_events
+                mp_async_admit = spec.roseinfer_mp_async_admit
+                mp_tokenize_workers = spec.roseinfer_mp_tokenize_workers
 
                 port = _pick_free_port(args.host, int(args.port_base) + i, used_ports)
                 root_url = f"http://{args.host}:{port}"
@@ -2043,6 +2102,8 @@ def main() -> None:
                         mp_max_recv_per_iter=mp_max_recv_per_iter,
                         mp_fill_target=mp_fill_target,
                         mp_flat_events=mp_flat_events,
+                        mp_async_admit=mp_async_admit,
+                        mp_tokenize_workers=mp_tokenize_workers,
                     )
                 elif base_backend == "vllm":
                     cmd = _vllm_server_cmd(
@@ -2072,28 +2133,26 @@ def main() -> None:
                     raise ValueError(f"unknown backend: {base_backend}")
 
                 nsys_prefix = None
+                nsys_capture_range = None
                 if tool == "nsys":
                     nsys_prefix = out_dir / "nsys"
-                    capture_range = "cudaProfilerApi"
-                    capture_range_end = "stop-shutdown"
-                    if base_backend in ("vllm", "trtllm"):
-                        capture_range = "none"
-                        capture_range_end = None
+                    # NOTE: Many backends (roseinfer multiprocess / SGLang 3-stage) spawn
+                    # worker processes early. `capture-range=cudaProfilerApi` can miss CUDA
+                    # kernels from already-running children; profiling the full process tree
+                    # is more reliable for cross-backend comparisons.
+                    nsys_capture_range = "none"
                     cmd = [
                         "nsys",
                         "profile",
                         "--force-overwrite=true",
-                        f"--capture-range={capture_range}",
+                        f"--capture-range={nsys_capture_range}",
                         "--trace=cuda,nvtx,osrt",
                         "--sample=none",
-                        "--cuda-graph-trace=node",
                         "--trace-fork-before-exec=true",
                         "-o",
                         str(nsys_prefix),
                         *cmd,
                     ]
-                    if capture_range_end is not None:
-                        cmd.insert(5, f"--capture-range-end={capture_range_end}")
 
                 server = _start_process(
                     cmd=cmd, env=env, cpu_set=server_cpus, log_path=log_path
@@ -2164,13 +2223,9 @@ def main() -> None:
                                     },
                                 )
                             else:
-                                err = http_post_ok(
-                                    f"{root_url}/start_profile",
-                                    json_body={
-                                        "output_dir": str(out_dir),
-                                        "activities": ["CUDA_PROFILER"],
-                                    },
-                                )
+                                # With `nsys_capture_range=none`, avoid extra CUDA profiler
+                                # start/stop calls (they can confuse multi-process capture).
+                                err = None
                         elif base_backend == "roseinfer":
                             if tool == "torch":
                                 err = http_post_ok(
@@ -2181,10 +2236,9 @@ def main() -> None:
                                     },
                                 )
                             else:
-                                err = http_post_ok(
-                                    f"{root_url}/start_profile",
-                                    json_body={"tool": "cuda"},
-                                )
+                                # With `nsys_capture_range=none`, let Nsight Systems capture
+                                # from process start; don't use cudaProfilerStart/Stop.
+                                err = None
                         else:
                             err = None
 
@@ -2247,9 +2301,7 @@ def main() -> None:
                                 if err is not None:
                                     profile_err = f"stop_profile failed: {err}"
                             else:
-                                # For nsys capture-range=cudaProfilerApi, stopping via HTTP can
-                                # deadlock under engine->API IPC backpressure. Let the capture
-                                # end on shutdown (capture-range-end=stop-shutdown).
+                                # nsys capture-range=none; nothing to stop explicitly.
                                 pass
 
                     wall_s = float(time.perf_counter() - stage_t0)
@@ -2309,6 +2361,8 @@ def main() -> None:
         mp_max_recv_per_iter = spec.roseinfer_mp_max_recv_per_iter
         mp_fill_target = spec.roseinfer_mp_fill_target
         mp_flat_events = spec.roseinfer_mp_flat_events
+        mp_async_admit = spec.roseinfer_mp_async_admit
+        mp_tokenize_workers = spec.roseinfer_mp_tokenize_workers
         backend_wall_t0 = time.perf_counter()
         backend_start_time = _iso_now()
         port = _pick_free_port(args.host, int(args.port_base) + i, used_ports)
@@ -2345,6 +2399,8 @@ def main() -> None:
                 mp_max_recv_per_iter=mp_max_recv_per_iter,
                 mp_fill_target=mp_fill_target,
                 mp_flat_events=mp_flat_events,
+                mp_async_admit=mp_async_admit,
+                mp_tokenize_workers=mp_tokenize_workers,
             )
         elif base_backend == "vllm":
             cmd = _vllm_server_cmd(
@@ -2591,6 +2647,12 @@ def main() -> None:
             "roseinfer_mp_affinity": bool(getattr(args, "roseinfer_mp_affinity", True)),
             "roseinfer_mp_flat_events": bool(
                 getattr(args, "roseinfer_mp_flat_events", True)
+            ),
+            "roseinfer_mp_async_admit": bool(
+                getattr(args, "roseinfer_mp_async_admit", False)
+            ),
+            "roseinfer_mp_tokenize_workers": int(
+                getattr(args, "roseinfer_mp_tokenize_workers", 0)
             ),
             "roseinfer_compare_mp_ablations": bool(
                 getattr(args, "roseinfer_compare_mp_ablations", False)

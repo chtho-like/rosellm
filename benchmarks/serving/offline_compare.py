@@ -1382,11 +1382,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling.")
     parser.add_argument("--top-k", type=int, default=50, help="Top-k sampling.")
-    parser.add_argument(
+    ignore_eos_group = parser.add_mutually_exclusive_group()
+    ignore_eos_group.add_argument(
         "--ignore-eos",
+        dest="ignore_eos",
         action="store_true",
-        help="Ignore EOS to force max_tokens output.",
+        help="Ignore EOS early-stop (default: enabled for offline throughput).",
     )
+    ignore_eos_group.add_argument(
+        "--disable-ignore-eos",
+        dest="ignore_eos",
+        action="store_false",
+        help=(
+            "Enable EOS early-stop (not recommended for offline throughput numbers; "
+            "output length becomes data-dependent)."
+        ),
+    )
+    parser.set_defaults(ignore_eos=True)
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument(
         "--tensor-parallel-size",
@@ -1438,7 +1450,7 @@ def parse_args() -> argparse.Namespace:
         "--roseinfer-prefill-attn-backend",
         type=str,
         default="auto",
-        choices=["auto", "naive", "flashinfer", "flashattn"],
+        choices=["auto", "auto2", "naive", "flashinfer", "flashattn"],
         help="Prefill attention backend for roseinfer (default: auto).",
     )
     parser.add_argument(
@@ -2209,6 +2221,8 @@ def _run_compare(args: argparse.Namespace) -> None:
                 ]
                 if args.ignore_eos:
                     py_cmd.append("--ignore-eos")
+                else:
+                    py_cmd.append("--disable-ignore-eos")
                 if args.skip_warmup:
                     py_cmd.append("--skip-warmup")
                 if args.no_amp:
@@ -2326,12 +2340,15 @@ def _run_compare(args: argparse.Namespace) -> None:
                 nsys_prefix = None
                 if tool == "nsys":
                     nsys_prefix = out_dir / "nsys"
+                    # See `benchmarks/serving/online_compare.py`: multi-process backends
+                    # can start worker processes before `cudaProfilerStart`, causing
+                    # capture-range=cudaProfilerApi to miss GPU kernels. Prefer capturing
+                    # from process start for reliable process-tree profiling.
                     cmd += [
                         "nsys",
                         "profile",
                         "--force-overwrite=true",
-                        "--capture-range=cudaProfilerApi",
-                        "--capture-range-end=stop-shutdown",
+                        "--capture-range=none",
                         "--trace=cuda,nvtx,osrt",
                         "--sample=none",
                         "--trace-fork-before-exec=true",
@@ -2461,6 +2478,8 @@ def _run_compare(args: argparse.Namespace) -> None:
         ]
         if args.ignore_eos:
             cmd.append("--ignore-eos")
+        else:
+            cmd.append("--disable-ignore-eos")
         if args.skip_warmup:
             cmd.append("--skip-warmup")
         if args.no_amp:

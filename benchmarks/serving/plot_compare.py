@@ -58,6 +58,8 @@ def _backend_label(key: str) -> str:
                 extras.append("naive")
             elif p == "chunked":
                 extras.append("chunked prefill")
+            elif p == "auto2":
+                extras.append("prefill auto2")
             elif p == "inproc":
                 extras.append("in-proc")
             elif p == "nofuse":
@@ -94,6 +96,12 @@ def _backend_label(key: str) -> str:
                 extras.append("-gc freeze")
             elif p == "nofastsse":
                 extras.append("-fast SSE")
+            elif p == "mpasync":
+                extras.append("+mp async admit")
+            elif p.startswith("tok") and p[3:].isdigit():
+                extras.append(f"+tok{int(p[3:])}")
+            elif p == "nompasync":
+                extras.append("-mp async admit")
             elif p == "gcfreeze":
                 # Backward-compat: older result keys used +gcfreeze.
                 pass
@@ -122,10 +130,16 @@ def _backend_color(key: str) -> str:
             return "#c7c7c7"
         if any(p.startswith("batch") and p[5:].isdigit() for p in key.split("+")):
             return "#4c78a8"
+        if "auto2" in key.split("+"):
+            return "#d62728"
         if "nogc" in key.split("+"):
             return "#7f7f7f"
         if "nofastsse" in key.split("+"):
             return "#0f766e"
+        if "mpasync" in key.split("+"):
+            return "#4c78a8"
+        if "nompasync" in key.split("+"):
+            return "#aec7e8"
         if "gcfreeze" in key.split("+"):
             return "#4e79a7"
         if "fastsse" in key.split("+"):
@@ -173,10 +187,16 @@ def _backend_marker(key: str) -> str:
             return "o"
         if any(p.startswith("batch") and p[5:].isdigit() for p in parts):
             return "D"
+        if "auto2" in parts:
+            return "v"
         if "nogc" in parts:
             return "d"
         if "nofastsse" in parts:
             return "s"
+        if "mpasync" in parts:
+            return "D"
+        if "nompasync" in parts:
+            return "d"
         if "gcfreeze" in parts:
             return "s"
         if "fastsse" in parts:

@@ -1508,7 +1508,7 @@ def parse_args() -> argparse.Namespace:
         "--prefill-attn-backend",
         type=str,
         default="auto",
-        choices=["auto", "naive", "flashinfer", "flashattn"],
+        choices=["auto", "auto2", "naive", "flashinfer", "flashattn"],
         help="Prefill attention backend (default: auto).",
     )
     parser.add_argument(
@@ -1849,6 +1849,31 @@ def parse_args() -> argparse.Namespace:
         help="CPU set for engine process, e.g. '8-15,24-31' (default: auto-split).",
     )
     parser.add_argument(
+        "--mp-async-admit",
+        dest="mp_async_admit",
+        action="store_true",
+        help=(
+            "Offload prompt tokenization + engine command submission to background threads "
+            "in the API process (default: enabled)."
+        ),
+    )
+    parser.add_argument(
+        "--no-mp-async-admit",
+        dest="mp_async_admit",
+        action="store_false",
+        help="Disable async admit threads for multiprocess mode.",
+    )
+    parser.set_defaults(mp_async_admit=True)
+    parser.add_argument(
+        "--mp-tokenize-workers",
+        type=int,
+        default=4,
+        help=(
+            "Tokenization worker threads in the API process when --mp-async-admit is set "
+            "(default: 4)."
+        ),
+    )
+    parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
@@ -2121,6 +2146,8 @@ def main() -> None:
             stream_interval=int(args.stream_interval),
             max_inflight_requests=args.max_inflight_requests,
             ipc_mode=str(getattr(args, "mp_ipc", "pipe")),
+            async_admit=bool(getattr(args, "mp_async_admit", False)),
+            tokenize_workers=int(getattr(args, "mp_tokenize_workers", 0)),
         )
         if api_cpus:
             try:

@@ -30,6 +30,19 @@ from rosellm.roseinfer.hybrid_queue import HybridQueue
 
 
 @dataclass(frozen=True)
+class _MPAdmitTask:
+    request_id: int
+    prompt: str
+    prompt_token_ids: list[int] | None
+    max_new_tokens: int
+    temperature: float
+    top_k: int
+    top_p: float
+    stop_on_eos: bool
+    do_sample: bool
+
+
+@dataclass(frozen=True)
 class ToyEngineSpec:
     config: Any
     seed: int = 0
@@ -1548,17 +1561,24 @@ class MPSchedulerManager:
         max_inflight_requests: int | None = None,
         start_timeout_s: float = 300.0,
         ipc_mode: str = "pipe",
+        async_admit: bool = False,
+        tokenize_workers: int = 0,
     ) -> None:
         if int(stream_interval) <= 0:
             raise ValueError("stream_interval must be >= 1")
         ipc_mode = str(ipc_mode).lower()
         if ipc_mode not in ("queue", "pipe"):
             raise ValueError("ipc_mode must be queue|pipe")
+        tokenize_workers = int(tokenize_workers)
+        if tokenize_workers < 0:
+            raise ValueError("tokenize_workers must be >= 0")
         self.tokenizer = tokenizer
         self._make_detok = lambda: build_detokenizer(
             self.tokenizer, tokenizer_name=engine_args.tokenizer_name
         )
         self._stream_interval = int(stream_interval)
+        self._async_admit = bool(async_admit)
+        self._tokenize_workers = tokenize_workers
         self._max_inflight_requests = (
             int(max_inflight_requests) if max_inflight_requests is not None else None
         )
@@ -1575,6 +1595,9 @@ class MPSchedulerManager:
         self._profile_seq: int = 0
         self._profile_waiters: dict[int, threading.Event] = {}
         self._profile_results: dict[int, ProfileEvent] = {}
+        self._cuda_prof_active = False
+        self._admit_q: "queue.Queue[_MPAdmitTask | None] | None" = None
+        self._admit_threads: list[threading.Thread] = []
 
         ctx = mp.get_context("spawn")
         self._ipc_mode = ipc_mode
@@ -1627,6 +1650,18 @@ class MPSchedulerManager:
         )
         self._worker.start()
 
+        if self._async_admit:
+            self._admit_q = queue.Queue()
+            worker_ct = int(self._tokenize_workers) if self._tokenize_workers > 0 else 1
+            for i in range(worker_ct):
+                th = threading.Thread(
+                    target=self._admit_loop,
+                    name=f"roseinfer-mp-admit-{i}",
+                    daemon=True,
+                )
+                self._admit_threads.append(th)
+                th.start()
+
     def set_asyncio_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._async_loop = loop
         with self._lock:
@@ -1660,6 +1695,11 @@ class MPSchedulerManager:
     def close(self) -> None:
         proc = self._proc
         worker = self._worker
+        admit_threads = list(self._admit_threads)
+        admit_q = self._admit_q
+        if admit_q is not None:
+            for _ in admit_threads:
+                admit_q.put(None)
         with self._lock:
             if not self._running:
                 return
@@ -1671,10 +1711,17 @@ class MPSchedulerManager:
             self._queues.clear()
             self._detoks.clear()
             self._stream_states.clear()
+            cuda_active = bool(self._cuda_prof_active)
+            self._cuda_prof_active = False
         for ev in waiters:
             ev.set()
         for q in queues:
             q.put(None)
+        if cuda_active and torch.cuda.is_available():
+            try:
+                torch.cuda.profiler.stop()
+            except Exception:
+                pass
         try:
             if self._ipc_mode == "queue":
                 cmd_q = self._cmd_q
@@ -1699,6 +1746,8 @@ class MPSchedulerManager:
             except Exception:
                 pass
         worker.join(timeout=1.0)
+        for th in admit_threads:
+            th.join(timeout=1.0)
         proc.join(timeout=5.0)
         if proc.is_alive():
             proc.kill()
@@ -1751,6 +1800,27 @@ class MPSchedulerManager:
             self._detoks[request_id] = detok
             self._stream_states[request_id] = _StreamState()
 
+        if self._async_admit:
+            admit_q = self._admit_q
+            if admit_q is None:
+                raise RuntimeError("async admit queue is not initialized")
+            admit_q.put(
+                _MPAdmitTask(
+                    request_id=int(request_id),
+                    prompt=str(prompt),
+                    prompt_token_ids=list(prompt_token_ids)
+                    if prompt_token_ids is not None
+                    else None,
+                    max_new_tokens=int(max_new_tokens),
+                    temperature=float(temperature),
+                    top_k=int(top_k),
+                    top_p=float(top_p),
+                    stop_on_eos=bool(stop_on_eos),
+                    do_sample=bool(do_sample),
+                )
+            )
+            return request_id
+
         if prompt_token_ids is None:
             token_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         else:
@@ -1795,6 +1865,81 @@ class MPSchedulerManager:
                 q2.put(None)
             raise
         return request_id
+
+    def _admit_loop(self) -> None:
+        q = self._admit_q
+        if q is None:
+            return
+        try:
+            while True:
+                task = q.get()
+                if task is None:
+                    return
+                rid = int(task.request_id)
+                with self._lock:
+                    if not self._running or rid not in self._queues:
+                        continue
+                    detok = self._detoks.get(rid)
+                    out_q = self._queues.get(rid)
+                if detok is None or out_q is None:
+                    continue
+
+                try:
+                    if task.prompt_token_ids is None:
+                        token_ids = self.tokenizer.encode(
+                            task.prompt,
+                            add_special_tokens=False,
+                        )
+                    else:
+                        token_ids = list(task.prompt_token_ids)
+                    if not token_ids:
+                        eos = getattr(self.tokenizer, "eos_token_id", 0)
+                        token_ids = [int(eos) if eos is not None else 0]
+                    max_ctx = self._max_context
+                    if max_ctx is not None and len(token_ids) > max_ctx:
+                        token_ids = token_ids[-max_ctx:]
+
+                    with self._lock:
+                        if not self._running or rid not in self._queues:
+                            continue
+
+                    detok.start_prompt(token_ids)
+
+                    with self._lock:
+                        if not self._running or rid not in self._queues:
+                            continue
+
+                    cmd = AddRequestCmd(
+                        request_id=rid,
+                        prompt_token_ids=token_ids,
+                        max_new_tokens=int(task.max_new_tokens),
+                        temperature=float(task.temperature),
+                        top_k=int(task.top_k),
+                        top_p=float(task.top_p),
+                        stop_on_eos=bool(task.stop_on_eos),
+                        do_sample=bool(task.do_sample),
+                    )
+                    if self._ipc_mode == "queue":
+                        cmd_q = self._cmd_q
+                        if cmd_q is None:
+                            raise RuntimeError("missing command queue")
+                        cmd_q.put(cmd)
+                    else:
+                        cmd_send = self._cmd_send
+                        if cmd_send is None:
+                            raise RuntimeError("missing command pipe")
+                        payload = _encode_cmd(cmd)
+                        with self._cmd_lock:
+                            cmd_send.send_bytes(payload)
+                except Exception:
+                    self._cancel_backend(rid)
+                    out_q.put(None)
+                    with self._lock:
+                        self._queues.pop(rid, None)
+                        self._detoks.pop(rid, None)
+                        self._stream_states.pop(rid, None)
+        except Exception:
+            traceback.print_exc()
 
     def stream_text(self, request_id: int) -> Iterator[str]:
         with self._lock:
@@ -1848,6 +1993,8 @@ class MPSchedulerManager:
         with self._lock:
             if not self._running:
                 raise RuntimeError("MPSchedulerManager is closed")
+            if tool == "cuda" and self._cuda_prof_active:
+                raise RuntimeError("cuda profiler already running")
             profile_id = int(self._profile_seq)
             self._profile_seq += 1
             self._profile_waiters[profile_id] = waiter
@@ -1868,14 +2015,32 @@ class MPSchedulerManager:
             payload = _encode_cmd(cmd)
             with self._cmd_lock:
                 cmd_send.send_bytes(payload)
-        if not waiter.wait(timeout=timeout_s):
-            raise TimeoutError("start_profile timed out")
-        with self._lock:
-            evt = self._profile_results.pop(profile_id, None)
-        if evt is None:
-            raise RuntimeError("missing profile ack event")
-        if not bool(evt.ok):
-            raise RuntimeError(evt.message or "start_profile failed")
+
+        try:
+            if not waiter.wait(timeout=timeout_s):
+                raise TimeoutError("start_profile timed out")
+            with self._lock:
+                evt = self._profile_results.pop(profile_id, None)
+            if evt is None:
+                raise RuntimeError("missing profile ack event")
+            if not bool(evt.ok):
+                raise RuntimeError(evt.message or "start_profile failed")
+            if tool == "cuda" and torch.cuda.is_available():
+                # Ensure the API process has an active CUDA context; otherwise
+                # `cudaProfilerStart` may be a no-op and Nsight Systems capture-range
+                # won't trigger for multiprocess profiling.
+                try:
+                    torch.cuda.current_device()
+                except Exception:
+                    pass
+                torch.cuda.profiler.start()
+                with self._lock:
+                    self._cuda_prof_active = True
+        except Exception:
+            with self._lock:
+                self._profile_waiters.pop(profile_id, None)
+                self._profile_results.pop(profile_id, None)
+            raise
 
     def stop_profile(
         self,
@@ -1915,6 +2080,12 @@ class MPSchedulerManager:
             raise RuntimeError("missing profile ack event")
         if not bool(evt.ok):
             raise RuntimeError(evt.message or "stop_profile failed")
+        if tool == "cuda":
+            with self._lock:
+                cuda_active = bool(self._cuda_prof_active)
+                self._cuda_prof_active = False
+            if cuda_active and torch.cuda.is_available():
+                torch.cuda.profiler.stop()
 
     def _event_loop(self) -> None:
         try:

@@ -112,7 +112,7 @@ class InferenceEngine:
 
         def _resolve_prefill_backend(name: str) -> str:
             name = str(name or "auto").lower()
-            if name != "auto":
+            if name not in ("auto", "auto2"):
                 return name
             if self.device.type != "cuda" or not torch.cuda.is_available():
                 return "naive"
@@ -121,10 +121,16 @@ class InferenceEngine:
                 torch.bfloat16,
             ):
                 return "naive"
-            if _module_available("flashinfer"):
-                return "flashinfer"
-            if _module_available("flash_attn"):
-                return "flashattn"
+            if name == "auto2":
+                if _module_available("flash_attn"):
+                    return "flashattn"
+                if _module_available("flashinfer"):
+                    return "flashinfer"
+            else:
+                if _module_available("flashinfer"):
+                    return "flashinfer"
+                if _module_available("flash_attn"):
+                    return "flashattn"
             return "naive"
 
         def _resolve_decode_backend(name: str) -> str:
