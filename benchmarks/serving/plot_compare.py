@@ -88,6 +88,18 @@ def _backend_label(key: str) -> str:
                 extras.append(f"+kv{int(p[2:])}")
             elif p == "noflat":
                 extras.append("-flat evts")
+            elif p.startswith("batch") and p[5:].isdigit():
+                extras.append(f"+batch{int(p[5:])}")
+            elif p == "nogc":
+                extras.append("-gc freeze")
+            elif p == "nofastsse":
+                extras.append("-fast SSE")
+            elif p == "gcfreeze":
+                # Backward-compat: older result keys used +gcfreeze.
+                pass
+            elif p == "fastsse":
+                # Backward-compat: older result keys used +fastsse.
+                pass
             elif p == "streamtok":
                 extras.append("+stream tok")
             elif p == "slowcnt":
@@ -108,6 +120,16 @@ def _backend_color(key: str) -> str:
             return "#17becf"
         if "nobatch" in key.split("+"):
             return "#c7c7c7"
+        if any(p.startswith("batch") and p[5:].isdigit() for p in key.split("+")):
+            return "#4c78a8"
+        if "nogc" in key.split("+"):
+            return "#7f7f7f"
+        if "nofastsse" in key.split("+"):
+            return "#0f766e"
+        if "gcfreeze" in key.split("+"):
+            return "#4e79a7"
+        if "fastsse" in key.split("+"):
+            return "#0f766e"
         if "nothr" in key.split("+"):
             return "#9467bd"
         if "noaff" in key.split("+"):
@@ -149,6 +171,16 @@ def _backend_marker(key: str) -> str:
             return "D"
         if "nobatch" in parts:
             return "o"
+        if any(p.startswith("batch") and p[5:].isdigit() for p in parts):
+            return "D"
+        if "nogc" in parts:
+            return "d"
+        if "nofastsse" in parts:
+            return "s"
+        if "gcfreeze" in parts:
+            return "s"
+        if "fastsse" in parts:
+            return "P"
         if "nothr" in parts:
             return "d"
         if "noaff" in parts:
@@ -259,10 +291,38 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 
 def _flatten_online_summaries(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    backends = [str(s.get("backend", "")) for s in payload.get("summaries", [])]
+    backend_parts = [b.split("+") for b in backends]
+    has_new = any("nogc" in parts or "nofastsse" in parts for parts in backend_parts)
+    has_old = any("gcfreeze" in parts or "fastsse" in parts for parts in backend_parts)
+    scheme = "new" if has_new or not has_old else "old"
+
+    def canonical_backend(backend: str) -> str:
+        if not backend.startswith("roseinfer"):
+            return backend
+        parts = [p for p in backend.split("+") if p]
+        base = parts[0]
+        rest = parts[1:]
+        rest_set = set(rest)
+        if scheme == "old":
+            gc_on = "gcfreeze" in rest_set
+            sse_on = "fastsse" in rest_set
+            rest = [p for p in rest if p not in ("gcfreeze", "fastsse")]
+            if not gc_on:
+                rest.append("nogc")
+            if not sse_on:
+                rest.append("nofastsse")
+        else:
+            # New scheme: defaults are on; keep explicit disable tokens only.
+            rest = [p for p in rest if p not in ("gcfreeze", "fastsse")]
+        if rest:
+            return "+".join([base, *rest])
+        return base
+
     rows: list[dict[str, Any]] = []
     for s in payload.get("summaries", []):
         row = {
-            "backend": str(s["backend"]),
+            "backend": canonical_backend(str(s["backend"])),
             "scale": float(s["scale"]),
         }
         for metric in ("ttft_ms", "tpot_ms", "itl_ms", "e2e_ms"):

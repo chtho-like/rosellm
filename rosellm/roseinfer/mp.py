@@ -62,6 +62,9 @@ class EngineProcessArgs:
     mp_torch_num_threads: int | None = None
     mp_torch_num_interop_threads: int | None = None
     mp_cpu_affinity: tuple[int, ...] | None = None
+    gc_freeze: bool = True
+    gc_warn_ms: float = 0.0
+    gc_log_all: bool = False
     mp_fill_target: bool = True
     mp_max_recv_per_iter: int = 64
     mp_emit_token_events: bool = True
@@ -598,6 +601,15 @@ def _maybe_set_cpu_affinity(cpus: Sequence[int] | None) -> None:
         pass
 
 
+def _freeze_gc_heap() -> None:
+    import gc
+
+    gc.collect(0)
+    gc.collect(1)
+    gc.collect(2)
+    gc.freeze()
+
+
 def _build_engine(args: EngineProcessArgs) -> InferenceEngine:
     device = torch.device(args.device)
     if args.toy is not None:
@@ -687,6 +699,17 @@ def _engine_process_main(
 ) -> None:
     torch.set_grad_enabled(False)
     try:
+        gc_warn_ms = float(getattr(args, "gc_warn_ms", 0.0) or 0.0)
+        gc_log_all = bool(getattr(args, "gc_log_all", False))
+        if gc_warn_ms > 0.0 or gc_log_all:
+            from rosellm.roseinfer.gc_observer import install_gc_observer
+
+            install_gc_observer(
+                warn_ms=gc_warn_ms,
+                log_all=gc_log_all,
+                prefix=f"engine pid={os.getpid()}",
+                nvtx=os.environ.get("ROSEINFER_NVTX") == "1",
+            )
         _maybe_set_cpu_affinity(args.mp_cpu_affinity)
         _maybe_set_torch_threads(
             num_threads=args.mp_torch_num_threads,
@@ -712,6 +735,8 @@ def _engine_process_main(
                 overlap_schedule=bool(args.overlap_schedule),
             )
         engine.warmup_paged_attention_decode()
+        if bool(getattr(args, "gc_freeze", True)):
+            _freeze_gc_heap()
         evt_q.put(
             ReadyEvent(
                 eos_token_id=engine.eos_token_id,
@@ -1096,6 +1121,17 @@ def _engine_process_main_pipe(
 
     torch.set_grad_enabled(False)
     try:
+        gc_warn_ms = float(getattr(args, "gc_warn_ms", 0.0) or 0.0)
+        gc_log_all = bool(getattr(args, "gc_log_all", False))
+        if gc_warn_ms > 0.0 or gc_log_all:
+            from rosellm.roseinfer.gc_observer import install_gc_observer
+
+            install_gc_observer(
+                warn_ms=gc_warn_ms,
+                log_all=gc_log_all,
+                prefix=f"engine pid={os.getpid()}",
+                nvtx=os.environ.get("ROSEINFER_NVTX") == "1",
+            )
         _maybe_set_cpu_affinity(args.mp_cpu_affinity)
         _maybe_set_torch_threads(
             num_threads=args.mp_torch_num_threads,
@@ -1121,6 +1157,8 @@ def _engine_process_main_pipe(
                 overlap_schedule=bool(args.overlap_schedule),
             )
         engine.warmup_paged_attention_decode()
+        if bool(getattr(args, "gc_freeze", True)):
+            _freeze_gc_heap()
         send_evt(
             ReadyEvent(
                 eos_token_id=engine.eos_token_id,

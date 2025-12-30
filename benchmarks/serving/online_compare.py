@@ -729,6 +729,9 @@ def _roseinfer_server_cmd(
     fused_kv_append: bool | None = None,
     overlap_schedule: bool | None = None,
     engine_process: bool | None = None,
+    max_batch_size: int | None = None,
+    gc_freeze: bool | None = None,
+    fast_sse: bool | None = None,
     kv_cache_max_concurrency: int | None = None,
     prefix_cache_max_entries: int | None = None,
     mp_ipc: str | None = None,
@@ -793,6 +796,21 @@ def _roseinfer_server_cmd(
         if engine_process is not None
         else bool(getattr(args, "roseinfer_engine_process", True))
     )
+    max_batch_size = (
+        int(max_batch_size)
+        if max_batch_size is not None
+        else int(getattr(args, "roseinfer_max_batch_size", 8))
+    )
+    gc_freeze = (
+        bool(gc_freeze)
+        if gc_freeze is not None
+        else bool(getattr(args, "roseinfer_gc_freeze", True))
+    )
+    fast_sse = (
+        bool(fast_sse)
+        if fast_sse is not None
+        else bool(getattr(args, "roseinfer_fast_sse", True))
+    )
     mp_ipc = (
         str(mp_ipc)
         if mp_ipc is not None
@@ -839,11 +857,17 @@ def _roseinfer_server_cmd(
         str(port),
         "--stream-interval",
         "1",
+        "--max-batch-size",
+        str(int(max_batch_size)),
         "--prefill-attn-backend",
         prefill_attn_backend,
         "--decode-attn-backend",
         decode_attn_backend,
     ]
+    if not gc_freeze:
+        cmd += ["--no-gc-freeze"]
+    if not fast_sse:
+        cmd += ["--no-fast-sse"]
     if args.max_inflight_requests is not None:
         cmd += ["--max-inflight-requests", str(args.max_inflight_requests)]
     cmd += ["--kv-cache-max-concurrency", str(int(kv_cache_max_concurrency))]
@@ -1273,6 +1297,38 @@ def parse_args() -> argparse.Namespace:
         help="roseinfer --kv-cache-max-concurrency (default: 0 = auto).",
     )
     parser.add_argument(
+        "--roseinfer-max-batch-size",
+        type=int,
+        default=8,
+        help="roseinfer --max-batch-size (default: 8).",
+    )
+    parser.add_argument(
+        "--roseinfer-gc-freeze",
+        dest="roseinfer_gc_freeze",
+        action="store_true",
+        help="roseinfer --gc-freeze (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-gc-freeze",
+        dest="roseinfer_gc_freeze",
+        action="store_false",
+        help="roseinfer --no-gc-freeze.",
+    )
+    parser.set_defaults(roseinfer_gc_freeze=True)
+    parser.add_argument(
+        "--roseinfer-fast-sse",
+        dest="roseinfer_fast_sse",
+        action="store_true",
+        help="roseinfer --fast-sse (default: enabled).",
+    )
+    parser.add_argument(
+        "--roseinfer-no-fast-sse",
+        dest="roseinfer_fast_sse",
+        action="store_false",
+        help="roseinfer --no-fast-sse.",
+    )
+    parser.set_defaults(roseinfer_fast_sse=True)
+    parser.add_argument(
         "--roseinfer-prefix-cache-max-entries",
         type=int,
         default=256,
@@ -1597,6 +1653,9 @@ def main() -> None:
         roseinfer_prefill_backend: str | None = None
         roseinfer_async_streaming: bool | None = None
         roseinfer_engine_process: bool | None = None
+        roseinfer_max_batch_size: int | None = None
+        roseinfer_gc_freeze: bool | None = None
+        roseinfer_fast_sse: bool | None = None
         roseinfer_kv_cache_max_concurrency: int | None = None
         roseinfer_prefix_cache_max_entries: int | None = None
         roseinfer_fused_ops: bool | None = None
@@ -1629,6 +1688,9 @@ def main() -> None:
         base_overlap = bool(getattr(args, "roseinfer_overlap_schedule", True))
         base_engine_process = bool(getattr(args, "roseinfer_engine_process", True))
         base_async_streaming = bool(getattr(args, "roseinfer_async_streaming", True))
+        base_max_batch_size = int(getattr(args, "roseinfer_max_batch_size", 8))
+        base_gc_freeze = bool(getattr(args, "roseinfer_gc_freeze", True))
+        base_fast_sse = bool(getattr(args, "roseinfer_fast_sse", True))
         base_kv_conc = int(getattr(args, "roseinfer_kv_cache_max_concurrency", 0))
         base_prefix_entries = int(
             getattr(args, "roseinfer_prefix_cache_max_entries", 256)
@@ -1750,6 +1812,12 @@ def main() -> None:
                         label += "+nokv"
                     if not overlap_schedule:
                         label += "+nooverlap"
+                    if base_max_batch_size != 8:
+                        label += f"+batch{base_max_batch_size}"
+                    if not base_gc_freeze:
+                        label += "+nogc"
+                    if not base_fast_sse:
+                        label += "+nofastsse"
                     run_specs.append(
                         RunSpec(
                             base_backend="roseinfer",
@@ -1757,6 +1825,9 @@ def main() -> None:
                             roseinfer_prefill_backend=prefill_backend,
                             roseinfer_async_streaming=bool(base_async_streaming),
                             roseinfer_engine_process=bool(engine_process),
+                            roseinfer_max_batch_size=int(base_max_batch_size),
+                            roseinfer_gc_freeze=bool(base_gc_freeze),
+                            roseinfer_fast_sse=bool(base_fast_sse),
                             roseinfer_kv_cache_max_concurrency=int(base_kv_conc),
                             roseinfer_prefix_cache_max_entries=int(base_prefix_entries),
                             roseinfer_fused_ops=bool(fused_ops),
@@ -1956,6 +2027,9 @@ def main() -> None:
                         async_streaming=spec.roseinfer_async_streaming,
                         prefill_attn_backend=prefill_backend,
                         engine_process=engine_process,
+                        max_batch_size=spec.roseinfer_max_batch_size,
+                        gc_freeze=spec.roseinfer_gc_freeze,
+                        fast_sse=spec.roseinfer_fast_sse,
                         kv_cache_max_concurrency=spec.roseinfer_kv_cache_max_concurrency,
                         prefix_cache_max_entries=spec.roseinfer_prefix_cache_max_entries,
                         fused_ops=fused_ops,
@@ -2255,6 +2329,9 @@ def main() -> None:
                 async_streaming=spec.roseinfer_async_streaming,
                 prefill_attn_backend=prefill_backend,
                 engine_process=engine_process,
+                max_batch_size=spec.roseinfer_max_batch_size,
+                gc_freeze=spec.roseinfer_gc_freeze,
+                fast_sse=spec.roseinfer_fast_sse,
                 kv_cache_max_concurrency=spec.roseinfer_kv_cache_max_concurrency,
                 prefix_cache_max_entries=spec.roseinfer_prefix_cache_max_entries,
                 fused_ops=fused_ops,
@@ -2459,6 +2536,11 @@ def main() -> None:
             "roseinfer_chunked_prefill": bool(args.roseinfer_chunked_prefill),
             "roseinfer_prefill_chunk_size": int(args.roseinfer_prefill_chunk_size),
             "roseinfer_prefix_cache": bool(args.roseinfer_prefix_cache),
+            "roseinfer_max_batch_size": int(
+                getattr(args, "roseinfer_max_batch_size", 8)
+            ),
+            "roseinfer_gc_freeze": bool(getattr(args, "roseinfer_gc_freeze", True)),
+            "roseinfer_fast_sse": bool(getattr(args, "roseinfer_fast_sse", True)),
             "roseinfer_kv_cache_max_concurrency": int(
                 getattr(args, "roseinfer_kv_cache_max_concurrency", 0)
             ),

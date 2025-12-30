@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import json
 import os
 import queue
 import threading
@@ -24,6 +25,17 @@ from .engine import (
 from .errors import SchedulerManagerOverloadedError
 from .hybrid_queue import HybridQueue
 from .mp import EngineProcessArgs, MPSchedulerManager
+
+try:
+    import orjson  # type: ignore[import-not-found]
+except Exception:
+    orjson = None
+
+
+def _json_dumps_bytes(obj: object) -> bytes:
+    if orjson is not None:
+        return orjson.dumps(obj)
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 class GenerateRequest(BaseModel):
@@ -993,6 +1005,7 @@ def create_app(
     *,
     served_model_name: str | None = None,
     async_streaming: bool = True,
+    fast_sse: bool = True,
 ) -> FastAPI:
     app = FastAPI(title="roseinfer", version="0.1.0")
     app.add_event_handler("shutdown", sched_manager.close)
@@ -1306,7 +1319,43 @@ def create_app(
             except SchedulerManagerOverloadedError as exc:
                 raise HTTPException(status_code=429, detail=str(exc)) from exc
 
-            if async_streaming:
+            if fast_sse:
+                created_b = str(int(created)).encode("utf-8")
+                completion_id_json = _json_dumps_bytes(completion_id)
+                model_name_json = _json_dumps_bytes(model_name)
+                sse_prefix = (
+                    b'data: {"id":'
+                    + completion_id_json
+                    + b',"object":"text_completion","created":'
+                    + created_b
+                    + b',"model":'
+                    + model_name_json
+                    + b',"choices":[{"text":'
+                )
+                sse_mid = b',"index":0,"finish_reason":null}]}' + b"\n\n"
+                sse_final = b',"index":0,"finish_reason":"stop"}]}' + b"\n\n"
+
+                if async_streaming:
+
+                    async def event_stream() -> AsyncIterator[bytes]:
+                        async for piece in sched_manager.astream_text(request_id):
+                            if not piece:
+                                continue
+                            yield sse_prefix + _json_dumps_bytes(piece) + sse_mid
+                        yield sse_prefix + _json_dumps_bytes("") + sse_final
+                        yield b"data: [DONE]\n\n"
+
+                else:
+
+                    def event_stream() -> Iterator[bytes]:
+                        for piece in sched_manager.stream_text(request_id):
+                            if not piece:
+                                continue
+                            yield sse_prefix + _json_dumps_bytes(piece) + sse_mid
+                        yield sse_prefix + _json_dumps_bytes("") + sse_final
+                        yield b"data: [DONE]\n\n"
+
+            elif async_streaming:
 
                 async def event_stream() -> AsyncIterator[bytes]:
                     async for piece in sched_manager.astream_text(request_id):
@@ -1583,6 +1632,49 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Flush streaming output every N generated tokens (default: 1).",
     )
+    parser.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=8,
+        help="Max batch size for online scheduler decode/prefill (default: 8).",
+    )
+    parser.add_argument(
+        "--gc-freeze",
+        dest="gc_freeze",
+        action="store_true",
+        help="Freeze Python GC heap after startup to reduce GC jitter (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-gc-freeze",
+        dest="gc_freeze",
+        action="store_false",
+        help="Disable GC freeze (may increase tail latency due to GC jitter).",
+    )
+    parser.set_defaults(gc_freeze=True)
+    parser.add_argument(
+        "--gc-warn-ms",
+        type=float,
+        default=0.0,
+        help="Log GC pauses >= this threshold in ms (default: 0 = disabled).",
+    )
+    parser.add_argument(
+        "--gc-log-all",
+        action="store_true",
+        help="Log every GC cycle (debug; may be noisy).",
+    )
+    parser.add_argument(
+        "--fast-sse",
+        dest="fast_sse",
+        action="store_true",
+        help="Use a faster JSON builder for OpenAI SSE streaming (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-fast-sse",
+        dest="fast_sse",
+        action="store_false",
+        help="Disable fast SSE JSON builder (may increase CPU overhead in streaming).",
+    )
+    parser.set_defaults(fast_sse=True)
     parser.add_argument(
         "--prefix-cache",
         dest="prefix_cache",
@@ -1913,6 +2005,8 @@ def main() -> None:
         raise ValueError("--max-inflight-requests must be >= 1")
     if int(args.stream_interval) <= 0:
         raise ValueError("--stream-interval must be >= 1")
+    if int(args.max_batch_size) <= 0:
+        raise ValueError("--max-batch-size must be >= 1")
     if int(args.prefill_chunk_size) <= 0:
         raise ValueError("--prefill-chunk-size must be >= 1")
     device = torch.device(args.device)
@@ -1947,7 +2041,7 @@ def main() -> None:
             chunked_prefill = False
 
     served_model_name = args.tokenizer_name or "roseinfer"
-    max_batch_size = 8
+    max_batch_size = int(args.max_batch_size)
     kv_cache_max_concurrency = int(getattr(args, "kv_cache_max_concurrency", 0))
     if kv_cache_max_concurrency <= 0:
         if args.max_inflight_requests is not None:
@@ -2014,6 +2108,9 @@ def main() -> None:
             mp_torch_num_threads=engine_torch_threads,
             mp_torch_num_interop_threads=engine_torch_threads,
             mp_cpu_affinity=tuple(engine_cpus) if engine_cpus else None,
+            gc_freeze=bool(getattr(args, "gc_freeze", True)),
+            gc_warn_ms=float(getattr(args, "gc_warn_ms", 0.0) or 0.0),
+            gc_log_all=bool(getattr(args, "gc_log_all", False)),
             mp_fill_target=bool(getattr(args, "mp_fill_target", True)),
             mp_max_recv_per_iter=int(getattr(args, "mp_max_recv_per_iter", 64)),
             mp_flat_events=bool(getattr(args, "mp_flat_events", True)),
@@ -2105,7 +2202,26 @@ def main() -> None:
         sched_manager,
         served_model_name=served_model_name,
         async_streaming=bool(getattr(args, "async_streaming", True)),
+        fast_sse=bool(getattr(args, "fast_sse", True)),
     )
+    gc_warn_ms = float(getattr(args, "gc_warn_ms", 0.0) or 0.0)
+    gc_log_all = bool(getattr(args, "gc_log_all", False))
+    if gc_warn_ms > 0.0 or gc_log_all:
+        from rosellm.roseinfer.gc_observer import install_gc_observer
+
+        install_gc_observer(
+            warn_ms=gc_warn_ms,
+            log_all=gc_log_all,
+            prefix=f"api pid={os.getpid()}",
+            nvtx=os.environ.get("ROSEINFER_NVTX") == "1",
+        )
+    if bool(getattr(args, "gc_freeze", True)):
+        import gc
+
+        gc.collect(0)
+        gc.collect(1)
+        gc.collect(2)
+        gc.freeze()
     uvicorn.run(
         app,
         host=args.host,
