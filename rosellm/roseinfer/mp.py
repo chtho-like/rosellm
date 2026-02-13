@@ -787,11 +787,32 @@ def _engine_process_main(
                 if torch.cuda.is_available():
                     activities.append(torch.profiler.ProfilerActivity.CUDA)
                 with_stack = os.environ.get("ROSEINFER_TORCH_PROFILE_WITH_STACK") == "1"
+                record_shapes = (
+                    os.environ.get("ROSEINFER_TORCH_PROFILE_RECORD_SHAPES", "1") == "1"
+                )
+                profile_memory = (
+                    os.environ.get("ROSEINFER_TORCH_PROFILE_WITH_PROFILE_MEMORY", "1")
+                    == "1"
+                )
+                delay_steps = max(
+                    0, int(os.environ.get("ROSEINFER_TORCH_PROFILE_DELAY_STEPS", "0"))
+                )
+                num_steps = max(
+                    0, int(os.environ.get("ROSEINFER_TORCH_PROFILE_NUM_STEPS", "0"))
+                )
+                schedule = (
+                    torch.profiler.schedule(
+                        wait=delay_steps, warmup=0, active=num_steps, repeat=1
+                    )
+                    if num_steps > 0
+                    else None
+                )
                 prof = torch.profiler.profile(
                     activities=activities,
-                    record_shapes=True,
-                    profile_memory=True,
+                    record_shapes=record_shapes,
+                    profile_memory=profile_memory,
                     with_stack=with_stack,
+                    schedule=schedule,
                 )
                 prof.__enter__()
                 torch_prof = prof
@@ -1013,6 +1034,10 @@ def _engine_process_main(
             if batch:
                 with _maybe_nvtx_range("roseinfer.mp.add_requests", nvtx):
                     rids = scheduler.add_requests(batch)
+                if torch_prof is not None:
+                    step_fn = getattr(torch_prof, "step", None)
+                    if callable(step_fn):
+                        step_fn()
                 for rid in rids:
                     active.add(int(rid))
                     if token_counts is not None:
@@ -1058,6 +1083,10 @@ def _engine_process_main(
             if scheduler.has_unfinished():
                 with _maybe_nvtx_range("roseinfer.mp.step", nvtx):
                     step_tokens = scheduler.step()
+                if torch_prof is not None:
+                    step_fn = getattr(torch_prof, "step", None)
+                    if callable(step_fn):
+                        step_fn()
                 for rid, token_id in step_tokens.items():
                     if token_counts is not None:
                         token_counts[int(rid)] = int(token_counts.get(int(rid), 0) + 1)
@@ -1209,11 +1238,32 @@ def _engine_process_main_pipe(
                 if torch.cuda.is_available():
                     activities.append(torch.profiler.ProfilerActivity.CUDA)
                 with_stack = os.environ.get("ROSEINFER_TORCH_PROFILE_WITH_STACK") == "1"
+                record_shapes = (
+                    os.environ.get("ROSEINFER_TORCH_PROFILE_RECORD_SHAPES", "1") == "1"
+                )
+                profile_memory = (
+                    os.environ.get("ROSEINFER_TORCH_PROFILE_WITH_PROFILE_MEMORY", "1")
+                    == "1"
+                )
+                delay_steps = max(
+                    0, int(os.environ.get("ROSEINFER_TORCH_PROFILE_DELAY_STEPS", "0"))
+                )
+                num_steps = max(
+                    0, int(os.environ.get("ROSEINFER_TORCH_PROFILE_NUM_STEPS", "0"))
+                )
+                schedule = (
+                    torch.profiler.schedule(
+                        wait=delay_steps, warmup=0, active=num_steps, repeat=1
+                    )
+                    if num_steps > 0
+                    else None
+                )
                 prof = torch.profiler.profile(
                     activities=activities,
-                    record_shapes=True,
-                    profile_memory=True,
+                    record_shapes=record_shapes,
+                    profile_memory=profile_memory,
                     with_stack=with_stack,
+                    schedule=schedule,
                 )
                 prof.__enter__()
                 torch_prof = prof
@@ -1434,6 +1484,10 @@ def _engine_process_main_pipe(
             if batch:
                 with _maybe_nvtx_range("roseinfer.mp.add_requests", nvtx):
                     rids = scheduler.add_requests(batch)
+                if torch_prof is not None:
+                    step_fn = getattr(torch_prof, "step", None)
+                    if callable(step_fn):
+                        step_fn()
                 for rid in rids:
                     active.add(int(rid))
                     if token_counts is not None:
@@ -1479,6 +1533,10 @@ def _engine_process_main_pipe(
             if scheduler.has_unfinished():
                 with _maybe_nvtx_range("roseinfer.mp.step", nvtx):
                     step_tokens = scheduler.step()
+                if torch_prof is not None:
+                    step_fn = getattr(torch_prof, "step", None)
+                    if callable(step_fn):
+                        step_fn()
                 for rid, token_id in step_tokens.items():
                     if token_counts is not None:
                         token_counts[int(rid)] = int(token_counts.get(int(rid), 0) + 1)

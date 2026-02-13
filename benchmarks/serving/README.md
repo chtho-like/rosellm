@@ -21,6 +21,11 @@ This starts each backend's OpenAI-compatible server (one at a time), replays Tra
 
 `online_results.json` includes `meta.versions` and wall-time info (`meta.run_start_time`, `meta.run_end_time`, `meta.wall_s`).
 
+Notes:
+- vLLM async scheduling is enabled by default for a fairer comparison vs SGLang/TensorRT-LLM; disable with `--vllm-no-async-scheduling`.
+- vLLM attention backend defaults to FlashInfer; override with `--vllm-attention-backend`. When using FlashInfer attention on 12GB GPUs, set `--vllm-max-num-seqs 128` (the scripts auto-set this when `--vllm-attention-backend=flashinfer`).
+- SGLang attention defaults to Triton; override with `--sglang-attention-backend`.
+
 ## Offline (token-id throughput)
 
 ```bash
@@ -37,6 +42,11 @@ Offline is aligned on token IDs (no tokenize/detokenize in the measured path):
 - TensorRT-LLM: `prompt_token_ids` + `SamplingParams(detokenize=False)`
 
 `offline_results.json` includes `meta.versions` and wall-time info (`meta.run_start_time`, `meta.run_end_time`, `meta.wall_s`, `meta.backend_wall_s`).
+
+Notes:
+- vLLM async scheduling is enabled by default for a fairer comparison vs SGLang/TensorRT-LLM; disable with `--vllm-no-async-scheduling`.
+- vLLM attention backend defaults to FlashInfer; override with `--vllm-attention-backend`. When using FlashInfer attention on 12GB GPUs, set `--vllm-max-num-seqs 128` (the scripts auto-set this when `--vllm-attention-backend=flashinfer`).
+- SGLang attention defaults to Triton; override with `--sglang-attention-backend`.
 
 ## Plotting
 
@@ -84,4 +94,6 @@ Both online and offline benchmarks support an extra profiling stage that runs *a
 
 Notes:
 
-- Nsight Systems capture uses `--capture-range=cudaProfilerApi` and starts/stops capture inside each backend (vLLM/SGLang/roseinfer via `/start_profile`/`/stop_profile`, TensorRT-LLM via `TLLM_PROFILE_START_STOP`).
+- Nsight Systems capture uses `--capture-range=none` (captures from process start) to avoid missing CUDA kernels from early-spawned worker processes in multi-process backends.
+- Torch profiling uses each backend's start/stop hooks (vLLM/SGLang/roseinfer via `/start_profile`/`/stop_profile`, TensorRT-LLM via `TLLM_PROFILE_START_STOP` + `TLLM_TORCH_PROFILE_TRACE`).
+- TensorRT-LLM profiling enables NVTX annotations (`TLLM_LLMAPI_ENABLE_NVTX=1`) and GC ranges (`TLLM_PROFILE_RECORD_GC=1`); disable GC ranges with `--trtllm-no-profile-record-gc`.

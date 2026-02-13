@@ -25,7 +25,9 @@ fi
 
 PYTHON_BIN="${PYTHON_BIN:-}"
 if [[ -z "${PYTHON_BIN}" ]]; then
-  if [[ -x "./.conda/bin/python" ]]; then
+  if [[ -x "./.conda-bench/bin/python" ]]; then
+    PYTHON_BIN="./.conda-bench/bin/python"
+  elif [[ -x "./.conda/bin/python" ]]; then
     PYTHON_BIN="./.conda/bin/python"
   else
     PYTHON_BIN="python"

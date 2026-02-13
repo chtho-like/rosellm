@@ -78,6 +78,32 @@ def _resolve_trtllm_python(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _resolve_vllm_python(args: argparse.Namespace) -> str | None:
+    if getattr(args, "vllm_python", None):
+        return str(args.vllm_python)
+    env_val = os.environ.get("ROSELLM_VLLM_PYTHON") or os.environ.get("VLLM_PYTHON")
+    if env_val:
+        return str(env_val)
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate = repo_root / ".conda-vllm" / "bin" / "python"
+    if candidate.is_file():
+        return str(candidate)
+    return None
+
+
+def _resolve_sglang_python(args: argparse.Namespace) -> str | None:
+    if getattr(args, "sglang_python", None):
+        return str(args.sglang_python)
+    env_val = os.environ.get("ROSELLM_SGLANG_PYTHON") or os.environ.get("SGLANG_PYTHON")
+    if env_val:
+        return str(env_val)
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate = repo_root / ".conda-sglang" / "bin" / "python"
+    if candidate.is_file():
+        return str(candidate)
+    return None
+
+
 def _trtllm_runtime_env(*, python_exe: str, base_env: dict[str, str]) -> dict[str, str]:
     env = dict(base_env)
     # NOTE: venv `python` is often a symlink to system Python; avoid `.resolve()`.
@@ -165,7 +191,12 @@ def _try_git_rev() -> str | None:
         return None
 
 
-def _collect_versions(*, trtllm_python: str | None = None) -> dict[str, str]:
+def _collect_versions(
+    *,
+    vllm_python: str | None = None,
+    sglang_python: str | None = None,
+    trtllm_python: str | None = None,
+) -> dict[str, str]:
     versions: dict[str, str] = {"python": sys.version.split()[0]}
     try:
         import importlib.metadata as md
@@ -190,6 +221,48 @@ def _collect_versions(*, trtllm_python: str | None = None) -> dict[str, str]:
         pass
 
     if (
+        vllm_python
+        and versions.get("vllm") == "not installed"
+        and Path(str(vllm_python)).is_file()
+    ):
+        try:
+            out = subprocess.check_output(
+                [
+                    str(vllm_python),
+                    "-c",
+                    "import importlib.metadata as md; print(md.version('vllm'))",
+                ],
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+            probed = out.decode("utf-8", errors="replace").strip()
+            if probed:
+                versions["vllm"] = probed
+        except Exception:
+            pass
+
+    if (
+        sglang_python
+        and versions.get("sglang") == "not installed"
+        and Path(str(sglang_python)).is_file()
+    ):
+        try:
+            out = subprocess.check_output(
+                [
+                    str(sglang_python),
+                    "-c",
+                    "import importlib.metadata as md; print(md.version('sglang'))",
+                ],
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+            probed = out.decode("utf-8", errors="replace").strip()
+            if probed:
+                versions["sglang"] = probed
+        except Exception:
+            pass
+
+    if (
         trtllm_python
         and versions.get("tensorrt_llm") == "not installed"
         and Path(str(trtllm_python)).is_file()
@@ -212,6 +285,13 @@ def _collect_versions(*, trtllm_python: str | None = None) -> dict[str, str]:
     git_rev = _try_git_rev()
     if git_rev:
         versions["git_rev"] = git_rev
+    versions["python_executable"] = sys.executable
+    if vllm_python:
+        versions["vllm_python"] = str(vllm_python)
+    if sglang_python:
+        versions["sglang_python"] = str(sglang_python)
+    if trtllm_python:
+        versions["trtllm_python"] = str(trtllm_python)
     return versions
 
 
@@ -674,7 +754,10 @@ def _start_process(
 ) -> subprocess.Popen[bytes]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     cpu_str = _format_cpu_set(cpu_set)
-    full_cmd = ["taskset", "-c", cpu_str, *cmd]
+    if cmd and cmd[0] == "nsys":
+        full_cmd = cmd
+    else:
+        full_cmd = ["taskset", "-c", cpu_str, *cmd]
     log_f = log_path.open("wb")
     return subprocess.Popen(
         full_cmd,
@@ -694,6 +777,124 @@ def _terminate_process(p: subprocess.Popen[bytes], *, timeout_s: float = 15.0) -
     except subprocess.TimeoutExpired:
         p.kill()
         p.wait(timeout=timeout_s)
+
+
+def _find_trtllm_server_pids(*, port: int) -> set[int]:
+    try:
+        import psutil  # type: ignore[import-not-found]
+    except Exception:
+        return set()
+    port = int(port)
+    pids: set[int] = set()
+    try:
+        for conn in psutil.net_connections(kind="tcp"):
+            if (
+                conn.pid
+                and conn.status == psutil.CONN_LISTEN
+                and conn.laddr
+                and int(conn.laddr.port) == port
+            ):
+                pids.add(int(conn.pid))
+    except Exception:
+        pass
+    needle_port = str(port)
+    needle_mod = "tensorrt_llm.commands.serve"
+    for proc in psutil.process_iter(attrs=["pid", "cmdline"]):
+        cmd = proc.info.get("cmdline") or []
+        if not cmd:
+            continue
+        if needle_mod not in " ".join(cmd):
+            continue
+        if needle_port not in cmd:
+            continue
+        pids.add(int(proc.info["pid"]))
+    return pids
+
+
+def _terminate_trtllm_server(*, port: int, timeout_s: float = 20.0) -> None:
+    pids = _find_trtllm_server_pids(port=port)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            continue
+    deadline = time.time() + float(timeout_s)
+    while time.time() < deadline:
+        remaining = _find_trtllm_server_pids(port=port)
+        if not remaining:
+            return
+        time.sleep(0.25)
+    for pid in _find_trtllm_server_pids(port=port):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            continue
+
+
+def _terminate_server_by_port(*, port: int, timeout_s: float = 20.0) -> None:
+    try:
+        import psutil  # type: ignore[import-not-found]
+    except Exception:
+        return
+    port = int(port)
+    try:
+        listen_conns = [
+            c
+            for c in psutil.net_connections(kind="tcp")
+            if c.pid
+            and c.status == psutil.CONN_LISTEN
+            and c.laddr
+            and int(c.laddr.port) == port
+        ]
+    except Exception:
+        listen_conns = []
+
+    root_pids = {int(c.pid) for c in listen_conns if c.pid}
+    if not root_pids:
+        return
+
+    def _send_tree(pid: int, sig: int) -> None:
+        try:
+            root = psutil.Process(int(pid))
+        except Exception:
+            return
+        for child in root.children(recursive=True):
+            try:
+                child.send_signal(sig)
+            except Exception:
+                continue
+        try:
+            root.send_signal(sig)
+        except Exception:
+            return
+
+    for pid in root_pids:
+        _send_tree(pid, signal.SIGTERM)
+
+    deadline = time.time() + float(timeout_s)
+    while time.time() < deadline:
+        still_listening: set[int] = set()
+        try:
+            for conn in psutil.net_connections(kind="tcp"):
+                if (
+                    conn.pid
+                    and conn.status == psutil.CONN_LISTEN
+                    and conn.laddr
+                    and int(conn.laddr.port) == port
+                ):
+                    still_listening.add(int(conn.pid))
+        except Exception:
+            break
+        if not still_listening:
+            return
+        time.sleep(0.25)
+
+    for pid in root_pids:
+        _send_tree(pid, signal.SIGKILL)
 
 
 def _pick_free_port(host: str, preferred: int, used: set[int]) -> int:
@@ -945,15 +1146,30 @@ def _dtype_flag_sglang(dtype: str) -> list[str]:
     raise ValueError(f"unsupported dtype for SGLang: {dtype}")
 
 
+def _resolve_vllm_max_num_seqs(args: argparse.Namespace) -> int | None:
+    max_num_seqs = getattr(args, "vllm_max_num_seqs", None)
+    if max_num_seqs is not None:
+        return int(max_num_seqs)
+    vllm_attention_backend = str(getattr(args, "vllm_attention_backend", "auto")).lower()
+    if vllm_attention_backend == "flashinfer":
+        # vLLM v0.13.0 may OOM during sampler warmup on 12GB GPUs when
+        # `attention_backend=flashinfer` and the default max_num_seqs=256.
+        return 128
+    return None
+
+
 def _vllm_server_cmd(
     args: argparse.Namespace,
     *,
     host: str,
     port: int,
     max_context_len: int,
+    python_exe: str | None = None,
+    enable_layerwise_nvtx_tracing: bool = False,
 ) -> list[str]:
+    py = python_exe or sys.executable
     cmd = [
-        sys.executable,
+        py,
         "-m",
         "vllm.entrypoints.openai.api_server",
         "--model",
@@ -967,6 +1183,18 @@ def _vllm_server_cmd(
         "--disable-log-requests",
         "--disable-log-stats",
     ]
+    if bool(getattr(args, "vllm_async_scheduling", True)):
+        cmd.append("--async-scheduling")
+    else:
+        cmd.append("--no-async-scheduling")
+    vllm_attention_backend = str(getattr(args, "vllm_attention_backend", "auto"))
+    if vllm_attention_backend and vllm_attention_backend.lower() != "auto":
+        cmd += ["--attention-backend", vllm_attention_backend]
+    vllm_max_num_seqs = _resolve_vllm_max_num_seqs(args)
+    if vllm_max_num_seqs is not None:
+        cmd += ["--max-num-seqs", str(int(vllm_max_num_seqs))]
+    if enable_layerwise_nvtx_tracing:
+        cmd.append("--enable-layerwise-nvtx-tracing")
     cmd += _dtype_flag_vllm(str(args.dtype))
     return cmd
 
@@ -1010,9 +1238,12 @@ def _sglang_server_cmd(
     host: str,
     port: int,
     max_context_len: int,
+    python_exe: str | None = None,
+    enable_layerwise_nvtx_marker: bool = False,
 ) -> list[str]:
+    py = python_exe or sys.executable
     cmd = [
-        sys.executable,
+        py,
         "-m",
         "sglang.launch_server",
         "--model-path",
@@ -1031,6 +1262,8 @@ def _sglang_server_cmd(
         cmd += ["--attention-backend", str(args.sglang_attention_backend)]
     if getattr(args, "sglang_sampling_backend", None):
         cmd += ["--sampling-backend", str(args.sglang_sampling_backend)]
+    if enable_layerwise_nvtx_marker:
+        cmd.append("--enable-layerwise-nvtx-marker")
     cmd += _dtype_flag_sglang(str(args.dtype))
     return cmd
 
@@ -1069,7 +1302,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="triton",
         choices=["flashinfer", "triton", "torch_native", "fa3", "flashmla"],
-        help="SGLang attention backend (default: triton for broad compatibility).",
+        help="SGLang attention backend (default: triton).",
     )
     parser.add_argument(
         "--sglang-sampling-backend",
@@ -1077,6 +1310,56 @@ def parse_args() -> argparse.Namespace:
         default="flashinfer",
         choices=["flashinfer", "pytorch"],
         help="SGLang sampling backend (default: flashinfer).",
+    )
+    parser.add_argument(
+        "--vllm-python",
+        type=str,
+        default=None,
+        help=(
+            "Python executable for the vLLM backend. "
+            "Default: use current interpreter or auto-detect `./.conda-vllm/bin/python`."
+        ),
+    )
+    parser.add_argument(
+        "--vllm-attention-backend",
+        type=str,
+        default="flashinfer",
+        choices=["auto", "flashinfer", "flash_attn", "triton_attn"],
+        help="vLLM attention backend (default: flashinfer).",
+    )
+    parser.add_argument(
+        "--vllm-max-num-seqs",
+        type=int,
+        default=None,
+        help=(
+            "vLLM --max-num-seqs. Default: use vLLM default; if unset and "
+            "--vllm-attention-backend=flashinfer, auto-set to 128 to avoid OOM on 12GB GPUs."
+        ),
+    )
+    parser.add_argument(
+        "--vllm-async-scheduling",
+        dest="vllm_async_scheduling",
+        action="store_true",
+        help=(
+            "vLLM: enable async scheduling (overlap CPU scheduling with GPU work) "
+            "for a more apples-to-apples comparison vs sglang/TRT-LLM (default: enabled)."
+        ),
+    )
+    parser.add_argument(
+        "--vllm-no-async-scheduling",
+        dest="vllm_async_scheduling",
+        action="store_false",
+        help="vLLM: disable async scheduling.",
+    )
+    parser.set_defaults(vllm_async_scheduling=True)
+    parser.add_argument(
+        "--sglang-python",
+        type=str,
+        default=None,
+        help=(
+            "Python executable for the SGLang backend. "
+            "Default: use current interpreter or auto-detect `./.conda-sglang/bin/python`."
+        ),
     )
     parser.add_argument(
         "--trtllm-backend",
@@ -1094,6 +1377,37 @@ def parse_args() -> argparse.Namespace:
             "Default: auto-detect `./.venv-trtllm/bin/python` or use current interpreter."
         ),
     )
+    parser.add_argument(
+        "--trtllm-worker-single-process",
+        action="store_true",
+        help=(
+            "TensorRT-LLM: set env TLLM_WORKER_USE_SINGLE_PROCESS=1 for TP=1 "
+            "(may hurt streaming performance; default: disabled)."
+        ),
+    )
+    parser.add_argument(
+        "--trtllm-profile-start-stop",
+        type=str,
+        default="1-20",
+        help=(
+            "TensorRT-LLM profiling iteration spans for TLLM_PROFILE_START_STOP "
+            '(format: "start-stop[,start-stop...]" or "iter[,iter...]"; default: 1-20). '
+            "Used in the extra profiling stage."
+        ),
+    )
+    parser.add_argument(
+        "--trtllm-profile-record-gc",
+        dest="trtllm_profile_record_gc",
+        action="store_true",
+        help="TensorRT-LLM profiling: annotate Python GC with NVTX ranges (default: enabled).",
+    )
+    parser.add_argument(
+        "--trtllm-no-profile-record-gc",
+        dest="trtllm_profile_record_gc",
+        action="store_false",
+        help="TensorRT-LLM profiling: disable GC NVTX ranges.",
+    )
+    parser.set_defaults(trtllm_profile_record_gc=True)
     parser.add_argument(
         "--trace-a-url",
         type=str,
@@ -1608,14 +1922,161 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--profile-scale",
         type=float,
-        default=0.8,
-        help="Trace time scale for the profiling stage (default: 0.8).",
+        default=0.4,
+        help="Trace time scale for the profiling stage (default: 0.4).",
     )
     parser.add_argument(
         "--profile-output-len",
         type=int,
-        default=32,
-        help="Output length clamp for the profiling stage (default: 32).",
+        default=None,
+        help=(
+            "Output length clamp for the profiling stage (default: use --max-output-len)."
+        ),
+    )
+    parser.add_argument(
+        "--profile-torch-minimal",
+        dest="profile_torch_minimal",
+        action="store_true",
+        help=(
+            "Profiling stage: capture a short, representative torch-profiler window to "
+            "keep traces small (default: enabled)."
+        ),
+    )
+    parser.add_argument(
+        "--profile-torch-full",
+        dest="profile_torch_minimal",
+        action="store_false",
+        help="Profiling stage: capture a full torch-profiler trace (may be very large).",
+    )
+    parser.set_defaults(profile_torch_minimal=True)
+    parser.add_argument(
+        "--profile-torch-delay-steps",
+        type=int,
+        default=0,
+        help=(
+            "Profiling stage (torch, minimal): skip this many engine steps before "
+            "recording (default: 0)."
+        ),
+    )
+    parser.add_argument(
+        "--profile-torch-num-steps",
+        type=int,
+        default=20,
+        help=(
+            "Profiling stage (torch, minimal): record this many engine steps "
+            "(default: 20)."
+        ),
+    )
+    parser.add_argument(
+        "--profile-torch-with-stack",
+        dest="profile_torch_with_stack",
+        action="store_true",
+        help="Profiling stage: collect Python/C++ stacks in torch profiler.",
+    )
+    parser.add_argument(
+        "--profile-torch-no-with-stack",
+        dest="profile_torch_with_stack",
+        action="store_false",
+        help="Profiling stage: disable stack collection in torch profiler (default).",
+    )
+    parser.set_defaults(profile_torch_with_stack=False)
+    parser.add_argument(
+        "--profile-torch-record-shapes",
+        dest="profile_torch_record_shapes",
+        action="store_true",
+        help="Profiling stage: record tensor shapes in torch profiler.",
+    )
+    parser.add_argument(
+        "--profile-torch-no-record-shapes",
+        dest="profile_torch_record_shapes",
+        action="store_false",
+        help="Profiling stage: disable recording shapes in torch profiler (default).",
+    )
+    parser.set_defaults(profile_torch_record_shapes=False)
+    parser.add_argument(
+        "--profile-torch-with-memory",
+        dest="profile_torch_with_memory",
+        action="store_true",
+        help="Profiling stage: enable memory profiling when supported.",
+    )
+    parser.add_argument(
+        "--profile-torch-no-with-memory",
+        dest="profile_torch_with_memory",
+        action="store_false",
+        help="Profiling stage: disable memory profiling when supported (default: disabled).",
+    )
+    parser.set_defaults(profile_torch_with_memory=False)
+    parser.add_argument(
+        "--profile-vllm-nvtx-scopes",
+        dest="profile_vllm_nvtx_scopes",
+        action="store_true",
+        help="Profiling stage: enable vLLM layerwise NVTX tracing for nsys (default: enabled).",
+    )
+    parser.add_argument(
+        "--profile-no-vllm-nvtx-scopes",
+        dest="profile_vllm_nvtx_scopes",
+        action="store_false",
+        help="Profiling stage: disable vLLM layerwise NVTX tracing for nsys.",
+    )
+    parser.set_defaults(profile_vllm_nvtx_scopes=True)
+    parser.add_argument(
+        "--profile-sglang-layerwise-nvtx",
+        dest="profile_sglang_layerwise_nvtx",
+        action="store_true",
+        help="Profiling stage: enable SGLang layerwise NVTX markers for nsys (default: enabled).",
+    )
+    parser.add_argument(
+        "--profile-no-sglang-layerwise-nvtx",
+        dest="profile_sglang_layerwise_nvtx",
+        action="store_false",
+        help="Profiling stage: disable SGLang layerwise NVTX markers for nsys.",
+    )
+    parser.set_defaults(profile_sglang_layerwise_nvtx=True)
+    parser.add_argument(
+        "--profile-nsys-trace",
+        type=str,
+        default="cuda,nvtx,osrt",
+        help=(
+            "Profiling stage: value for `nsys profile --trace=...` "
+            "(default: cuda,nvtx,osrt)."
+        ),
+    )
+    parser.add_argument(
+        "--profile-nsys-cuda-graph-trace",
+        type=str,
+        default="node",
+        help=(
+            "Profiling stage: value for `nsys profile --cuda-graph-trace=...` "
+            "(default: node)."
+        ),
+    )
+    parser.add_argument(
+        "--profile-nsys-cpuctxsw",
+        type=str,
+        default=None,
+        help=(
+            "Profiling stage: optional value for `nsys profile --cpuctxsw=...` "
+            "(e.g. none, process-tree, system-wide). When unset, nsys default is used."
+        ),
+    )
+    parser.add_argument(
+        "--profile-nsys-kill",
+        type=str,
+        default=None,
+        help=(
+            "Profiling stage: optional value for `nsys profile --kill=...` "
+            "(e.g. none, sigterm, sigkill, or a signal number). "
+            "When unset, nsys default is used."
+        ),
+    )
+    parser.add_argument(
+        "--profile-nsys-cuda-flush-interval-ms",
+        type=int,
+        default=None,
+        help=(
+            "Profiling stage: optional value for `nsys profile --cuda-flush-interval=...` "
+            "in milliseconds. When unset, nsys default is used."
+        ),
     )
     parser.add_argument(
         "--backends",
@@ -1635,8 +2096,14 @@ def main() -> None:
     run_start_time = _iso_now()
     run_wall_t0 = time.perf_counter()
 
+    vllm_python = _resolve_vllm_python(args)
+    sglang_python = _resolve_sglang_python(args)
     trtllm_python = _resolve_trtllm_python(args)
-    versions = _collect_versions(trtllm_python=trtllm_python)
+    versions = _collect_versions(
+        vllm_python=vllm_python,
+        sglang_python=sglang_python,
+        trtllm_python=trtllm_python,
+    )
     print(f"[meta] start={run_start_time}, versions={versions}")
 
     profile_mode = str(getattr(args, "profile", "none")).lower()
@@ -1962,10 +2429,18 @@ def main() -> None:
             return
         tools = ["torch", "nsys"] if profile_mode == "both" else [profile_mode]
         profile_n = int(getattr(args, "profile_n", 32))
-        profile_scale = float(getattr(args, "profile_scale", 0.8))
-        profile_output_len = int(getattr(args, "profile_output_len", 32))
+        profile_scale = float(getattr(args, "profile_scale", 0.4))
+        profile_output_len: int | None = getattr(args, "profile_output_len", None)
+        if profile_output_len is None:
+            profile_output_len = (
+                int(args.max_output_len) if args.max_output_len is not None else None
+            )
         if profile_n <= 0:
             raise ValueError("--profile-n must be >= 1")
+        if profile_output_len is None:
+            raise ValueError(
+                "--profile-output-len must be set when --max-output-len is unset"
+            )
         if profile_output_len <= 0:
             raise ValueError("--profile-output-len must be >= 1")
         if not tools:
@@ -1976,8 +2451,10 @@ def main() -> None:
             tokenizer=tokenizer,
             max_ctx=max_ctx,
             scale=profile_scale,
-            start_offset_s=0.0,
-            max_input_len=(int(args.max_input_len) if args.max_input_len else None),
+            start_offset_s=float(args.start_offset_s),
+            max_input_len=(
+                int(args.max_input_len) if args.max_input_len is not None else None
+            ),
             max_output_len=profile_output_len,
             prompt_overhead_tokens=int(args.prompt_overhead_tokens),
             seed=int(args.seed),
@@ -1987,15 +2464,6 @@ def main() -> None:
             raise ValueError(
                 "no profiling traces built; check --profile-n and trace input"
             )
-        traces = [
-            TraceItem(
-                timestamp_s=0.0,
-                input_len=t.input_len,
-                output_len=t.output_len,
-                prompt=t.prompt,
-            )
-            for t in traces
-        ]
 
         profiles_root = run_dir / "profiles"
         profiles_root.mkdir(parents=True, exist_ok=True)
@@ -2009,11 +2477,68 @@ def main() -> None:
                 "profile_n": profile_n,
                 "profile_scale": profile_scale,
                 "profile_output_len": profile_output_len,
+                "profile_start_offset_s": float(args.start_offset_s),
+                "profile_nsys_trace": str(
+                    getattr(args, "profile_nsys_trace", "cuda,nvtx,osrt")
+                ),
+                "profile_nsys_cuda_graph_trace": str(
+                    getattr(args, "profile_nsys_cuda_graph_trace", "node")
+                ),
+                "profile_nsys_cpuctxsw": (
+                    str(getattr(args, "profile_nsys_cpuctxsw"))
+                    if getattr(args, "profile_nsys_cpuctxsw", None) is not None
+                    else None
+                ),
+                "profile_nsys_kill": (
+                    str(getattr(args, "profile_nsys_kill"))
+                    if getattr(args, "profile_nsys_kill", None) is not None
+                    else None
+                ),
+                "profile_nsys_cuda_flush_interval_ms": (
+                    int(getattr(args, "profile_nsys_cuda_flush_interval_ms"))
+                    if getattr(args, "profile_nsys_cuda_flush_interval_ms", None) is not None
+                    else None
+                ),
+                "profile_torch_minimal": bool(
+                    getattr(args, "profile_torch_minimal", True)
+                ),
+                "profile_torch_delay_steps": int(
+                    getattr(args, "profile_torch_delay_steps", 0)
+                ),
+                "profile_torch_num_steps": int(getattr(args, "profile_torch_num_steps", 0)),
+                "profile_torch_with_stack": bool(
+                    getattr(args, "profile_torch_with_stack", True)
+                ),
+                "profile_torch_record_shapes": bool(
+                    getattr(args, "profile_torch_record_shapes", True)
+                ),
+                "profile_torch_with_memory": bool(
+                    getattr(args, "profile_torch_with_memory", True)
+                ),
+                "profile_vllm_nvtx_scopes": bool(
+                    getattr(args, "profile_vllm_nvtx_scopes", True)
+                ),
+                "profile_sglang_layerwise_nvtx": bool(
+                    getattr(args, "profile_sglang_layerwise_nvtx", True)
+                ),
                 "tools": tools,
                 "backends": [spec.label for spec in run_specs],
                 "server_cpus": server_cpus,
                 "client_cpus": client_cpus,
                 "profile_start_time": profile_start_time,
+                "warmup_requests": int(args.warmup_requests),
+                "trtllm_worker_single_process": bool(
+                    getattr(args, "trtllm_worker_single_process", False)
+                ),
+                "trtllm_profile_start_stop": str(
+                    getattr(args, "trtllm_profile_start_stop", "1-20")
+                ),
+                "trtllm_profile_record_gc": bool(
+                    getattr(args, "trtllm_profile_record_gc", True)
+                ),
+                "vllm_async_scheduling": bool(
+                    getattr(args, "vllm_async_scheduling", True)
+                ),
                 "versions": versions,
             },
             "runs": [],
@@ -2071,12 +2596,64 @@ def main() -> None:
                 if base_backend == "vllm":
                     if tool == "torch":
                         env["VLLM_TORCH_PROFILER_DIR"] = str(out_dir)
+                        env["VLLM_TORCH_PROFILER_WITH_STACK"] = (
+                            "1"
+                            if bool(getattr(args, "profile_torch_with_stack", True))
+                            else "0"
+                        )
+                        env["VLLM_TORCH_PROFILER_RECORD_SHAPES"] = (
+                            "1"
+                            if bool(getattr(args, "profile_torch_record_shapes", True))
+                            else "0"
+                        )
+                        env["VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY"] = (
+                            "1"
+                            if bool(getattr(args, "profile_torch_with_memory", True))
+                            else "0"
+                        )
+                        if bool(getattr(args, "profile_torch_minimal", True)):
+                            delay_steps = int(getattr(args, "profile_torch_delay_steps", 0))
+                            num_steps = int(getattr(args, "profile_torch_num_steps", 0))
+                            env["VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM"] = "1"
+                            env["VLLM_PROFILER_DELAY_ITERS"] = str(max(0, delay_steps))
+                            env["VLLM_PROFILER_MAX_ITERS"] = str(max(0, num_steps))
                 elif base_backend == "trtllm":
                     env["TLLM_LLMAPI_ENABLE_NVTX"] = "1"
-                    env["TLLM_PROFILE_START_STOP"] = "1-20"
-                    env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+                    env["TLLM_PROFILE_START_STOP"] = str(args.trtllm_profile_start_stop)
+                    if bool(getattr(args, "trtllm_profile_record_gc", True)):
+                        env["TLLM_PROFILE_RECORD_GC"] = "1"
+                    else:
+                        env.pop("TLLM_PROFILE_RECORD_GC", None)
+                    if bool(getattr(args, "trtllm_worker_single_process", False)):
+                        env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+                    else:
+                        env.pop("TLLM_WORKER_USE_SINGLE_PROCESS", None)
                     if tool == "torch":
                         env["TLLM_TORCH_PROFILE_TRACE"] = str(out_dir / "trace.json")
+                elif base_backend == "roseinfer":
+                    if tool == "torch":
+                        env["ROSEINFER_TORCH_PROFILE_WITH_STACK"] = (
+                            "1"
+                            if bool(getattr(args, "profile_torch_with_stack", True))
+                            else "0"
+                        )
+                        env["ROSEINFER_TORCH_PROFILE_RECORD_SHAPES"] = (
+                            "1"
+                            if bool(getattr(args, "profile_torch_record_shapes", True))
+                            else "0"
+                        )
+                        env["ROSEINFER_TORCH_PROFILE_WITH_PROFILE_MEMORY"] = (
+                            "1"
+                            if bool(getattr(args, "profile_torch_with_memory", True))
+                            else "0"
+                        )
+                        if bool(getattr(args, "profile_torch_minimal", True)):
+                            env["ROSEINFER_TORCH_PROFILE_DELAY_STEPS"] = str(
+                                max(0, int(getattr(args, "profile_torch_delay_steps", 0)))
+                            )
+                            env["ROSEINFER_TORCH_PROFILE_NUM_STEPS"] = str(
+                                max(0, int(getattr(args, "profile_torch_num_steps", 0)))
+                            )
 
                 if base_backend == "roseinfer":
                     cmd = _roseinfer_server_cmd(
@@ -2106,16 +2683,38 @@ def main() -> None:
                         mp_tokenize_workers=mp_tokenize_workers,
                     )
                 elif base_backend == "vllm":
+                    if vllm_python is not None:
+                        env.pop("PYTHONPATH", None)
                     cmd = _vllm_server_cmd(
-                        args, host=args.host, port=port, max_context_len=max_ctx
+                        args,
+                        host=args.host,
+                        port=port,
+                        max_context_len=max_ctx,
+                        python_exe=vllm_python,
+                        enable_layerwise_nvtx_tracing=(
+                            tool == "nsys"
+                            and bool(getattr(args, "profile_vllm_nvtx_scopes", True))
+                        ),
                     )
                 elif base_backend == "sglang":
-                    _maybe_add_sglang_source_pythonpath(env)
+                    if sglang_python is None:
+                        _maybe_add_sglang_source_pythonpath(env)
+                    else:
+                        env.pop("PYTHONPATH", None)
                     cmd = _sglang_server_cmd(
-                        args, host=args.host, port=port, max_context_len=max_ctx
+                        args,
+                        host=args.host,
+                        port=port,
+                        max_context_len=max_ctx,
+                        python_exe=sglang_python,
+                        enable_layerwise_nvtx_marker=(
+                            tool == "nsys"
+                            and bool(getattr(args, "profile_sglang_layerwise_nvtx", True))
+                        ),
                     )
                 elif base_backend == "trtllm":
                     if trtllm_python:
+                        env.pop("PYTHONPATH", None)
                         env = _trtllm_runtime_env(
                             python_exe=trtllm_python, base_env=env
                         )
@@ -2135,22 +2734,53 @@ def main() -> None:
                 nsys_prefix = None
                 nsys_capture_range = None
                 if tool == "nsys":
-                    nsys_prefix = out_dir / "nsys"
+                    nsys_prefix = out_dir / backend
                     # NOTE: Many backends (roseinfer multiprocess / SGLang 3-stage) spawn
                     # worker processes early. `capture-range=cudaProfilerApi` can miss CUDA
                     # kernels from already-running children; profiling the full process tree
                     # is more reliable for cross-backend comparisons.
                     nsys_capture_range = "none"
+                    nsys_trace = str(
+                        getattr(args, "profile_nsys_trace", "cuda,nvtx,osrt")
+                    )
+                    nsys_cuda_graph_trace = str(
+                        getattr(args, "profile_nsys_cuda_graph_trace", "node")
+                    )
+                    nsys_cpuctxsw = getattr(args, "profile_nsys_cpuctxsw", None)
+                    nsys_kill = getattr(args, "profile_nsys_kill", None)
+                    nsys_cuda_flush_ms = getattr(
+                        args, "profile_nsys_cuda_flush_interval_ms", None
+                    )
+                    cpu_str = _format_cpu_set(server_cpus)
                     cmd = [
                         "nsys",
                         "profile",
                         "--force-overwrite=true",
                         f"--capture-range={nsys_capture_range}",
-                        "--trace=cuda,nvtx,osrt",
+                        f"--trace={nsys_trace}",
+                        f"--cuda-graph-trace={nsys_cuda_graph_trace}",
+                        *(
+                            [f"--kill={str(nsys_kill)}"]
+                            if nsys_kill is not None
+                            else []
+                        ),
+                        *(
+                            [f"--cuda-flush-interval={int(nsys_cuda_flush_ms)}"]
+                            if nsys_cuda_flush_ms is not None
+                            else []
+                        ),
+                        *(
+                            [f"--cpuctxsw={str(nsys_cpuctxsw)}"]
+                            if nsys_cpuctxsw is not None
+                            else []
+                        ),
                         "--sample=none",
                         "--trace-fork-before-exec=true",
                         "-o",
                         str(nsys_prefix),
+                        "taskset",
+                        "-c",
+                        cpu_str,
                         *cmd,
                     ]
 
@@ -2158,6 +2788,7 @@ def main() -> None:
                     cmd=cmd, env=env, cpu_set=server_cpus, log_path=log_path
                 )
                 stage_t0 = time.perf_counter()
+                run_record: dict[str, Any] | None = None
                 try:
                     profile_err: str | None = None
                     try:
@@ -2168,8 +2799,6 @@ def main() -> None:
                         profile_err = f"server not ready: {exc}"
 
                     warmup_n = int(args.warmup_requests)
-                    if base_backend == "trtllm":
-                        warmup_n = 0
                     if profile_err is None and warmup_n > 0:
                         try:
                             effective_ctx = max(
@@ -2213,14 +2842,36 @@ def main() -> None:
                                 err = None
                         elif base_backend == "sglang":
                             if tool == "torch":
+                                activities = ["CPU", "GPU"]
+                                if bool(getattr(args, "profile_torch_with_memory", True)):
+                                    activities.append("MEM")
+                                body = {
+                                    "output_dir": str(out_dir),
+                                    "activities": activities,
+                                    "with_stack": bool(
+                                        getattr(args, "profile_torch_with_stack", True)
+                                    ),
+                                    "record_shapes": bool(
+                                        getattr(args, "profile_torch_record_shapes", True)
+                                    ),
+                                }
+                                if bool(getattr(args, "profile_torch_minimal", True)):
+                                    delay_steps = max(
+                                        0,
+                                        int(getattr(args, "profile_torch_delay_steps", 0)),
+                                    )
+                                    num_steps = max(
+                                        0,
+                                        int(getattr(args, "profile_torch_num_steps", 0)),
+                                    )
+                                    if delay_steps > 0:
+                                        body["start_step"] = delay_steps
+                                    if num_steps > 0:
+                                        body["num_steps"] = num_steps
+                                    body["profile_prefix"] = backend
                                 err = http_post_ok(
                                     f"{root_url}/start_profile",
-                                    json_body={
-                                        "output_dir": str(out_dir),
-                                        "activities": ["CPU", "GPU"],
-                                        "with_stack": True,
-                                        "record_shapes": True,
-                                    },
+                                    json_body=body,
                                 )
                             else:
                                 # With `nsys_capture_range=none`, avoid extra CUDA profiler
@@ -2286,14 +2937,24 @@ def main() -> None:
                                     # vLLM may flush traces asynchronously.
                                     time.sleep(5.0)
                         elif base_backend == "sglang":
-                            err = http_post_ok(f"{root_url}/stop_profile")
-                            if err is not None:
-                                profile_err = f"stop_profile failed: {err}"
-                            elif tool == "torch":
-                                # SGLang exports traces asynchronously; give it a moment
-                                # before terminating the server process.
-                                time.sleep(5.0)
+                            if tool == "torch":
+                                torch_minimal = bool(
+                                    getattr(args, "profile_torch_minimal", True)
+                                )
+                                torch_num_steps = int(getattr(args, "profile_torch_num_steps", 0))
+                                if torch_minimal and torch_num_steps > 0:
+                                    # With num_steps, SGLang auto-stops profiling internally.
+                                    time.sleep(5.0)
+                                else:
+                                    err = http_post_ok(f"{root_url}/stop_profile")
+                                    if err is not None:
+                                        profile_err = f"stop_profile failed: {err}"
+                                    else:
+                                        # SGLang exports traces asynchronously; give it a moment
+                                        # before terminating the server process.
+                                        time.sleep(5.0)
                             else:
+                                # nsys capture-range=none; nothing to stop explicitly.
                                 time.sleep(1.0)
                         elif base_backend == "roseinfer":
                             if tool != "nsys":
@@ -2305,22 +2966,21 @@ def main() -> None:
                                 pass
 
                     wall_s = float(time.perf_counter() - stage_t0)
-                    manifest["runs"].append(
-                        {
-                            "tool": tool,
-                            "backend": backend,
-                            "base_backend": base_backend,
-                            "port": port,
-                            "cmd": cmd,
-                            "log_path": str(log_path),
-                            "output_dir": str(out_dir),
-                            "nsys_output_prefix": (
-                                str(nsys_prefix) if nsys_prefix is not None else None
-                            ),
-                            "wall_s": wall_s,
-                            "profile_error": profile_err,
-                        }
-                    )
+                    run_record = {
+                        "tool": tool,
+                        "backend": backend,
+                        "base_backend": base_backend,
+                        "port": port,
+                        "cmd": cmd,
+                        "log_path": str(log_path),
+                        "output_dir": str(out_dir),
+                        "nsys_output_prefix": (
+                            str(nsys_prefix) if nsys_prefix is not None else None
+                        ),
+                        "wall_s": wall_s,
+                        "profile_error": profile_err,
+                    }
+                    manifest["runs"].append(run_record)
                     if profile_err is None:
                         print(
                             f"[profile:{tool}] {backend} wall={wall_s:.2f}s -> {out_dir}"
@@ -2330,9 +2990,47 @@ def main() -> None:
                             f"[profile:{tool}] {backend} error={profile_err} -> {out_dir}"
                         )
                 finally:
-                    _terminate_process(
-                        server, timeout_s=60.0 if tool == "nsys" else 15.0
-                    )
+                    shutdown_timeout_s = 60.0 if tool == "nsys" else 15.0
+                    if tool == "nsys" and base_backend == "trtllm":
+                        shutdown_timeout_s = 300.0
+                    if tool == "nsys" and base_backend == "trtllm":
+                        # TRT-LLM may detach its Uvicorn server into a new session/process
+                        # group; stop it by port so nsys can finalize and write the report.
+                        _terminate_trtllm_server(port=port, timeout_s=20.0)
+                        try:
+                            server.wait(timeout=shutdown_timeout_s)
+                        except subprocess.TimeoutExpired:
+                            server.kill()
+                            server.wait(timeout=shutdown_timeout_s)
+                    elif tool == "nsys":
+                        # Prefer terminating the *server process* by port and letting nsys
+                        # finalize normally. Sending SIGTERM directly to nsys can lead to
+                        # missing CUDA kernel activity for multi-process backends.
+                        _terminate_server_by_port(port=port, timeout_s=20.0)
+                        try:
+                            server.wait(timeout=shutdown_timeout_s)
+                        except subprocess.TimeoutExpired:
+                            server.kill()
+                            server.wait(timeout=shutdown_timeout_s)
+                    else:
+                        _terminate_process(server, timeout_s=shutdown_timeout_s)
+                    if (
+                        tool == "nsys"
+                        and run_record is not None
+                        and run_record.get("profile_error") is None
+                        and nsys_prefix is not None
+                    ):
+                        rep_path = Path(f"{nsys_prefix}.nsys-rep")
+                        deadline = time.time() + 15.0
+                        while time.time() < deadline and not rep_path.exists():
+                            time.sleep(0.25)
+                        if not rep_path.exists():
+                            run_record["profile_error"] = (
+                                f"nsys report not produced: {rep_path}"
+                            )
+                            print(
+                                f"[profile:{tool}] {backend} error={run_record['profile_error']} -> {out_dir}"
+                            )
 
         manifest["meta"]["profile_end_time"] = _iso_now()
         manifest["meta"]["profile_wall_s"] = float(time.perf_counter() - profile_t0)
@@ -2403,17 +3101,34 @@ def main() -> None:
                 mp_tokenize_workers=mp_tokenize_workers,
             )
         elif base_backend == "vllm":
+            if vllm_python is not None:
+                env.pop("PYTHONPATH", None)
             cmd = _vllm_server_cmd(
-                args, host=args.host, port=port, max_context_len=max_ctx
+                args,
+                host=args.host,
+                port=port,
+                max_context_len=max_ctx,
+                python_exe=vllm_python,
             )
         elif base_backend == "sglang":
-            _maybe_add_sglang_source_pythonpath(env)
+            if sglang_python is None:
+                _maybe_add_sglang_source_pythonpath(env)
+            else:
+                env.pop("PYTHONPATH", None)
             cmd = _sglang_server_cmd(
-                args, host=args.host, port=port, max_context_len=max_ctx
+                args,
+                host=args.host,
+                port=port,
+                max_context_len=max_ctx,
+                python_exe=sglang_python,
             )
         elif base_backend == "trtllm":
-            env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+            if bool(getattr(args, "trtllm_worker_single_process", False)):
+                env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+            else:
+                env.pop("TLLM_WORKER_USE_SINGLE_PROCESS", None)
             if trtllm_python:
+                env.pop("PYTHONPATH", None)
                 env = _trtllm_runtime_env(python_exe=trtllm_python, base_env=env)
             else:
                 _maybe_add_trtllm_source_pythonpath(env)
@@ -2553,6 +3268,17 @@ def main() -> None:
             "device": args.device,
             "gpu": args.gpu,
             "dtype": str(args.dtype),
+            "vllm_async_scheduling": bool(getattr(args, "vllm_async_scheduling", True)),
+            "vllm_attention_backend": str(
+                getattr(args, "vllm_attention_backend", "auto")
+            ),
+            "vllm_max_num_seqs": _resolve_vllm_max_num_seqs(args),
+            "sglang_attention_backend": str(
+                getattr(args, "sglang_attention_backend", "auto")
+            ),
+            "sglang_sampling_backend": str(
+                getattr(args, "sglang_sampling_backend", "auto")
+            ),
             "seed": int(args.seed),
             "temperature": float(args.temperature),
             "top_p": float(args.top_p),
@@ -2658,6 +3384,9 @@ def main() -> None:
                 getattr(args, "roseinfer_compare_mp_ablations", False)
             ),
             "trace_path": str(trace_path),
+            "trtllm_worker_single_process": bool(
+                getattr(args, "trtllm_worker_single_process", False)
+            ),
             "run_start_time": run_start_time,
             "run_end_time": run_end_time,
             "wall_s": run_wall_s,

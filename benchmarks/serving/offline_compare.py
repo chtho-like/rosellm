@@ -85,6 +85,32 @@ def _resolve_trtllm_python(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _resolve_vllm_python(args: argparse.Namespace) -> str | None:
+    if getattr(args, "vllm_python", None):
+        return str(args.vllm_python)
+    env_val = os.environ.get("ROSELLM_VLLM_PYTHON") or os.environ.get("VLLM_PYTHON")
+    if env_val:
+        return str(env_val)
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate = repo_root / ".conda-vllm" / "bin" / "python"
+    if candidate.is_file():
+        return str(candidate)
+    return None
+
+
+def _resolve_sglang_python(args: argparse.Namespace) -> str | None:
+    if getattr(args, "sglang_python", None):
+        return str(args.sglang_python)
+    env_val = os.environ.get("ROSELLM_SGLANG_PYTHON") or os.environ.get("SGLANG_PYTHON")
+    if env_val:
+        return str(env_val)
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate = repo_root / ".conda-sglang" / "bin" / "python"
+    if candidate.is_file():
+        return str(candidate)
+    return None
+
+
 def _trtllm_runtime_env(*, python_exe: str, base_env: dict[str, str]) -> dict[str, str]:
     env = dict(base_env)
     # NOTE: venv `python` is often a symlink to system Python; avoid `.resolve()`.
@@ -252,7 +278,12 @@ def _try_git_rev() -> str | None:
         return None
 
 
-def _collect_versions(*, trtllm_python: str | None = None) -> dict[str, str]:
+def _collect_versions(
+    *,
+    vllm_python: str | None = None,
+    sglang_python: str | None = None,
+    trtllm_python: str | None = None,
+) -> dict[str, str]:
     versions: dict[str, str] = {"python": sys.version.split()[0]}
     try:
         import importlib.metadata as md
@@ -277,6 +308,48 @@ def _collect_versions(*, trtllm_python: str | None = None) -> dict[str, str]:
         pass
 
     if (
+        vllm_python
+        and versions.get("vllm") == "not installed"
+        and Path(str(vllm_python)).is_file()
+    ):
+        try:
+            out = subprocess.check_output(
+                [
+                    str(vllm_python),
+                    "-c",
+                    "import importlib.metadata as md; print(md.version('vllm'))",
+                ],
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+            probed = out.decode("utf-8", errors="replace").strip()
+            if probed:
+                versions["vllm"] = probed
+        except Exception:
+            pass
+
+    if (
+        sglang_python
+        and versions.get("sglang") == "not installed"
+        and Path(str(sglang_python)).is_file()
+    ):
+        try:
+            out = subprocess.check_output(
+                [
+                    str(sglang_python),
+                    "-c",
+                    "import importlib.metadata as md; print(md.version('sglang'))",
+                ],
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+            probed = out.decode("utf-8", errors="replace").strip()
+            if probed:
+                versions["sglang"] = probed
+        except Exception:
+            pass
+
+    if (
         trtllm_python
         and versions.get("tensorrt_llm") == "not installed"
         and Path(str(trtllm_python)).is_file()
@@ -299,6 +372,13 @@ def _collect_versions(*, trtllm_python: str | None = None) -> dict[str, str]:
     git_rev = _try_git_rev()
     if git_rev:
         versions["git_rev"] = git_rev
+    versions["python_executable"] = sys.executable
+    if vllm_python:
+        versions["vllm_python"] = str(vllm_python)
+    if sglang_python:
+        versions["sglang_python"] = str(sglang_python)
+    if trtllm_python:
+        versions["trtllm_python"] = str(trtllm_python)
     return versions
 
 
@@ -369,6 +449,18 @@ def _dtype_flag_sglang(dtype: str) -> dict[str, Any]:
     if dtype == "fp32":
         return {"dtype": "float32"}
     raise ValueError(f"unsupported dtype for SGLang: {dtype}")
+
+
+def _resolve_vllm_max_num_seqs(args: argparse.Namespace) -> int | None:
+    max_num_seqs = getattr(args, "vllm_max_num_seqs", None)
+    if max_num_seqs is not None:
+        return int(max_num_seqs)
+    vllm_attention_backend = str(getattr(args, "vllm_attention_backend", "auto")).lower()
+    if vllm_attention_backend == "flashinfer":
+        # vLLM v0.13.0 may OOM during sampler warmup on 12GB GPUs when
+        # `attention_backend=flashinfer` and the default max_num_seqs=256.
+        return 128
+    return None
 
 
 def _dtype_flag_trtllm(dtype: str) -> dict[str, Any]:
@@ -471,7 +563,10 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
         model=model,
         config=config,
         tokenizer=tokenizer,
-        kv_cache_max_concurrency=max(1, int(args.num_prompts)),
+        kv_cache_max_concurrency=max(
+            1,
+            min(int(args.num_prompts), int(args.max_batch_size)),
+        ),
         prefix_cache_max_entries=256,
         use_paged_attention=bool(args.roseinfer_paged_attn),
         use_cuda_graph=bool(args.roseinfer_cuda_graph),
@@ -569,6 +664,8 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
             scheduler.step()
         for sess in scheduler._sessions.values():  # type: ignore[attr-defined]
             sess.release_kv_blocks()
+        if use_prefix_cache:
+            engine.prefix_cache.clear()
 
     if use_chunked:
         scheduler = ChunkedOnlineScheduler(
@@ -628,6 +725,7 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
             (total_input_tokens + total_output_tokens) / max(total_s, 1e-9)
         ),
         extra={
+            "python_executable": sys.executable,
             "prefill_chunked": use_chunked,
             "prefill_chunk_size": prefill_chunk_size if use_chunked else None,
             "prefix_cache": use_prefix_cache,
@@ -909,6 +1007,7 @@ def _run_roseinfer_mp(args: argparse.Namespace) -> OfflineResult:
             (total_input_tokens + total_output_tokens) / max(total_s, 1e-9)
         ),
         extra={
+            "python_executable": sys.executable,
             "mp": True,
             "mp_ipc": mp_ipc,
             "mp_batch_send": bool(mp_batch_send),
@@ -959,12 +1058,56 @@ def _run_vllm(args: argparse.Namespace) -> OfflineResult:
         vocab_size=vocab_size,
     )
 
-    llm = LLM(
+    vllm_async_scheduling = bool(getattr(args, "vllm_async_scheduling", True))
+    vllm_attention_backend = str(getattr(args, "vllm_attention_backend", "auto"))
+    llm_kwargs: dict[str, Any] = dict(
         model=args.model,
         tensor_parallel_size=int(args.tensor_parallel_size),
         trust_remote_code=True,
+        async_scheduling=vllm_async_scheduling,
         **_dtype_flag_vllm(str(args.dtype)),
     )
+    if vllm_attention_backend and vllm_attention_backend.lower() != "auto":
+        llm_kwargs["attention_backend"] = vllm_attention_backend
+    vllm_max_num_seqs = _resolve_vllm_max_num_seqs(args)
+    if vllm_max_num_seqs is not None:
+        llm_kwargs["max_num_seqs"] = int(vllm_max_num_seqs)
+    vllm_async_scheduling_supported = True
+    vllm_attention_backend_supported = True
+    try:
+        llm = LLM(**llm_kwargs)
+    except TypeError as first_err:
+        # Keep some compatibility with older vLLM versions that may not support
+        # newer EngineArgs/LLM keyword arguments.
+        base_kwargs = dict(llm_kwargs)
+        attempts: list[tuple[dict[str, Any], bool, bool]] = []
+
+        if "attention_backend" in base_kwargs:
+            no_attn = dict(base_kwargs)
+            no_attn.pop("attention_backend", None)
+            attempts.append((no_attn, False, True))
+        if "async_scheduling" in base_kwargs:
+            no_async = dict(base_kwargs)
+            no_async.pop("async_scheduling", None)
+            attempts.append((no_async, True, False))
+        if "attention_backend" in base_kwargs and "async_scheduling" in base_kwargs:
+            no_both = dict(base_kwargs)
+            no_both.pop("attention_backend", None)
+            no_both.pop("async_scheduling", None)
+            attempts.append((no_both, False, False))
+
+        last_err: TypeError | None = None
+        for kwargs, attn_ok, async_ok in attempts:
+            try:
+                llm = LLM(**kwargs)
+                vllm_attention_backend_supported = attn_ok
+                vllm_async_scheduling_supported = async_ok
+                break
+            except TypeError as e:
+                last_err = e
+                continue
+        else:
+            raise (last_err or first_err)
 
     if not bool(args.skip_warmup) and prompt_token_ids:
         warmup_top_k = 0
@@ -1037,7 +1180,14 @@ def _run_vllm(args: argparse.Namespace) -> OfflineResult:
         total_throughput_tps=float(
             (total_input_tokens + total_output_tokens) / max(total_s, 1e-9)
         ),
-        extra={},
+        extra={
+            "python_executable": sys.executable,
+            "async_scheduling": vllm_async_scheduling,
+            "async_scheduling_supported": vllm_async_scheduling_supported,
+            "attention_backend": vllm_attention_backend,
+            "attention_backend_supported": vllm_attention_backend_supported,
+            "max_num_seqs": vllm_max_num_seqs,
+        },
     )
 
 
@@ -1178,7 +1328,7 @@ def _run_sglang(args: argparse.Namespace) -> OfflineResult:
         total_throughput_tps=float(
             (total_input_tokens + total_output_tokens) / max(total_s, 1e-9)
         ),
-        extra={},
+        extra={"python_executable": sys.executable},
     )
 
 
@@ -1313,7 +1463,7 @@ def _run_trtllm(args: argparse.Namespace) -> OfflineResult:
         total_throughput_tps=float(
             (total_input_tokens + total_output_tokens) / max(total_s, 1e-9)
         ),
-        extra={},
+        extra={"python_executable": sys.executable},
     )
 
 
@@ -1336,7 +1486,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="triton",
         choices=["flashinfer", "triton", "torch_native", "fa3", "flashmla"],
-        help="SGLang attention backend (default: triton for broad compatibility).",
+        help="SGLang attention backend (default: triton).",
     )
     parser.add_argument(
         "--sglang-sampling-backend",
@@ -1344,6 +1494,56 @@ def parse_args() -> argparse.Namespace:
         default="flashinfer",
         choices=["flashinfer", "pytorch"],
         help="SGLang sampling backend (default: flashinfer).",
+    )
+    parser.add_argument(
+        "--vllm-python",
+        type=str,
+        default=None,
+        help=(
+            "Python executable for the vLLM backend. "
+            "Default: use current interpreter or auto-detect `./.conda-vllm/bin/python`."
+        ),
+    )
+    parser.add_argument(
+        "--vllm-attention-backend",
+        type=str,
+        default="flashinfer",
+        choices=["auto", "flashinfer", "flash_attn", "triton_attn"],
+        help="vLLM attention backend (default: flashinfer).",
+    )
+    parser.add_argument(
+        "--vllm-max-num-seqs",
+        type=int,
+        default=None,
+        help=(
+            "vLLM max_num_seqs. Default: use vLLM default; if unset and "
+            "--vllm-attention-backend=flashinfer, auto-set to 128 to avoid OOM on 12GB GPUs."
+        ),
+    )
+    parser.add_argument(
+        "--vllm-async-scheduling",
+        dest="vllm_async_scheduling",
+        action="store_true",
+        help=(
+            "vLLM: enable async scheduling (overlap CPU scheduling with GPU work) "
+            "for a more apples-to-apples comparison vs sglang/TRT-LLM (default: enabled)."
+        ),
+    )
+    parser.add_argument(
+        "--vllm-no-async-scheduling",
+        dest="vllm_async_scheduling",
+        action="store_false",
+        help="vLLM: disable async scheduling.",
+    )
+    parser.set_defaults(vllm_async_scheduling=True)
+    parser.add_argument(
+        "--sglang-python",
+        type=str,
+        default=None,
+        help=(
+            "Python executable for the SGLang backend. "
+            "Default: use current interpreter or auto-detect `./.conda-sglang/bin/python`."
+        ),
     )
     parser.add_argument(
         "--trtllm-python",
@@ -1361,6 +1561,27 @@ def parse_args() -> argparse.Namespace:
         choices=["pytorch", "tensorrt", "trt"],
         help="TensorRT-LLM backend for offline benchmark (default: tensorrt).",
     )
+    parser.add_argument(
+        "--trtllm-worker-single-process",
+        action="store_true",
+        help=(
+            "TensorRT-LLM: set env TLLM_WORKER_USE_SINGLE_PROCESS=1 for TP=1 "
+            "(may hurt streaming performance; default: disabled)."
+        ),
+    )
+    parser.add_argument(
+        "--trtllm-profile-record-gc",
+        dest="trtllm_profile_record_gc",
+        action="store_true",
+        help="TensorRT-LLM profiling: annotate Python GC with NVTX ranges (default: enabled).",
+    )
+    parser.add_argument(
+        "--trtllm-no-profile-record-gc",
+        dest="trtllm_profile_record_gc",
+        action="store_false",
+        help="TensorRT-LLM profiling: disable GC NVTX ranges.",
+    )
+    parser.set_defaults(trtllm_profile_record_gc=True)
     parser.add_argument(
         "--num-prompts", type=int, default=256, help="Number of prompts."
     )
@@ -1792,6 +2013,15 @@ def parse_args() -> argparse.Namespace:
         help="(Internal) Output dir for a single-backend profiling run.",
     )
     parser.add_argument(
+        "--profile-nsys-cuda-flush-interval-ms",
+        type=int,
+        default=None,
+        help=(
+            "Profiling stage: optional value for `nsys profile --cuda-flush-interval=...` "
+            "(in ms)."
+        ),
+    )
+    parser.add_argument(
         "--server-cpus",
         type=str,
         default=None,
@@ -1816,6 +2046,15 @@ def parse_args() -> argparse.Namespace:
 def _run_single_backend(args: argparse.Namespace) -> OfflineResult:
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    if args.backend == "trtllm" and bool(getattr(args, "trtllm_worker_single_process", False)):
+        os.environ["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+    profile_mode = str(getattr(args, "profile", "none")).lower()
+    if args.backend == "trtllm" and profile_mode != "none":
+        os.environ["TLLM_LLMAPI_ENABLE_NVTX"] = "1"
+        if bool(getattr(args, "trtllm_profile_record_gc", True)):
+            os.environ["TLLM_PROFILE_RECORD_GC"] = "1"
+        else:
+            os.environ.pop("TLLM_PROFILE_RECORD_GC", None)
     if args.backend == "roseinfer":
         return _run_roseinfer(args)
     if args.backend == "roseinfer_mp":
@@ -1836,8 +2075,14 @@ def _run_compare(args: argparse.Namespace) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     run_start_time = _iso_now()
     run_wall_t0 = time.perf_counter()
+    vllm_python = _resolve_vllm_python(args)
+    sglang_python = _resolve_sglang_python(args)
     trtllm_python = _resolve_trtllm_python(args)
-    versions = _collect_versions(trtllm_python=trtllm_python)
+    versions = _collect_versions(
+        vllm_python=vllm_python,
+        sglang_python=sglang_python,
+        trtllm_python=trtllm_python,
+    )
     print(f"[meta] start={run_start_time}, versions={versions}")
 
     server_cpus = (
@@ -1848,7 +2093,8 @@ def _run_compare(args: argparse.Namespace) -> None:
     env["TOKENIZERS_PARALLELISM"] = "false"
     env["OMP_NUM_THREADS"] = str(len(server_cpus))
     env["MKL_NUM_THREADS"] = str(len(server_cpus))
-    _maybe_add_sglang_source_pythonpath_env(env)
+    if sglang_python is None:
+        _maybe_add_sglang_source_pythonpath_env(env)
     if trtllm_python is None:
         _maybe_add_trtllm_source_pythonpath_env(env)
 
@@ -2149,6 +2395,12 @@ def _run_compare(args: argparse.Namespace) -> None:
                 "tools": tools,
                 "backends": [spec.label for spec in run_specs],
                 "profile_start_time": profile_start_time,
+                "vllm_async_scheduling": bool(
+                    getattr(args, "vllm_async_scheduling", True)
+                ),
+                "trtllm_profile_record_gc": bool(
+                    getattr(args, "trtllm_profile_record_gc", True)
+                ),
                 "versions": versions,
             },
             "runs": [],
@@ -2169,13 +2421,28 @@ def _run_compare(args: argparse.Namespace) -> None:
                 python_exe = (
                     trtllm_python
                     if base_backend == "trtllm" and trtllm_python is not None
+                    else vllm_python
+                    if base_backend == "vllm" and vllm_python is not None
+                    else sglang_python
+                    if base_backend == "sglang" and sglang_python is not None
                     else sys.executable
                 )
+                if python_exe != sys.executable:
+                    profile_env.pop("PYTHONPATH", None)
                 if base_backend == "trtllm" and trtllm_python is not None:
                     profile_env = _trtllm_runtime_env(
                         python_exe=trtllm_python, base_env=profile_env
                     )
-                    profile_env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+                if base_backend == "trtllm":
+                    profile_env["TLLM_LLMAPI_ENABLE_NVTX"] = "1"
+                    if bool(getattr(args, "trtllm_profile_record_gc", True)):
+                        profile_env["TLLM_PROFILE_RECORD_GC"] = "1"
+                    else:
+                        profile_env.pop("TLLM_PROFILE_RECORD_GC", None)
+                    if bool(getattr(args, "trtllm_worker_single_process", False)):
+                        profile_env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+                    else:
+                        profile_env.pop("TLLM_WORKER_USE_SINGLE_PROCESS", None)
 
                 py_cmd = [
                     python_exe,
@@ -2229,6 +2496,12 @@ def _run_compare(args: argparse.Namespace) -> None:
                     py_cmd.append("--no-amp")
                 if args.bf16:
                     py_cmd.append("--bf16")
+                if base_backend == "vllm":
+                    py_cmd.append(
+                        "--vllm-async-scheduling"
+                        if bool(getattr(args, "vllm_async_scheduling", True))
+                        else "--vllm-no-async-scheduling"
+                    )
                 if base_backend in ("roseinfer", "roseinfer_mp"):
                     py_cmd += [
                         "--roseinfer-prefill-attn-backend",
@@ -2339,7 +2612,10 @@ def _run_compare(args: argparse.Namespace) -> None:
                 cmd: list[str] = ["taskset", "-c", cpu_str]
                 nsys_prefix = None
                 if tool == "nsys":
-                    nsys_prefix = out_dir / "nsys"
+                    nsys_prefix = out_dir / label
+                    nsys_cuda_flush_ms = getattr(
+                        args, "profile_nsys_cuda_flush_interval_ms", None
+                    )
                     # See `benchmarks/serving/online_compare.py`: multi-process backends
                     # can start worker processes before `cudaProfilerStart`, causing
                     # capture-range=cudaProfilerApi to miss GPU kernels. Prefer capturing
@@ -2350,6 +2626,11 @@ def _run_compare(args: argparse.Namespace) -> None:
                         "--force-overwrite=true",
                         "--capture-range=none",
                         "--trace=cuda,nvtx,osrt",
+                        *(
+                            [f"--cuda-flush-interval={int(nsys_cuda_flush_ms)}"]
+                            if nsys_cuda_flush_ms is not None
+                            else []
+                        ),
                         "--sample=none",
                         "--trace-fork-before-exec=true",
                         "-o",
@@ -2425,6 +2706,10 @@ def _run_compare(args: argparse.Namespace) -> None:
         python_exe = (
             trtllm_python
             if base_backend == "trtllm" and trtllm_python is not None
+            else vllm_python
+            if base_backend == "vllm" and vllm_python is not None
+            else sglang_python
+            if base_backend == "sglang" and sglang_python is not None
             else sys.executable
         )
         run_env = (
@@ -2432,8 +2717,14 @@ def _run_compare(args: argparse.Namespace) -> None:
             if base_backend == "trtllm" and trtllm_python is not None
             else env
         )
-        if base_backend == "trtllm" and trtllm_python is not None:
-            run_env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+        if python_exe != sys.executable:
+            run_env = dict(run_env)
+            run_env.pop("PYTHONPATH", None)
+        if base_backend == "trtllm":
+            if bool(getattr(args, "trtllm_worker_single_process", False)):
+                run_env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+            else:
+                run_env.pop("TLLM_WORKER_USE_SINGLE_PROCESS", None)
 
         cmd = [
             "taskset",
@@ -2486,6 +2777,12 @@ def _run_compare(args: argparse.Namespace) -> None:
             cmd.append("--no-amp")
         if args.bf16:
             cmd.append("--bf16")
+        if base_backend == "vllm":
+            cmd.append(
+                "--vllm-async-scheduling"
+                if bool(getattr(args, "vllm_async_scheduling", True))
+                else "--vllm-no-async-scheduling"
+            )
         if base_backend in ("roseinfer", "roseinfer_mp"):
             cmd += [
                 "--roseinfer-prefill-attn-backend",
@@ -2688,6 +2985,20 @@ def _run_compare(args: argparse.Namespace) -> None:
             "top_p": float(args.top_p),
             "top_k": int(args.top_k),
             "ignore_eos": bool(args.ignore_eos),
+            "vllm_async_scheduling": bool(getattr(args, "vllm_async_scheduling", True)),
+            "vllm_attention_backend": str(
+                getattr(args, "vllm_attention_backend", "auto")
+            ),
+            "vllm_max_num_seqs": _resolve_vllm_max_num_seqs(args),
+            "sglang_attention_backend": str(
+                getattr(args, "sglang_attention_backend", "auto")
+            ),
+            "sglang_sampling_backend": str(
+                getattr(args, "sglang_sampling_backend", "auto")
+            ),
+            "trtllm_worker_single_process": bool(
+                getattr(args, "trtllm_worker_single_process", False)
+            ),
             "tensor_parallel_size": int(args.tensor_parallel_size),
             "max_batch_size": int(args.max_batch_size),
             "warmup_prompts": int(args.warmup_prompts),

@@ -515,11 +515,32 @@ class SchedulerManager:
                 if torch.cuda.is_available():
                     activities.append(torch.profiler.ProfilerActivity.CUDA)
                 with_stack = os.environ.get("ROSEINFER_TORCH_PROFILE_WITH_STACK") == "1"
+                record_shapes = (
+                    os.environ.get("ROSEINFER_TORCH_PROFILE_RECORD_SHAPES", "1") == "1"
+                )
+                profile_memory = (
+                    os.environ.get("ROSEINFER_TORCH_PROFILE_WITH_PROFILE_MEMORY", "1")
+                    == "1"
+                )
+                delay_steps = max(
+                    0, int(os.environ.get("ROSEINFER_TORCH_PROFILE_DELAY_STEPS", "0"))
+                )
+                num_steps = max(
+                    0, int(os.environ.get("ROSEINFER_TORCH_PROFILE_NUM_STEPS", "0"))
+                )
+                schedule = (
+                    torch.profiler.schedule(
+                        wait=delay_steps, warmup=0, active=num_steps, repeat=1
+                    )
+                    if num_steps > 0
+                    else None
+                )
                 prof = torch.profiler.profile(
                     activities=activities,
-                    record_shapes=True,
-                    profile_memory=True,
+                    record_shapes=record_shapes,
+                    profile_memory=profile_memory,
                     with_stack=with_stack,
+                    schedule=schedule,
                 )
                 prof.__enter__()
                 self._torch_prof = prof
@@ -558,6 +579,19 @@ class SchedulerManager:
             raise ValueError("tool must be torch|cuda")
 
         raise ValueError("action must be start|stop")
+
+    def _torch_prof_step(self) -> None:
+        with self._lock:
+            prof = self._torch_prof
+        if prof is None:
+            return
+        step_fn = getattr(prof, "step", None)
+        if not callable(step_fn):
+            return
+        try:
+            step_fn()
+        except Exception:
+            traceback.print_exc()
 
     def add_request(
         self,
@@ -758,6 +792,7 @@ class SchedulerManager:
                     if not self.scheduler.has_unfinished():
                         return
                     step_tokens = self.scheduler.step()
+                    self._torch_prof_step()
                     finished_ids = self.scheduler.pop_finished_ids()
 
                     step_records: list[
@@ -906,6 +941,8 @@ class SchedulerManager:
                     else 0.0
                 )
                 rids = self.scheduler.add_requests(batch) if batch else []
+                if batch:
+                    self._torch_prof_step()
                 if rids and self._record_token_timestamps:
                     with self._lock:
                         for rid in rids:

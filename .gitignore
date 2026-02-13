@@ -1,5 +1,7 @@
-.vscode/
+**/.vscode/
+notebooks/.vscode/
 .conda/
+.conda-*/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -192,3 +194,5 @@ profiles*
 *.nsys-rep
 *.ncu-rep
 outputs
+**/.vscode/
+notebooks/.vscode/
