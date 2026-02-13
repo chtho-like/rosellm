@@ -65,6 +65,8 @@ class InferenceEngine:
         max_position_embeddings: Optional[int] = None,
         bf16: bool = False,
         kv_cache_max_concurrency: int = 256,
+        kv_cache_max_tokens: int | None = None,
+        kv_cache_mem_fraction: float | None = None,
         prefix_cache_max_entries: int = 256,
         use_paged_attention: bool = True,
         use_cuda_graph: bool = True,
@@ -194,10 +196,69 @@ class InferenceEngine:
             self.tokenizer, tokenizer_name=tokenizer_name
         )
         block_size = 64
-        max_context = max_position_embeddings or self.config.max_position_embeddings
-        max_concurrency = max(1, kv_cache_max_concurrency)
+        max_context = max_position_embeddings or int(self.config.max_position_embeddings)
+        max_context = int(max_context)
+        max_concurrency = max(1, int(kv_cache_max_concurrency))
         self.kv_cache_max_concurrency = max_concurrency
-        max_total_tokens = max_context * max_concurrency
+        if kv_cache_mem_fraction is not None:
+            kv_cache_mem_fraction = float(kv_cache_mem_fraction)
+        if kv_cache_mem_fraction is not None and (
+            kv_cache_mem_fraction <= 0.0 or kv_cache_mem_fraction > 1.0
+        ):
+            raise ValueError("kv_cache_mem_fraction must be in (0, 1]")
+
+        if kv_cache_max_tokens is not None:
+            kv_cache_max_tokens = int(kv_cache_max_tokens)
+            if kv_cache_max_tokens <= 0:
+                raise ValueError("kv_cache_max_tokens must be > 0")
+
+        if (
+            kv_cache_max_tokens is None
+            and kv_cache_mem_fraction is None
+            and self.device.type == "cuda"
+            and torch.cuda.is_available()
+            and max_context >= 8192
+        ):
+            frac_env = os.environ.get("ROSEINFER_KV_CACHE_MEM_FRACTION", "0.5")
+            try:
+                kv_cache_mem_fraction = float(frac_env)
+            except ValueError:
+                kv_cache_mem_fraction = 0.5
+            kv_cache_mem_fraction = max(0.05, min(0.95, float(kv_cache_mem_fraction)))
+
+        head_dim = int(self.config.d_model) // int(self.config.n_heads)
+        kv_dtype = self.amp_dtype if self.use_amp else next(self.model.parameters()).dtype
+
+        if kv_cache_max_tokens is not None:
+            max_total_tokens = int(kv_cache_max_tokens)
+        elif (
+            kv_cache_mem_fraction is not None
+            and self.device.type == "cuda"
+            and torch.cuda.is_available()
+        ):
+            free_bytes, _ = torch.cuda.mem_get_info()
+            bytes_per_elem = int(torch.empty((), dtype=kv_dtype).element_size())
+            bytes_per_token = (
+                int(self.config.n_layers)
+                * 2
+                * int(self.config.n_heads)
+                * int(head_dim)
+                * bytes_per_elem
+            )
+            if bytes_per_token <= 0:
+                raise ValueError("invalid KV cache bytes_per_token")
+            target_bytes = int(float(free_bytes) * float(kv_cache_mem_fraction))
+            max_total_tokens = max(1, target_bytes // bytes_per_token)
+        else:
+            max_total_tokens = max_context * max_concurrency
+
+        if max_total_tokens < max_context:
+            print(
+                "[warn] KV cache capacity is smaller than max_context; "
+                f"clamping max_position_embeddings from {max_context} to {max_total_tokens}"
+            )
+            max_context = int(max_total_tokens)
+            self.config.max_position_embeddings = int(max_total_tokens)
         max_blocks_per_layer = (max_total_tokens + block_size - 1) // block_size
         self.block_size = block_size
         self.max_context = max_context
@@ -206,7 +267,7 @@ class InferenceEngine:
         self.kv_manager = KVBlockManager(
             num_layers=self.config.n_layers,
             num_heads=self.config.n_heads,
-            head_dim=self.config.d_model // self.config.n_heads,
+            head_dim=head_dim,
             block_size=block_size,
             max_blocks_per_layer=max_blocks_per_layer,
             device=self.device,
