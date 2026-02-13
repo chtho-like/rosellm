@@ -1531,6 +1531,58 @@ def parse_args() -> argparse.Namespace:
         help="Device to use",
     )
     parser.add_argument(
+        "--pd-disaggregation",
+        dest="pd_disaggregation",
+        action="store_true",
+        help=(
+            "Enable prefill/decode disaggregation inside a single process. "
+            "Prefill runs on a separate engine and hands off KV cache to the decode engine."
+        ),
+    )
+    parser.add_argument(
+        "--no-pd-disaggregation",
+        dest="pd_disaggregation",
+        action="store_false",
+        help="Disable prefill/decode disaggregation (default).",
+    )
+    parser.set_defaults(pd_disaggregation=False)
+    parser.add_argument(
+        "--pd-prefill-device",
+        type=str,
+        default=None,
+        help=(
+            "Device for the prefill engine when --pd-disaggregation is set "
+            '(default: same as "--device").'
+        ),
+    )
+    parser.add_argument(
+        "--pd-decode-device",
+        type=str,
+        default=None,
+        help=(
+            "Device for the decode engine when --pd-disaggregation is set "
+            '(default: same as "--device").'
+        ),
+    )
+    parser.add_argument(
+        "--pd-prefill-max-batch-size",
+        type=int,
+        default=None,
+        help=(
+            "Max batch size for prefill stage when --pd-disaggregation is set "
+            '(default: same as "--max-batch-size").'
+        ),
+    )
+    parser.add_argument(
+        "--pd-prefill-max-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Max prompt tokens per prefill iteration when --pd-disaggregation is set "
+            "(default: unlimited)."
+        ),
+    )
+    parser.add_argument(
         "--no-amp",
         action="store_true",
         help="Disable automatic mixed precision",
@@ -2070,7 +2122,8 @@ def main() -> None:
         raise ValueError("--max-batch-size must be >= 1")
     if int(args.prefill_chunk_size) <= 0:
         raise ValueError("--prefill-chunk-size must be >= 1")
-    device = torch.device(args.device)
+    decode_device_str = str(getattr(args, "pd_decode_device", None) or args.device)
+    device = torch.device(decode_device_str)
     paged_attn = bool(args.paged_attn)
     cuda_graph = bool(args.cuda_graph)
     chunked_prefill = bool(args.chunked_prefill)
@@ -2116,6 +2169,9 @@ def main() -> None:
             "--kv-cache-max-concurrency must be >= --max-inflight-requests when set"
         )
     use_engine_process = bool(args.engine_process)
+    pd_disagg = bool(getattr(args, "pd_disaggregation", False))
+    if pd_disagg and use_engine_process:
+        raise ValueError("--pd-disaggregation is not compatible with --engine-process")
     if use_engine_process:
         from rosellm.rosetrainer.dataset import build_tokenizer
 
@@ -2191,74 +2247,219 @@ def main() -> None:
             except Exception:
                 pass
     else:
-        if args.hf_model_id is None:
-            engine = InferenceEngine(
-                checkpoint_path=args.checkpoint_path,
-                tokenizer_name=args.tokenizer_name,
-                device=args.device,
-                use_amp=not args.no_amp,
-                bf16=args.bf16,
-                kv_cache_max_concurrency=int(kv_cache_max_concurrency),
-                prefix_cache_max_entries=int(
-                    getattr(args, "prefix_cache_max_entries", 256)
-                ),
-                use_paged_attention=paged_attn,
-                use_cuda_graph=cuda_graph,
-                prefill_attn_backend=str(args.prefill_attn_backend),
-                decode_attn_backend=str(args.decode_attn_backend),
-                use_fused_ops=bool(args.fused_ops),
-                use_fused_mlp=bool(args.fused_mlp),
-                use_fused_sampler=bool(args.fused_sampler),
-                use_fused_kv_append=bool(args.fused_kv_append),
-            )
-            served_model_name = args.tokenizer_name
-        else:
-            from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
-
-            use_amp = bool(not args.no_amp) and device.type == "cuda"
-            if use_amp:
-                dtype = torch.bfloat16 if args.bf16 else torch.float16
+        if not pd_disagg:
+            if args.hf_model_id is None:
+                engine = InferenceEngine(
+                    checkpoint_path=args.checkpoint_path,
+                    tokenizer_name=args.tokenizer_name,
+                    device=decode_device_str,
+                    use_amp=not args.no_amp,
+                    bf16=args.bf16,
+                    kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                    prefix_cache_max_entries=int(
+                        getattr(args, "prefix_cache_max_entries", 256)
+                    ),
+                    use_paged_attention=paged_attn,
+                    use_cuda_graph=cuda_graph,
+                    prefill_attn_backend=str(args.prefill_attn_backend),
+                    decode_attn_backend=str(args.decode_attn_backend),
+                    use_fused_ops=bool(args.fused_ops),
+                    use_fused_mlp=bool(args.fused_mlp),
+                    use_fused_sampler=bool(args.fused_sampler),
+                    use_fused_kv_append=bool(args.fused_kv_append),
+                )
+                served_model_name = args.tokenizer_name
             else:
-                dtype = torch.float32
-            model, config, tokenizer = load_gpt2_from_hf_pretrained(
-                args.hf_model_id,
-                device=device,
-                dtype=dtype,
+                from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
+
+                use_amp = bool(not args.no_amp) and device.type == "cuda"
+                if use_amp:
+                    dtype = torch.bfloat16 if args.bf16 else torch.float16
+                else:
+                    dtype = torch.float32
+                model, config, tokenizer = load_gpt2_from_hf_pretrained(
+                    args.hf_model_id,
+                    device=device,
+                    dtype=dtype,
+                )
+                engine = InferenceEngine(
+                    checkpoint_path=None,
+                    tokenizer_name=args.tokenizer_name or args.hf_model_id,
+                    device=decode_device_str,
+                    use_amp=use_amp,
+                    bf16=args.bf16,
+                    kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                    prefix_cache_max_entries=int(
+                        getattr(args, "prefix_cache_max_entries", 256)
+                    ),
+                    use_paged_attention=paged_attn,
+                    use_cuda_graph=cuda_graph,
+                    prefill_attn_backend=str(args.prefill_attn_backend),
+                    decode_attn_backend=str(args.decode_attn_backend),
+                    use_fused_ops=bool(args.fused_ops),
+                    use_fused_mlp=bool(args.fused_mlp),
+                    use_fused_sampler=bool(args.fused_sampler),
+                    use_fused_kv_append=bool(args.fused_kv_append),
+                    model=model,
+                    config=config,
+                    tokenizer=tokenizer,
+                )
+                served_model_name = args.hf_model_id
+            tokenizer = engine.tokenizer
+            sched_manager = SchedulerManager(
+                engine,
+                max_batch_size=int(max_batch_size),
+                max_inflight_requests=args.max_inflight_requests,
+                stream_interval=int(args.stream_interval),
+                chunked_prefill=chunked_prefill,
+                prefill_chunk_size=int(args.prefill_chunk_size),
+                prefix_cache=bool(args.prefix_cache),
+                overlap_schedule=bool(args.overlap_schedule),
             )
-            engine = InferenceEngine(
-                checkpoint_path=None,
-                tokenizer_name=args.tokenizer_name or args.hf_model_id,
-                device=args.device,
-                use_amp=use_amp,
-                bf16=args.bf16,
-                kv_cache_max_concurrency=int(kv_cache_max_concurrency),
-                prefix_cache_max_entries=int(
-                    getattr(args, "prefix_cache_max_entries", 256)
-                ),
-                use_paged_attention=paged_attn,
-                use_cuda_graph=cuda_graph,
-                prefill_attn_backend=str(args.prefill_attn_backend),
-                decode_attn_backend=str(args.decode_attn_backend),
-                use_fused_ops=bool(args.fused_ops),
-                use_fused_mlp=bool(args.fused_mlp),
-                use_fused_sampler=bool(args.fused_sampler),
-                use_fused_kv_append=bool(args.fused_kv_append),
-                model=model,
-                config=config,
-                tokenizer=tokenizer,
+        else:
+            from rosellm.roseinfer.pd_manager import PDDisaggregatedSchedulerManager
+
+            prefill_device_str = str(
+                getattr(args, "pd_prefill_device", None) or decode_device_str
             )
-            served_model_name = args.hf_model_id
-        tokenizer = engine.tokenizer
-        sched_manager = SchedulerManager(
-            engine,
-            max_batch_size=int(max_batch_size),
-            max_inflight_requests=args.max_inflight_requests,
-            stream_interval=int(args.stream_interval),
-            chunked_prefill=chunked_prefill,
-            prefill_chunk_size=int(args.prefill_chunk_size),
-            prefix_cache=bool(args.prefix_cache),
-            overlap_schedule=bool(args.overlap_schedule),
-        )
+            if chunked_prefill:
+                print(
+                    "[warn] ignoring --chunked-prefill in --pd-disaggregation mode "
+                    "(prefill runs on a separate engine)."
+                )
+
+            if args.hf_model_id is None:
+                from rosellm.rosetrainer.dataset import build_tokenizer
+
+                tokenizer = build_tokenizer(args.tokenizer_name)
+                prefill_engine = InferenceEngine(
+                    checkpoint_path=args.checkpoint_path,
+                    tokenizer_name=args.tokenizer_name,
+                    tokenizer=tokenizer,
+                    device=prefill_device_str,
+                    use_amp=not args.no_amp,
+                    bf16=args.bf16,
+                    kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                    prefix_cache_max_entries=int(
+                        getattr(args, "prefix_cache_max_entries", 256)
+                    ),
+                    use_paged_attention=paged_attn,
+                    use_cuda_graph=cuda_graph,
+                    prefill_attn_backend=str(args.prefill_attn_backend),
+                    decode_attn_backend=str(args.decode_attn_backend),
+                    use_fused_ops=bool(args.fused_ops),
+                    use_fused_mlp=bool(args.fused_mlp),
+                    use_fused_sampler=bool(args.fused_sampler),
+                    use_fused_kv_append=bool(args.fused_kv_append),
+                )
+                decode_engine = InferenceEngine(
+                    checkpoint_path=args.checkpoint_path,
+                    tokenizer_name=args.tokenizer_name,
+                    tokenizer=tokenizer,
+                    device=decode_device_str,
+                    use_amp=not args.no_amp,
+                    bf16=args.bf16,
+                    kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                    prefix_cache_max_entries=int(
+                        getattr(args, "prefix_cache_max_entries", 256)
+                    ),
+                    use_paged_attention=paged_attn,
+                    use_cuda_graph=cuda_graph,
+                    prefill_attn_backend=str(args.prefill_attn_backend),
+                    decode_attn_backend=str(args.decode_attn_backend),
+                    use_fused_ops=bool(args.fused_ops),
+                    use_fused_mlp=bool(args.fused_mlp),
+                    use_fused_sampler=bool(args.fused_sampler),
+                    use_fused_kv_append=bool(args.fused_kv_append),
+                )
+                served_model_name = args.tokenizer_name
+            else:
+                from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
+
+                prefill_device = torch.device(prefill_device_str)
+                decode_device = torch.device(decode_device_str)
+                prefill_amp = bool(not args.no_amp) and prefill_device.type == "cuda"
+                decode_amp = bool(not args.no_amp) and decode_device.type == "cuda"
+                prefill_dtype = (
+                    torch.bfloat16
+                    if prefill_amp and args.bf16
+                    else (torch.float16 if prefill_amp else torch.float32)
+                )
+                decode_dtype = (
+                    torch.bfloat16
+                    if decode_amp and args.bf16
+                    else (torch.float16 if decode_amp else torch.float32)
+                )
+                model_p, config_p, tokenizer = load_gpt2_from_hf_pretrained(
+                    args.hf_model_id,
+                    device=prefill_device,
+                    dtype=prefill_dtype,
+                )
+                model_d, config_d, _tok_d = load_gpt2_from_hf_pretrained(
+                    args.hf_model_id,
+                    device=decode_device,
+                    dtype=decode_dtype,
+                )
+                del _tok_d
+                if config_p != config_d:
+                    raise ValueError("prefill/decode HF config mismatch")
+                prefill_engine = InferenceEngine(
+                    checkpoint_path=None,
+                    tokenizer_name=args.tokenizer_name or args.hf_model_id,
+                    device=prefill_device_str,
+                    use_amp=prefill_amp,
+                    bf16=args.bf16,
+                    kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                    prefix_cache_max_entries=int(
+                        getattr(args, "prefix_cache_max_entries", 256)
+                    ),
+                    use_paged_attention=paged_attn,
+                    use_cuda_graph=cuda_graph,
+                    prefill_attn_backend=str(args.prefill_attn_backend),
+                    decode_attn_backend=str(args.decode_attn_backend),
+                    use_fused_ops=bool(args.fused_ops),
+                    use_fused_mlp=bool(args.fused_mlp),
+                    use_fused_sampler=bool(args.fused_sampler),
+                    use_fused_kv_append=bool(args.fused_kv_append),
+                    model=model_p,
+                    config=config_p,
+                    tokenizer=tokenizer,
+                )
+                decode_engine = InferenceEngine(
+                    checkpoint_path=None,
+                    tokenizer_name=args.tokenizer_name or args.hf_model_id,
+                    device=decode_device_str,
+                    use_amp=decode_amp,
+                    bf16=args.bf16,
+                    kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                    prefix_cache_max_entries=int(
+                        getattr(args, "prefix_cache_max_entries", 256)
+                    ),
+                    use_paged_attention=paged_attn,
+                    use_cuda_graph=cuda_graph,
+                    prefill_attn_backend=str(args.prefill_attn_backend),
+                    decode_attn_backend=str(args.decode_attn_backend),
+                    use_fused_ops=bool(args.fused_ops),
+                    use_fused_mlp=bool(args.fused_mlp),
+                    use_fused_sampler=bool(args.fused_sampler),
+                    use_fused_kv_append=bool(args.fused_kv_append),
+                    model=model_d,
+                    config=config_d,
+                    tokenizer=tokenizer,
+                )
+                served_model_name = args.hf_model_id
+
+            sched_manager = PDDisaggregatedSchedulerManager(
+                prefill_engine,
+                decode_engine,
+                max_batch_size=int(max_batch_size),
+                prefill_max_batch_size=getattr(args, "pd_prefill_max_batch_size", None),
+                prefill_max_tokens=getattr(args, "pd_prefill_max_tokens", None),
+                stream_interval=int(args.stream_interval),
+                max_inflight_requests=args.max_inflight_requests,
+                prefix_cache=bool(args.prefix_cache),
+                overlap_schedule=bool(args.overlap_schedule),
+            )
 
     app = create_app(
         tokenizer,

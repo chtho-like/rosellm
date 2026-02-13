@@ -2841,6 +2841,20 @@ class OnlineScheduler:
         self._next_request_id = next_rid
         return rids
 
+    def adopt_session(
+        self,
+        request_id: int,
+        session: "InferenceSession",
+    ) -> None:
+        rid = int(request_id)
+        if rid in self._sessions:
+            raise ValueError(f"request_id {rid} already exists")
+        self._sessions[rid] = session
+        if rid >= self._next_request_id:
+            self._next_request_id = rid + 1
+        if not session.finished:
+            self._active_rids.append(rid)
+
     def has_unfinished(self) -> bool:
         if self._overlap_schedule and self._overlap_pending:
             return True
@@ -4064,6 +4078,57 @@ class KVBlockManager:
         block_index: int,
     ) -> int:
         return layer_idx * self.max_blocks_per_layer + block_index
+
+    def clone_blocks_from(
+        self,
+        *,
+        src: "KVBlockManager",
+        layer_idx: int,
+        src_block_ids: list[int],
+    ) -> list[int]:
+        if not (0 <= int(layer_idx) < int(self.num_layers)):
+            raise ValueError("layer_idx out of range")
+        if int(self.block_size) != int(src.block_size):
+            raise ValueError("KV block_size mismatch")
+        if int(self.num_heads) != int(src.num_heads) or int(self.head_dim) != int(
+            src.head_dim
+        ):
+            raise ValueError("KV shape mismatch")
+        if self.dtype != src.dtype:
+            raise ValueError("KV dtype mismatch")
+
+        out: list[int] = []
+        non_blocking = self.device.type == "cuda"
+        for global_id in src_block_ids:
+            info = src._block_infos[int(global_id)]
+            if info is None:
+                raise RuntimeError(f"missing KVBlockInfo for block {global_id}")
+            if int(info.layer) != int(layer_idx):
+                raise ValueError("source KV block layer mismatch")
+
+            src_block_idx = int(info.block_index)
+            dst_block_idx = self._alloc_block_index(int(layer_idx))
+            dst_gid = self._to_global_block_id(int(layer_idx), int(dst_block_idx))
+            self._block_infos[int(dst_gid)] = KVBlockInfo(
+                layer=int(layer_idx),
+                block_index=int(dst_block_idx),
+                start=int(info.start),
+                length=int(info.length),
+            )
+            self._block_refcounts[int(dst_gid)] = 1
+
+            length = int(info.length)
+            if length > 0:
+                self._k_cache[int(layer_idx), int(dst_block_idx), :, :length, :].copy_(
+                    src._k_cache[int(layer_idx), int(src_block_idx), :, :length, :],
+                    non_blocking=non_blocking,
+                )
+                self._v_cache[int(layer_idx), int(dst_block_idx), :, :length, :].copy_(
+                    src._v_cache[int(layer_idx), int(src_block_idx), :, :length, :],
+                    non_blocking=non_blocking,
+                )
+            out.append(int(dst_gid))
+        return out
 
     def register_prefill_layer(
         self,

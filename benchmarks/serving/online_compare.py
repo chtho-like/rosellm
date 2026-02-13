@@ -999,6 +999,9 @@ def _roseinfer_server_cmd(
         if engine_process is not None
         else bool(getattr(args, "roseinfer_engine_process", True))
     )
+    pd_disagg = bool(getattr(args, "roseinfer_pd_disaggregation", False))
+    if pd_disagg:
+        engine_process = False
     max_batch_size = (
         int(max_batch_size)
         if max_batch_size is not None
@@ -1095,6 +1098,20 @@ def _roseinfer_server_cmd(
         cmd += ["--bf16"]
     if not async_streaming:
         cmd += ["--no-async-streaming"]
+    if pd_disagg:
+        cmd += ["--pd-disaggregation"]
+        prefill_device = getattr(args, "roseinfer_pd_prefill_device", None)
+        decode_device = getattr(args, "roseinfer_pd_decode_device", None)
+        if prefill_device:
+            cmd += ["--pd-prefill-device", str(prefill_device)]
+        if decode_device:
+            cmd += ["--pd-decode-device", str(decode_device)]
+        prefill_bs = getattr(args, "roseinfer_pd_prefill_max_batch_size", None)
+        if prefill_bs is not None:
+            cmd += ["--pd-prefill-max-batch-size", str(int(prefill_bs))]
+        prefill_tokens = getattr(args, "roseinfer_pd_prefill_max_tokens", None)
+        if prefill_tokens is not None:
+            cmd += ["--pd-prefill-max-tokens", str(int(prefill_tokens))]
     cmd += ["--paged-attn" if paged_attn else "--no-paged-attn"]
     cmd += ["--cuda-graph" if cuda_graph else "--no-cuda-graph"]
     cmd += ["--chunked-prefill" if chunked_prefill else "--no-chunked-prefill"]
@@ -1150,7 +1167,9 @@ def _resolve_vllm_max_num_seqs(args: argparse.Namespace) -> int | None:
     max_num_seqs = getattr(args, "vllm_max_num_seqs", None)
     if max_num_seqs is not None:
         return int(max_num_seqs)
-    vllm_attention_backend = str(getattr(args, "vllm_attention_backend", "auto")).lower()
+    vllm_attention_backend = str(
+        getattr(args, "vllm_attention_backend", "auto")
+    ).lower()
     if vllm_attention_backend == "flashinfer":
         # vLLM v0.13.0 may OOM during sampler warmup on 12GB GPUs when
         # `attention_backend=flashinfer` and the default max_num_seqs=256.
@@ -1630,6 +1649,49 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=8,
         help="roseinfer --max-batch-size (default: 8).",
+    )
+    parser.add_argument(
+        "--roseinfer-pd-disaggregation",
+        dest="roseinfer_pd_disaggregation",
+        action="store_true",
+        help=(
+            "Enable roseinfer prefill/decode disaggregation (two engines). "
+            "Not compatible with --roseinfer-engine-process."
+        ),
+    )
+    parser.add_argument(
+        "--roseinfer-no-pd-disaggregation",
+        dest="roseinfer_pd_disaggregation",
+        action="store_false",
+        help="Disable roseinfer prefill/decode disaggregation (default).",
+    )
+    parser.set_defaults(roseinfer_pd_disaggregation=False)
+    parser.add_argument(
+        "--roseinfer-pd-prefill-device",
+        type=str,
+        default=None,
+        help="roseinfer --pd-prefill-device (default: same as --device).",
+    )
+    parser.add_argument(
+        "--roseinfer-pd-decode-device",
+        type=str,
+        default=None,
+        help="roseinfer --pd-decode-device (default: same as --device).",
+    )
+    parser.add_argument(
+        "--roseinfer-pd-prefill-max-batch-size",
+        type=int,
+        default=None,
+        help=(
+            "roseinfer --pd-prefill-max-batch-size "
+            "(default: same as --roseinfer-max-batch-size)."
+        ),
+    )
+    parser.add_argument(
+        "--roseinfer-pd-prefill-max-tokens",
+        type=int,
+        default=None,
+        help="roseinfer --pd-prefill-max-tokens (default: unlimited).",
     )
     parser.add_argument(
         "--roseinfer-gc-freeze",
@@ -2496,7 +2558,8 @@ def main() -> None:
                 ),
                 "profile_nsys_cuda_flush_interval_ms": (
                     int(getattr(args, "profile_nsys_cuda_flush_interval_ms"))
-                    if getattr(args, "profile_nsys_cuda_flush_interval_ms", None) is not None
+                    if getattr(args, "profile_nsys_cuda_flush_interval_ms", None)
+                    is not None
                     else None
                 ),
                 "profile_torch_minimal": bool(
@@ -2505,7 +2568,9 @@ def main() -> None:
                 "profile_torch_delay_steps": int(
                     getattr(args, "profile_torch_delay_steps", 0)
                 ),
-                "profile_torch_num_steps": int(getattr(args, "profile_torch_num_steps", 0)),
+                "profile_torch_num_steps": int(
+                    getattr(args, "profile_torch_num_steps", 0)
+                ),
                 "profile_torch_with_stack": bool(
                     getattr(args, "profile_torch_with_stack", True)
                 ),
@@ -2612,7 +2677,9 @@ def main() -> None:
                             else "0"
                         )
                         if bool(getattr(args, "profile_torch_minimal", True)):
-                            delay_steps = int(getattr(args, "profile_torch_delay_steps", 0))
+                            delay_steps = int(
+                                getattr(args, "profile_torch_delay_steps", 0)
+                            )
                             num_steps = int(getattr(args, "profile_torch_num_steps", 0))
                             env["VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM"] = "1"
                             env["VLLM_PROFILER_DELAY_ITERS"] = str(max(0, delay_steps))
@@ -2649,7 +2716,10 @@ def main() -> None:
                         )
                         if bool(getattr(args, "profile_torch_minimal", True)):
                             env["ROSEINFER_TORCH_PROFILE_DELAY_STEPS"] = str(
-                                max(0, int(getattr(args, "profile_torch_delay_steps", 0)))
+                                max(
+                                    0,
+                                    int(getattr(args, "profile_torch_delay_steps", 0)),
+                                )
                             )
                             env["ROSEINFER_TORCH_PROFILE_NUM_STEPS"] = str(
                                 max(0, int(getattr(args, "profile_torch_num_steps", 0)))
@@ -2709,7 +2779,9 @@ def main() -> None:
                         python_exe=sglang_python,
                         enable_layerwise_nvtx_marker=(
                             tool == "nsys"
-                            and bool(getattr(args, "profile_sglang_layerwise_nvtx", True))
+                            and bool(
+                                getattr(args, "profile_sglang_layerwise_nvtx", True)
+                            )
                         ),
                     )
                 elif base_backend == "trtllm":
@@ -2843,7 +2915,9 @@ def main() -> None:
                         elif base_backend == "sglang":
                             if tool == "torch":
                                 activities = ["CPU", "GPU"]
-                                if bool(getattr(args, "profile_torch_with_memory", True)):
+                                if bool(
+                                    getattr(args, "profile_torch_with_memory", True)
+                                ):
                                     activities.append("MEM")
                                 body = {
                                     "output_dir": str(out_dir),
@@ -2852,17 +2926,25 @@ def main() -> None:
                                         getattr(args, "profile_torch_with_stack", True)
                                     ),
                                     "record_shapes": bool(
-                                        getattr(args, "profile_torch_record_shapes", True)
+                                        getattr(
+                                            args, "profile_torch_record_shapes", True
+                                        )
                                     ),
                                 }
                                 if bool(getattr(args, "profile_torch_minimal", True)):
                                     delay_steps = max(
                                         0,
-                                        int(getattr(args, "profile_torch_delay_steps", 0)),
+                                        int(
+                                            getattr(
+                                                args, "profile_torch_delay_steps", 0
+                                            )
+                                        ),
                                     )
                                     num_steps = max(
                                         0,
-                                        int(getattr(args, "profile_torch_num_steps", 0)),
+                                        int(
+                                            getattr(args, "profile_torch_num_steps", 0)
+                                        ),
                                     )
                                     if delay_steps > 0:
                                         body["start_step"] = delay_steps
@@ -2941,7 +3023,9 @@ def main() -> None:
                                 torch_minimal = bool(
                                     getattr(args, "profile_torch_minimal", True)
                                 )
-                                torch_num_steps = int(getattr(args, "profile_torch_num_steps", 0))
+                                torch_num_steps = int(
+                                    getattr(args, "profile_torch_num_steps", 0)
+                                )
                                 if torch_minimal and torch_num_steps > 0:
                                     # With num_steps, SGLang auto-stops profiling internally.
                                     time.sleep(5.0)
@@ -3025,9 +3109,9 @@ def main() -> None:
                         while time.time() < deadline and not rep_path.exists():
                             time.sleep(0.25)
                         if not rep_path.exists():
-                            run_record["profile_error"] = (
-                                f"nsys report not produced: {rep_path}"
-                            )
+                            run_record[
+                                "profile_error"
+                            ] = f"nsys report not produced: {rep_path}"
                             print(
                                 f"[profile:{tool}] {backend} error={run_record['profile_error']} -> {out_dir}"
                             )
