@@ -17,7 +17,7 @@ set -euo pipefail
 # - Chat with the OpenAI-compatible endpoint:
 #     ROSEINFER_MODEL="Qwen/Qwen3-0.6B" ./openai_client_chat.sh
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 HF_MODEL_ID="${ROSEINFER_HF_MODEL_ID:-gpt2}"
 HOST="${ROSEINFER_HOST:-127.0.0.1}"
@@ -35,7 +35,7 @@ if [[ -n "${ROSEINFER_GPU_MEMORY_UTILIZATION:-}" ]]; then
   EXTRA_ARGS+=(--gpu-memory-utilization "${ROSEINFER_GPU_MEMORY_UTILIZATION}")
 fi
 
-python -m roseinfer.server \
+python -m rosellm.roseinfer.server \
   --hf-model-id "$HF_MODEL_ID" \
   --host "$HOST" \
   --port "$PORT" \
