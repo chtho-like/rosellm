@@ -11,7 +11,11 @@ except ImportError:  # pragma: no cover
     triton = None  # type: ignore[assignment]
     tl = None  # type: ignore[assignment]
 
-TRITON_AVAILABLE = triton is not None
+# Some environments (e.g. CPU-only CI) may still have the `triton` Python
+# package installed, but without a usable CUDA driver. Import-time Triton
+# autotune initialization would then crash module import. Only enable the
+# Triton path when CUDA is available.
+TRITON_AVAILABLE = triton is not None and torch.cuda.is_available()
 
 
 @dataclass(frozen=True)

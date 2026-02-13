@@ -59,6 +59,41 @@ def _generator_offset(gen: torch.Generator) -> int:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_flashinfer_fused_sampler_top_k_zero_uses_torch_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rosellm.roseinfer import engine as engine_mod
+
+    class _DummySampling:
+        @staticmethod
+        def top_k_top_p_sampling_from_logits(*args, **kwargs):
+            raise AssertionError("flashinfer sampler should not be called for top_k=0")
+
+    dummy_flashinfer = type(
+        "_DummyFlashinfer",
+        (),
+        {"sampling": _DummySampling},
+    )
+    monkeypatch.setattr(engine_mod, "flashinfer", dummy_flashinfer)
+
+    torch.manual_seed(0)
+    engine = _build_engine(vocab_size=64)
+    assert engine._sampling_generator is not None
+
+    logits = torch.randn(4, 64, device=engine.device, dtype=torch.float16)
+    ids = engine._sample_next_token_batch(
+        logits,
+        temperature=0.7,
+        top_k=0,
+        top_p=0.9,
+        do_sample=True,
+    )
+    assert tuple(ids.shape) == (4,)
+    assert int(ids.min()) >= 0
+    assert int(ids.max()) < 64
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_flashinfer_fused_sampler_advances_generator_state() -> None:
     if flashinfer is None:
         pytest.skip("requires flashinfer")

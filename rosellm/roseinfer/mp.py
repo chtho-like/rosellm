@@ -1142,6 +1142,8 @@ def _engine_process_main(
                         token_counts=array("I", finished_counts or []),
                     )
                 )
+    except KeyboardInterrupt:
+        return
     except Exception as exc:
         traceback.print_exc()
         try:
@@ -1592,6 +1594,8 @@ def _engine_process_main_pipe(
                         token_counts=array("I", finished_counts or []),
                     )
                 )
+    except KeyboardInterrupt:
+        return
     except Exception as exc:
         traceback.print_exc()
         try:
