@@ -72,6 +72,7 @@ class EngineProcessArgs:
     kv_cache_max_concurrency: int = 256
     kv_cache_max_tokens: int | None = None
     kv_cache_mem_fraction: float | None = None
+    gpu_memory_utilization: float | None = None
     prefix_cache_max_entries: int = 256
     toy: ToyEngineSpec | None = None
     mp_torch_num_threads: int | None = None
@@ -702,6 +703,7 @@ def _build_engine(args: EngineProcessArgs) -> InferenceEngine:
             kv_cache_max_concurrency=int(args.kv_cache_max_concurrency),
             kv_cache_max_tokens=args.kv_cache_max_tokens,
             kv_cache_mem_fraction=args.kv_cache_mem_fraction,
+            gpu_memory_utilization=args.gpu_memory_utilization,
             prefix_cache_max_entries=int(args.prefix_cache_max_entries),
             use_paged_attention=bool(args.paged_attn),
             use_cuda_graph=bool(args.cuda_graph),
@@ -726,6 +728,7 @@ def _build_engine(args: EngineProcessArgs) -> InferenceEngine:
         kv_cache_max_concurrency=int(args.kv_cache_max_concurrency),
         kv_cache_max_tokens=args.kv_cache_max_tokens,
         kv_cache_mem_fraction=args.kv_cache_mem_fraction,
+        gpu_memory_utilization=args.gpu_memory_utilization,
         prefix_cache_max_entries=int(args.prefix_cache_max_entries),
         use_paged_attention=bool(args.paged_attn),
         use_cuda_graph=bool(args.cuda_graph),

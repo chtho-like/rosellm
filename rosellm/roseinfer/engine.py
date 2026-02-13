@@ -21,6 +21,34 @@ except Exception:  # pragma: no cover
 
 PrefixCacheKey = str | tuple[int, ...]
 
+def _kv_cache_max_tokens_from_total_utilization(
+    *,
+    free_bytes: int,
+    total_bytes: int,
+    gpu_memory_utilization: float,
+    bytes_per_token: int,
+) -> int:
+    if total_bytes <= 0:
+        raise ValueError("total_bytes must be > 0")
+    if free_bytes < 0:
+        raise ValueError("free_bytes must be >= 0")
+    if free_bytes > total_bytes:
+        raise ValueError("free_bytes must be <= total_bytes")
+    if gpu_memory_utilization <= 0.0 or gpu_memory_utilization > 1.0:
+        raise ValueError("gpu_memory_utilization must be in (0, 1]")
+    if bytes_per_token <= 0:
+        raise ValueError("bytes_per_token must be > 0")
+
+    used_bytes = int(total_bytes) - int(free_bytes)
+    target_bytes = int(float(total_bytes) * float(gpu_memory_utilization))
+    budget_bytes = int(target_bytes) - int(used_bytes)
+    if budget_bytes <= 0:
+        raise ValueError(
+            "not enough free memory for the requested gpu_memory_utilization "
+            f"(budget_bytes={budget_bytes})"
+        )
+    return max(1, int(budget_bytes) // int(bytes_per_token))
+
 
 @contextmanager
 def _maybe_nvtx_range(name: str, enabled: bool) -> Iterator[None]:
@@ -79,6 +107,7 @@ class InferenceEngine:
         model: GPTModel | None = None,
         config: GPTConfig | None = None,
         tokenizer=None,
+        gpu_memory_utilization: float | None = None,
     ) -> None:
         super().__init__()
         self.use_paged_attention = bool(use_paged_attention)
@@ -207,6 +236,13 @@ class InferenceEngine:
         ):
             raise ValueError("kv_cache_mem_fraction must be in (0, 1]")
 
+        if gpu_memory_utilization is not None:
+            gpu_memory_utilization = float(gpu_memory_utilization)
+        if gpu_memory_utilization is not None and (
+            gpu_memory_utilization <= 0.0 or gpu_memory_utilization > 1.0
+        ):
+            raise ValueError("gpu_memory_utilization must be in (0, 1]")
+
         if kv_cache_max_tokens is not None:
             kv_cache_max_tokens = int(kv_cache_max_tokens)
             if kv_cache_max_tokens <= 0:
@@ -215,6 +251,7 @@ class InferenceEngine:
         if (
             kv_cache_max_tokens is None
             and kv_cache_mem_fraction is None
+            and gpu_memory_utilization is None
             and self.device.type == "cuda"
             and torch.cuda.is_available()
             and max_context >= 8192
@@ -249,6 +286,26 @@ class InferenceEngine:
                 raise ValueError("invalid KV cache bytes_per_token")
             target_bytes = int(float(free_bytes) * float(kv_cache_mem_fraction))
             max_total_tokens = max(1, target_bytes // bytes_per_token)
+        elif (
+            gpu_memory_utilization is not None
+            and self.device.type == "cuda"
+            and torch.cuda.is_available()
+        ):
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            bytes_per_elem = int(torch.empty((), dtype=kv_dtype).element_size())
+            bytes_per_token = (
+                int(self.config.n_layers)
+                * 2
+                * int(self.config.n_heads)
+                * int(head_dim)
+                * bytes_per_elem
+            )
+            max_total_tokens = _kv_cache_max_tokens_from_total_utilization(
+                free_bytes=int(free_bytes),
+                total_bytes=int(total_bytes),
+                gpu_memory_utilization=float(gpu_memory_utilization),
+                bytes_per_token=int(bytes_per_token),
+            )
         else:
             max_total_tokens = max_context * max_concurrency
 

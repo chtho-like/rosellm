@@ -1733,6 +1733,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.0,
+        help=(
+            "vLLM-style KV cache sizing: target fraction of total CUDA memory "
+            "to use for (model weights + KV cache) after model load. "
+            "0 means disabled (default: 0)."
+        ),
+    )
+    parser.add_argument(
         "--prefix-cache-max-entries",
         type=int,
         default=256,
@@ -2202,6 +2212,13 @@ def main() -> None:
         kv_cache_mem_fraction > 1.0 or kv_cache_mem_fraction <= 0.0
     ):
         raise ValueError("--kv-cache-mem-fraction must be in (0, 1]")
+    gpu_memory_utilization = float(getattr(args, "gpu_memory_utilization", 0.0) or 0.0)
+    if gpu_memory_utilization <= 0.0:
+        gpu_memory_utilization = None
+    if gpu_memory_utilization is not None and (
+        gpu_memory_utilization > 1.0 or gpu_memory_utilization <= 0.0
+    ):
+        raise ValueError("--gpu-memory-utilization must be in (0, 1]")
     use_engine_process = bool(args.engine_process)
     if use_engine_process:
         from rosellm.rosetrainer.dataset import build_tokenizer
@@ -2252,6 +2269,7 @@ def main() -> None:
             kv_cache_max_concurrency=int(kv_cache_max_concurrency),
             kv_cache_max_tokens=kv_cache_max_tokens,
             kv_cache_mem_fraction=kv_cache_mem_fraction,
+            gpu_memory_utilization=gpu_memory_utilization,
             prefix_cache_max_entries=int(
                 getattr(args, "prefix_cache_max_entries", 256)
             ),
@@ -2290,6 +2308,7 @@ def main() -> None:
                 kv_cache_max_concurrency=int(kv_cache_max_concurrency),
                 kv_cache_max_tokens=kv_cache_max_tokens,
                 kv_cache_mem_fraction=kv_cache_mem_fraction,
+                gpu_memory_utilization=gpu_memory_utilization,
                 prefix_cache_max_entries=int(
                     getattr(args, "prefix_cache_max_entries", 256)
                 ),
@@ -2353,6 +2372,7 @@ def main() -> None:
                 kv_cache_max_concurrency=int(kv_cache_max_concurrency),
                 kv_cache_max_tokens=kv_cache_max_tokens,
                 kv_cache_mem_fraction=kv_cache_mem_fraction,
+                gpu_memory_utilization=gpu_memory_utilization,
                 prefix_cache_max_entries=int(
                     getattr(args, "prefix_cache_max_entries", 256)
                 ),
