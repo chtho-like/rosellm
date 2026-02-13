@@ -9,9 +9,20 @@ set -euo pipefail
 # - Serve Qwen3-0.6B from Hugging Face:
 #     ROSEINFER_HF_MODEL_ID="Qwen/Qwen3-0.6B" ./openai_server.sh
 #
+# - If the first run takes a long time (Triton/FlashInfer JIT), increase the
+#   multiprocess engine init timeout:
+#     ROSEINFER_HF_MODEL_ID="Qwen/Qwen3-0.6B" \
+#     ROSEINFER_MP_START_TIMEOUT_S="900" \
+#       ./openai_server.sh
+#
 # - vLLM-style KV cache sizing (optional):
 #     ROSEINFER_HF_MODEL_ID="Qwen/Qwen3-0.6B" \
 #     ROSEINFER_GPU_MEMORY_UTILIZATION="0.9" \
+#       ./openai_server.sh
+#
+# - Or directly cap KV cache by a fraction of *free* GPU memory:
+#     ROSEINFER_HF_MODEL_ID="Qwen/Qwen3-0.6B" \
+#     ROSEINFER_KV_CACHE_MEM_FRACTION="0.2" \
 #       ./openai_server.sh
 #
 # - Chat with the OpenAI-compatible endpoint:
@@ -33,6 +44,9 @@ if [[ -n "${ROSEINFER_KV_CACHE_MEM_FRACTION:-}" ]]; then
 fi
 if [[ -n "${ROSEINFER_GPU_MEMORY_UTILIZATION:-}" ]]; then
   EXTRA_ARGS+=(--gpu-memory-utilization "${ROSEINFER_GPU_MEMORY_UTILIZATION}")
+fi
+if [[ -n "${ROSEINFER_MP_START_TIMEOUT_S:-}" ]]; then
+  EXTRA_ARGS+=(--mp-start-timeout-s "${ROSEINFER_MP_START_TIMEOUT_S}")
 fi
 
 python -m rosellm.roseinfer.server \

@@ -523,6 +523,7 @@ class Qwen3ForCausalLM(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         paged_kv_cache: Optional[PagedKVCache] = None,
         attn_backend: str | None = None,
+        logits_positions: Optional[torch.Tensor] = None,  # [B]
     ):
         hidden_states, presents = self.model(
             input_ids=input_ids,
@@ -533,7 +534,26 @@ class Qwen3ForCausalLM(nn.Module):
             paged_kv_cache=paged_kv_cache,
             attn_backend=attn_backend,
         )
-        logits = self.lm_head(hidden_states)
+        if logits_positions is not None:
+            if labels is not None:
+                raise ValueError("logits_positions is not supported with labels")
+            bsz = int(hidden_states.size(0))
+            seq_len = int(hidden_states.size(1))
+            logits_positions = logits_positions.to(
+                device=hidden_states.device,
+                dtype=torch.long,
+            )
+            if logits_positions.dim() != 1 or int(logits_positions.numel()) != bsz:
+                raise ValueError("logits_positions must be a 1D tensor of shape [B]")
+            if int(logits_positions.min().item()) < 0:
+                raise ValueError("logits_positions must be >= 0")
+            if int(logits_positions.max().item()) >= int(seq_len):
+                raise ValueError("logits_positions must be < seq_len")
+            row = torch.arange(bsz, device=hidden_states.device, dtype=torch.long)
+            hs = hidden_states[row, logits_positions, :]  # [B, H]
+            logits = self.lm_head(hs).unsqueeze(1)  # [B, 1, V]
+        else:
+            logits = self.lm_head(hidden_states)
         loss = None
         if labels is not None:
             shift_logits = logits[:, :-1, :].contiguous()

@@ -309,13 +309,17 @@ class InferenceEngine:
         else:
             max_total_tokens = max_context * max_concurrency
 
-        if max_total_tokens < max_context:
+        per_seq_budget = max(1, int(max_total_tokens) // int(max_concurrency))
+        if per_seq_budget < max_context:
             print(
-                "[warn] KV cache capacity is smaller than max_context; "
-                f"clamping max_position_embeddings from {max_context} to {max_total_tokens}"
+                "[warn] KV cache per-seq budget is smaller than max_context; "
+                "clamping max_position_embeddings from "
+                f"{max_context} to {per_seq_budget} "
+                f"(max_total_tokens={max_total_tokens}, "
+                f"kv_cache_max_concurrency={max_concurrency})"
             )
-            max_context = int(max_total_tokens)
-            self.config.max_position_embeddings = int(max_total_tokens)
+            max_context = int(per_seq_budget)
+            self.config.max_position_embeddings = int(per_seq_budget)
         max_blocks_per_layer = (max_total_tokens + block_size - 1) // block_size
         self.block_size = block_size
         self.max_context = max_context
@@ -598,12 +602,52 @@ class InferenceEngine:
             position_ids.masked_fill_(attention_mask == 0, 0)
             attn_mask_for_model = attention_mask
 
+        logits_positions = torch.full(
+            (int(input_ids.size(0)),),
+            int(input_ids.size(1)) - 1,
+            device=input_ids.device,
+            dtype=torch.long,
+        )
         with record_function("roseinfer.prefill_batch.model_forward"):
             if self.use_amp:
                 with autocast(
                     device_type=self.device.type,
                     dtype=self.amp_dtype,
                 ):
+                    try:
+                        logits, _, presents = self.model(
+                            input_ids=input_ids,
+                            attention_mask=attn_mask_for_model,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=True,
+                            position_ids=position_ids,
+                            attn_backend=self.prefill_attn_backend,
+                            logits_positions=logits_positions,
+                        )
+                    except TypeError:
+                        logits, _, presents = self.model(
+                            input_ids=input_ids,
+                            attention_mask=attn_mask_for_model,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=True,
+                            position_ids=position_ids,
+                            attn_backend=self.prefill_attn_backend,
+                        )
+            else:
+                try:
+                    logits, _, presents = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attn_mask_for_model,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        position_ids=position_ids,
+                        attn_backend=self.prefill_attn_backend,
+                        logits_positions=logits_positions,
+                    )
+                except TypeError:
                     logits, _, presents = self.model(
                         input_ids=input_ids,
                         attention_mask=attn_mask_for_model,
@@ -613,16 +657,6 @@ class InferenceEngine:
                         position_ids=position_ids,
                         attn_backend=self.prefill_attn_backend,
                     )
-            else:
-                logits, _, presents = self.model(
-                    input_ids=input_ids,
-                    attention_mask=attn_mask_for_model,
-                    labels=None,
-                    past_key_values=None,
-                    use_cache=True,
-                    position_ids=position_ids,
-                    attn_backend=self.prefill_attn_backend,
-                )
         kvm = self.kv_manager
         with record_function("roseinfer.prefill_batch.register_kv"):
             for layer_idx, layer_past in enumerate(presents):
@@ -794,6 +828,11 @@ class InferenceEngine:
             device=self.device,
             dtype=torch.long,
         )
+        last_pos = torch.tensor(
+            [int(n) - 1 for n in chunk_lens],
+            device=self.device,
+            dtype=torch.long,
+        )
 
         slot_mapping = torch.tensor(
             [int(sess.paged_slot_id) for sess in sessions],
@@ -824,6 +863,43 @@ class InferenceEngine:
                     device_type=eng.device.type,
                     dtype=eng.amp_dtype,
                 ):
+                    try:
+                        logits, _ = eng.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=False,
+                            position_ids=position_ids,
+                            paged_kv_cache=paged,
+                            attn_backend="flashinfer_paged",
+                            logits_positions=last_pos,
+                        )
+                    except TypeError:
+                        logits, _ = eng.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=False,
+                            position_ids=position_ids,
+                            paged_kv_cache=paged,
+                            attn_backend="flashinfer_paged",
+                        )
+            else:
+                try:
+                    logits, _ = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=False,
+                        position_ids=position_ids,
+                        paged_kv_cache=paged,
+                        attn_backend="flashinfer_paged",
+                        logits_positions=last_pos,
+                    )
+                except TypeError:
                     logits, _ = eng.model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
@@ -834,25 +910,11 @@ class InferenceEngine:
                         paged_kv_cache=paged,
                         attn_backend="flashinfer_paged",
                     )
-            else:
-                logits, _ = eng.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=None,
-                    past_key_values=None,
-                    use_cache=False,
-                    position_ids=position_ids,
-                    paged_kv_cache=paged,
-                    attn_backend="flashinfer_paged",
-                )
 
         # Return last logits for each sequence's last valid token in this chunk.
+        if logits.dim() == 3 and int(logits.size(1)) == 1:
+            return logits[:, -1, :]
         bsz = int(input_ids.size(0))
-        last_pos = torch.tensor(
-            [int(n) - 1 for n in chunk_lens],
-            device=self.device,
-            dtype=torch.long,
-        )
         row = torch.arange(bsz, device=self.device, dtype=torch.long)
         return logits[row, last_pos, :]
 
@@ -2112,8 +2174,45 @@ class InferenceSession:
 
         eng = self.engine
         input_ids = eng._maybe_truncate(prompt_ids)
+        logits_positions = torch.full(
+            (int(input_ids.size(0)),),
+            int(input_ids.size(1)) - 1,
+            device=input_ids.device,
+            dtype=torch.long,
+        )
         if eng.use_amp:
             with autocast(device_type=eng.device.type, dtype=eng.amp_dtype):
+                try:
+                    logits, _, presents = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=None,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        attn_backend=eng.prefill_attn_backend,
+                        logits_positions=logits_positions,
+                    )
+                except TypeError:
+                    logits, _, presents = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=None,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        attn_backend=eng.prefill_attn_backend,
+                    )
+        else:
+            try:
+                logits, _, presents = eng.model(
+                    input_ids=input_ids,
+                    attention_mask=None,
+                    labels=None,
+                    past_key_values=None,
+                    use_cache=True,
+                    attn_backend=eng.prefill_attn_backend,
+                    logits_positions=logits_positions,
+                )
+            except TypeError:
                 logits, _, presents = eng.model(
                     input_ids=input_ids,
                     attention_mask=None,
@@ -2122,15 +2221,6 @@ class InferenceSession:
                     use_cache=True,
                     attn_backend=eng.prefill_attn_backend,
                 )
-        else:
-            logits, _, presents = eng.model(
-                input_ids=input_ids,
-                attention_mask=None,
-                labels=None,
-                past_key_values=None,
-                use_cache=True,
-                attn_backend=eng.prefill_attn_backend,
-            )
         self._register_prefill_kv(presents, input_ids.size(1))
         self.kv_cache = presents
         return logits  # [..., T0, vocab]
@@ -2147,11 +2237,48 @@ class InferenceSession:
         input_ids = eng._maybe_truncate(input_ids)
         if attention_mask is not None and input_ids.size(1) < attention_mask.size(1):
             attention_mask = attention_mask[:, -input_ids.size(1) :]
+        logits_positions = torch.full(
+            (int(input_ids.size(0)),),
+            int(input_ids.size(1)) - 1,
+            device=input_ids.device,
+            dtype=torch.long,
+        )
         if eng.use_amp:
             with autocast(
                 device_type=eng.device.type,
                 dtype=eng.amp_dtype,
             ):
+                try:
+                    logits, _, presents = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        attn_backend=eng.prefill_attn_backend,
+                        logits_positions=logits_positions,
+                    )
+                except TypeError:
+                    logits, _, presents = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        attn_backend=eng.prefill_attn_backend,
+                    )
+        else:
+            try:
+                logits, _, presents = eng.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=None,
+                    past_key_values=None,
+                    use_cache=True,
+                    attn_backend=eng.prefill_attn_backend,
+                    logits_positions=logits_positions,
+                )
+            except TypeError:
                 logits, _, presents = eng.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -2160,15 +2287,6 @@ class InferenceSession:
                     use_cache=True,
                     attn_backend=eng.prefill_attn_backend,
                 )
-        else:
-            logits, _, presents = eng.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=None,
-                past_key_values=None,
-                use_cache=True,
-                attn_backend=eng.prefill_attn_backend,
-            )
         if input_ids.size(0) == 1:  # temporarily only support batch size 1
             self._register_prefill_kv(presents, input_ids.size(1))
         self.kv_cache = presents

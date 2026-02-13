@@ -15,6 +15,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 
 def _module_available(name: str) -> bool:
     try:
@@ -307,68 +311,60 @@ def _collect_versions(
     except Exception:
         pass
 
-    if (
-        vllm_python
-        and versions.get("vllm") == "not installed"
-        and Path(str(vllm_python)).is_file()
-    ):
+    def probe_pkg_version(python_exe: str, pkg: str) -> str | None:
         try:
             out = subprocess.check_output(
                 [
-                    str(vllm_python),
+                    python_exe,
                     "-c",
-                    "import importlib.metadata as md; print(md.version('vllm'))",
+                    (
+                        "import importlib.metadata as md; "
+                        f"print(md.version('{pkg}'))"
+                    ),
                 ],
                 stderr=subprocess.DEVNULL,
                 timeout=15,
             )
             probed = out.decode("utf-8", errors="replace").strip()
-            if probed:
-                versions["vllm"] = probed
+            return probed or None
         except Exception:
-            pass
+            return None
 
-    if (
-        sglang_python
-        and versions.get("sglang") == "not installed"
-        and Path(str(sglang_python)).is_file()
-    ):
+    def probe_python_version(python_exe: str) -> str | None:
         try:
             out = subprocess.check_output(
-                [
-                    str(sglang_python),
-                    "-c",
-                    "import importlib.metadata as md; print(md.version('sglang'))",
-                ],
+                [python_exe, "-c", "import sys; print(sys.version.split()[0])"],
                 stderr=subprocess.DEVNULL,
                 timeout=15,
             )
             probed = out.decode("utf-8", errors="replace").strip()
-            if probed:
-                versions["sglang"] = probed
+            return probed or None
         except Exception:
-            pass
+            return None
 
-    if (
-        trtllm_python
-        and versions.get("tensorrt_llm") == "not installed"
-        and Path(str(trtllm_python)).is_file()
-    ):
-        try:
-            out = subprocess.check_output(
-                [
-                    str(trtllm_python),
-                    "-c",
-                    "import importlib.metadata as md; print(md.version('tensorrt_llm'))",
-                ],
-                stderr=subprocess.DEVNULL,
-                timeout=15,
-            )
-            probed = out.decode("utf-8", errors="replace").strip()
-            if probed:
-                versions["tensorrt_llm"] = probed
-        except Exception:
-            pass
+    if vllm_python and Path(str(vllm_python)).is_file():
+        probed = probe_pkg_version(str(vllm_python), "vllm")
+        if probed:
+            versions["vllm"] = probed
+        py_ver = probe_python_version(str(vllm_python))
+        if py_ver:
+            versions["vllm_python_version"] = py_ver
+
+    if sglang_python and Path(str(sglang_python)).is_file():
+        probed = probe_pkg_version(str(sglang_python), "sglang")
+        if probed:
+            versions["sglang"] = probed
+        py_ver = probe_python_version(str(sglang_python))
+        if py_ver:
+            versions["sglang_python_version"] = py_ver
+
+    if trtllm_python and Path(str(trtllm_python)).is_file():
+        probed = probe_pkg_version(str(trtllm_python), "tensorrt_llm")
+        if probed:
+            versions["tensorrt_llm"] = probed
+        py_ver = probe_python_version(str(trtllm_python))
+        if py_ver:
+            versions["trtllm_python_version"] = py_ver
     git_rev = _try_git_rev()
     if git_rev:
         versions["git_rev"] = git_rev
@@ -519,6 +515,8 @@ def _maybe_torch_profiler(enabled: bool, *, out_dir: Path, trace_name: str):
 def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
     import torch
 
+    from transformers import AutoConfig
+
     profile_mode = str(getattr(args, "profile", "none")).lower()
     if profile_mode == "both":
         raise ValueError("--profile=both is only supported in compare mode")
@@ -539,7 +537,6 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
         OnlineRequest,
         OnlineScheduler,
     )
-    from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
 
     device = torch.device(args.device)
     dtype_name = str(args.dtype).lower()
@@ -549,11 +546,32 @@ def _run_roseinfer(args: argparse.Namespace) -> OfflineResult:
     else:
         dtype = torch.float32
 
-    model, config, tokenizer = load_gpt2_from_hf_pretrained(
+    hf_cfg = AutoConfig.from_pretrained(
         args.model,
-        device=device,
-        dtype=dtype,
+        trust_remote_code=False,
     )
+    model_type = str(getattr(hf_cfg, "model_type", "") or "").lower()
+    if model_type == "gpt2":
+        from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
+
+        model, config, tokenizer = load_gpt2_from_hf_pretrained(
+            args.model,
+            device=device,
+            dtype=dtype,
+        )
+    elif model_type == "qwen3":
+        from rosellm.rosetrainer.hf_qwen3 import load_qwen3_from_hf_pretrained
+
+        model, config, tokenizer = load_qwen3_from_hf_pretrained(
+            args.model,
+            device=device,
+            dtype=dtype,
+        )
+    else:
+        raise ValueError(
+            "unsupported roseinfer HF model_type="
+            f"{model_type!r} (supported: gpt2, qwen3)"
+        )
     engine = InferenceEngine(
         checkpoint_path=None,
         tokenizer_name=args.model,
@@ -1067,6 +1085,27 @@ def _run_vllm(args: argparse.Namespace) -> OfflineResult:
         async_scheduling=vllm_async_scheduling,
         **_dtype_flag_vllm(str(args.dtype)),
     )
+    max_seq_len = max(16, input_len + output_len + 8)
+    try:
+        from transformers import AutoConfig
+
+        hf_cfg = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
+        max_pos = int(
+            getattr(
+                hf_cfg,
+                "max_position_embeddings",
+                getattr(hf_cfg, "n_positions", 0),
+            )
+            or 0
+        )
+    except Exception:
+        max_pos = 0
+    if max_pos >= 8192:
+        # Long-context models (e.g. Qwen3) may default to 32k/64k context lengths.
+        # For this offline benchmark (fixed input/output lengths), clamp vLLM's
+        # max_model_len to avoid allocating an enormous KV cache that can OOM on
+        # small GPUs.
+        llm_kwargs["max_model_len"] = int(max_seq_len)
     if vllm_attention_backend and vllm_attention_backend.lower() != "auto":
         llm_kwargs["attention_backend"] = vllm_attention_backend
     vllm_max_num_seqs = _resolve_vllm_max_num_seqs(args)
@@ -1082,6 +1121,10 @@ def _run_vllm(args: argparse.Namespace) -> OfflineResult:
         base_kwargs = dict(llm_kwargs)
         attempts: list[tuple[dict[str, Any], bool, bool]] = []
 
+        if "max_model_len" in base_kwargs:
+            no_len = dict(base_kwargs)
+            no_len.pop("max_model_len", None)
+            attempts.append((no_len, True, True))
         if "attention_backend" in base_kwargs:
             no_attn = dict(base_kwargs)
             no_attn.pop("attention_backend", None)
@@ -1095,6 +1138,26 @@ def _run_vllm(args: argparse.Namespace) -> OfflineResult:
             no_both.pop("attention_backend", None)
             no_both.pop("async_scheduling", None)
             attempts.append((no_both, False, False))
+        if "max_model_len" in base_kwargs and "attention_backend" in base_kwargs:
+            no_len_attn = dict(base_kwargs)
+            no_len_attn.pop("max_model_len", None)
+            no_len_attn.pop("attention_backend", None)
+            attempts.append((no_len_attn, False, True))
+        if "max_model_len" in base_kwargs and "async_scheduling" in base_kwargs:
+            no_len_async = dict(base_kwargs)
+            no_len_async.pop("max_model_len", None)
+            no_len_async.pop("async_scheduling", None)
+            attempts.append((no_len_async, True, False))
+        if (
+            "max_model_len" in base_kwargs
+            and "attention_backend" in base_kwargs
+            and "async_scheduling" in base_kwargs
+        ):
+            no_len_both = dict(base_kwargs)
+            no_len_both.pop("max_model_len", None)
+            no_len_both.pop("attention_backend", None)
+            no_len_both.pop("async_scheduling", None)
+            attempts.append((no_len_both, False, False))
 
         last_err: TypeError | None = None
         for kwargs, attn_ok, async_ok in attempts:
@@ -2497,11 +2560,28 @@ def _run_compare(args: argparse.Namespace) -> None:
                 if args.bf16:
                     py_cmd.append("--bf16")
                 if base_backend == "vllm":
+                    py_cmd += [
+                        "--vllm-attention-backend",
+                        str(getattr(args, "vllm_attention_backend", "auto")),
+                    ]
+                    vllm_max_num_seqs = _resolve_vllm_max_num_seqs(args)
+                    if vllm_max_num_seqs is not None:
+                        py_cmd += [
+                            "--vllm-max-num-seqs",
+                            str(int(vllm_max_num_seqs)),
+                        ]
                     py_cmd.append(
                         "--vllm-async-scheduling"
                         if bool(getattr(args, "vllm_async_scheduling", True))
                         else "--vllm-no-async-scheduling"
                     )
+                if base_backend == "sglang":
+                    py_cmd += [
+                        "--sglang-attention-backend",
+                        str(getattr(args, "sglang_attention_backend", "triton")),
+                        "--sglang-sampling-backend",
+                        str(getattr(args, "sglang_sampling_backend", "flashinfer")),
+                    ]
                 if base_backend in ("roseinfer", "roseinfer_mp"):
                     py_cmd += [
                         "--roseinfer-prefill-attn-backend",
@@ -2778,11 +2858,28 @@ def _run_compare(args: argparse.Namespace) -> None:
         if args.bf16:
             cmd.append("--bf16")
         if base_backend == "vllm":
+            cmd += [
+                "--vllm-attention-backend",
+                str(getattr(args, "vllm_attention_backend", "auto")),
+            ]
+            vllm_max_num_seqs = _resolve_vllm_max_num_seqs(args)
+            if vllm_max_num_seqs is not None:
+                cmd += [
+                    "--vllm-max-num-seqs",
+                    str(int(vllm_max_num_seqs)),
+                ]
             cmd.append(
                 "--vllm-async-scheduling"
                 if bool(getattr(args, "vllm_async_scheduling", True))
                 else "--vllm-no-async-scheduling"
             )
+        if base_backend == "sglang":
+            cmd += [
+                "--sglang-attention-backend",
+                str(getattr(args, "sglang_attention_backend", "triton")),
+                "--sglang-sampling-backend",
+                str(getattr(args, "sglang_sampling_backend", "flashinfer")),
+            ]
         if base_backend in ("roseinfer", "roseinfer_mp"):
             cmd += [
                 "--roseinfer-prefill-attn-backend",

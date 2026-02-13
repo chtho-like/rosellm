@@ -155,7 +155,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: float = 1.0
     top_k: int = 0
     do_sample: bool = True
-    enable_thinking: Optional[bool] = None
+    enable_thinking: Optional[bool] = False
     ignore_eos: bool = False
     stream: bool = False
 
@@ -1895,6 +1895,15 @@ def parse_args() -> argparse.Namespace:
         help="IPC transport between API and engine process: queue|pipe (default: pipe).",
     )
     parser.add_argument(
+        "--mp-start-timeout-s",
+        type=float,
+        default=900.0,
+        help=(
+            "Max time to wait for the engine process to finish initialization (default: 900s). "
+            "On first run, Triton/FlashInfer JIT compilation may take several minutes."
+        ),
+    )
+    parser.add_argument(
         "--mp-max-recv-per-iter",
         type=int,
         default=64,
@@ -2288,6 +2297,7 @@ def main() -> None:
             engine_args=engine_args,
             stream_interval=int(args.stream_interval),
             max_inflight_requests=args.max_inflight_requests,
+            start_timeout_s=float(getattr(args, "mp_start_timeout_s", 900.0) or 900.0),
             ipc_mode=str(getattr(args, "mp_ipc", "pipe")),
             async_admit=bool(getattr(args, "mp_async_admit", False)),
             tokenize_workers=int(getattr(args, "mp_tokenize_workers", 0)),
