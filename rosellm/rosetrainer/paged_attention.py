@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -27,6 +28,13 @@ class PagedKVCache:
     context_lens: torch.Tensor
     block_size: int
     write_kv: bool = False
+    prefill_qo_indptr: torch.Tensor | None = None
+    prefill_kv_indptr: torch.Tensor | None = None
+    prefill_kv_indices: torch.Tensor | None = None
+    prefill_kv_last_page_len: torch.Tensor | None = None
+    prefill_batch_idx: torch.Tensor | None = None
+    prefill_pos: torch.Tensor | None = None
+    prefill_wrapper: Any | None = None
 
 
 def paged_attention_decode_ref(

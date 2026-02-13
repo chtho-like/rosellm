@@ -4,19 +4,19 @@ import time
 
 import torch
 
-from rosellm.roseinfer.engine import KVBlockManager, PrefixCache
+from rosellm.roseinfer.engine import GlobalKVBlockManager, PrefixCache
 
 
 class _DummySession:
     def __init__(
         self,
         *,
-        kv_manager: KVBlockManager,
+        kv_manager: GlobalKVBlockManager,
         prompt_length: int,
     ) -> None:
         self.kv_manager = kv_manager
         self.prompt_length = int(prompt_length)
-        self.block_ids_per_layer = [[] for _ in range(int(kv_manager.num_layers))]
+        self.block_ids: list[int] = []
 
 
 def _build_cache(
@@ -27,12 +27,12 @@ def _build_cache(
     seed: int,
 ) -> tuple[PrefixCache, list[tuple[int, ...]]]:
     rng = random.Random(seed)
-    kv = KVBlockManager(
+    kv = GlobalKVBlockManager(
         num_layers=1,
         num_heads=1,
         head_dim=1,
         block_size=int(block_size),
-        max_blocks_per_layer=1,
+        max_blocks=1,
         device=torch.device("cpu"),
         dtype=torch.float32,
     )

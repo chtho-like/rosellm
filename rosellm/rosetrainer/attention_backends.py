@@ -209,6 +209,35 @@ def _flashinfer_paged_prefill_plan(
     return cache.wrapper
 
 
+def plan_flashinfer_paged_prefill_wrapper(
+    *,
+    device: torch.device,
+    qo_indptr: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    kv_indices: torch.Tensor,
+    kv_last_page_len: torch.Tensor,
+    num_heads: int,
+    head_dim: int,
+    page_size: int,
+    sm_scale: float,
+    causal: bool,
+    q_dtype: torch.dtype,
+) -> Any:
+    return _flashinfer_paged_prefill_plan(
+        device=device,
+        qo_indptr=qo_indptr,
+        kv_indptr=kv_indptr,
+        kv_indices=kv_indices,
+        kv_last_page_len=kv_last_page_len,
+        num_heads=int(num_heads),
+        head_dim=int(head_dim),
+        page_size=int(page_size),
+        sm_scale=float(sm_scale),
+        causal=bool(causal),
+        q_dtype=q_dtype,
+    )
+
+
 def prefill_attention_flashinfer_paged(
     *,
     q: torch.Tensor,  # [B, H, T, D]
@@ -252,10 +281,15 @@ def prefill_attention_flashinfer_paged(
         context_lens = context_lens.to(torch.int32)
     context_lens = context_lens.contiguous()
 
-    if attention_mask is None:
-        lengths = torch.full(
-            (int(bsz),), int(seq_len), device=device, dtype=torch.int32
-        )
+    qo_indptr = getattr(paged_kv_cache, "prefill_qo_indptr", None)
+    if qo_indptr is not None:
+        if qo_indptr.dtype != torch.int32:
+            raise ValueError("paged_kv_cache.prefill_qo_indptr must be int32")
+        if qo_indptr.dim() != 1 or int(qo_indptr.numel()) != int(bsz) + 1:
+            raise ValueError("paged_kv_cache.prefill_qo_indptr shape mismatch")
+        lengths = qo_indptr[1:] - qo_indptr[:-1]
+    elif attention_mask is None:
+        lengths = torch.full((int(bsz),), int(seq_len), device=device, dtype=torch.int32)
     else:
         mask = attention_mask.to(device=device, dtype=torch.bool, non_blocking=True)
         if (
@@ -265,13 +299,14 @@ def prefill_attention_flashinfer_paged(
         ):
             raise ValueError("attention_mask must have shape [B, T]")
         lengths = mask.sum(dim=1, dtype=torch.int32)
-        if int(lengths.sum().item()) == 0:
-            return torch.zeros_like(q)
 
-    # qo_indptr: [B+1]
-    qo_indptr = torch.empty((int(bsz) + 1,), device=device, dtype=torch.int32)
-    qo_indptr[0] = 0
-    qo_indptr[1:].copy_(torch.cumsum(lengths, dim=0, dtype=torch.int32))
+    if int(lengths.sum().item()) == 0:
+        return torch.zeros_like(q)
+
+    if qo_indptr is None:
+        qo_indptr = torch.empty((int(bsz) + 1,), device=device, dtype=torch.int32)
+        qo_indptr[0] = 0
+        qo_indptr[1:].copy_(torch.cumsum(lengths, dim=0, dtype=torch.int32))
     nnz_qo = int(qo_indptr[-1].item())
 
     # kv lens for each request is context_lens (should already include appended tokens).
@@ -279,36 +314,52 @@ def prefill_attention_flashinfer_paged(
     if kv_lens.numel() != int(bsz):
         raise ValueError("paged_kv_cache.context_lens must have shape [B]")
 
-    # pages per request
-    num_pages = (kv_lens + page_size - 1) // page_size  # [B]
-    kv_indptr = torch.empty((int(bsz) + 1,), device=device, dtype=torch.int32)
-    kv_indptr[0] = 0
-    kv_indptr[1:].copy_(torch.cumsum(num_pages, dim=0, dtype=torch.int32))
+    kv_indptr = getattr(paged_kv_cache, "prefill_kv_indptr", None)
+    kv_indices = getattr(paged_kv_cache, "prefill_kv_indices", None)
+    kv_last_page_len = getattr(paged_kv_cache, "prefill_kv_last_page_len", None)
+    if kv_indptr is not None or kv_indices is not None or kv_last_page_len is not None:
+        if kv_indptr is None or kv_indices is None or kv_last_page_len is None:
+            raise ValueError("incomplete paged_kv_cache prefill KV metadata")
+        if kv_indptr.dtype != torch.int32:
+            raise ValueError("paged_kv_cache.prefill_kv_indptr must be int32")
+        if kv_indices.dtype != torch.int32:
+            raise ValueError("paged_kv_cache.prefill_kv_indices must be int32")
+        if kv_last_page_len.dtype != torch.int32:
+            raise ValueError("paged_kv_cache.prefill_kv_last_page_len must be int32")
+        kv_indptr = kv_indptr.contiguous()
+        kv_indices = kv_indices.contiguous()
+        kv_last_page_len = kv_last_page_len.contiguous()
+    else:
+        # pages per request
+        num_pages = (kv_lens + page_size - 1) // page_size  # [B]
+        kv_indptr = torch.empty((int(bsz) + 1,), device=device, dtype=torch.int32)
+        kv_indptr[0] = 0
+        kv_indptr[1:].copy_(torch.cumsum(num_pages, dim=0, dtype=torch.int32))
 
-    # kv_last_page_len: [B]
-    kv_last_page_len = kv_lens - (num_pages - 1) * page_size
-    kv_last_page_len = kv_last_page_len.to(torch.int32).contiguous()
+        # kv_last_page_len: [B]
+        kv_last_page_len = kv_lens - (num_pages - 1) * page_size
+        kv_last_page_len = kv_last_page_len.to(torch.int32).contiguous()
 
-    # Gather kv_indices from per-layer block table.
-    block_table = block_tables[layer_idx]
-    if block_table.dtype != torch.int32:
-        block_table = block_table.to(torch.int32)
-    block_table = block_table.contiguous()
+        # Gather kv_indices from per-layer block table.
+        block_table = block_tables[layer_idx]
+        if block_table.dtype != torch.int32:
+            block_table = block_table.to(torch.int32)
+        block_table = block_table.contiguous()
 
-    kv_indices_parts: list[torch.Tensor] = []
-    for b in range(int(bsz)):
-        n = int(num_pages[b].item())
-        if n <= 0:
-            continue
-        slot = int(slot_mapping[b].item())
-        kv_indices_parts.append(block_table[slot, :n])
-    kv_indices = (
-        torch.cat(kv_indices_parts, dim=0)
-        if kv_indices_parts
-        else torch.empty((0,), device=device, dtype=torch.int32)
-    ).contiguous()
-    if int(kv_indices.numel()) != int(kv_indptr[-1].item()):
-        raise RuntimeError("kv_indices size mismatch (block table gather)")
+        kv_indices_parts: list[torch.Tensor] = []
+        for b in range(int(bsz)):
+            n = int(num_pages[b].item())
+            if n <= 0:
+                continue
+            slot = int(slot_mapping[b].item())
+            kv_indices_parts.append(block_table[slot, :n])
+        kv_indices = (
+            torch.cat(kv_indices_parts, dim=0)
+            if kv_indices_parts
+            else torch.empty((0,), device=device, dtype=torch.int32)
+        ).contiguous()
+        if int(kv_indices.numel()) != int(kv_indptr[-1].item()):
+            raise RuntimeError("kv_indices size mismatch (block table gather)")
 
     # Pack q/k/v by attention_mask to ragged tensor layout.
     q_flat = (
@@ -343,11 +394,19 @@ def prefill_attention_flashinfer_paged(
         raise RuntimeError("ragged packing mismatch (q nnz != qo_indptr[-1])")
 
     # Append KV into paged cache before running attention.
-    batch_idx, pos = flashinfer.get_batch_indices_positions(
-        qo_indptr,
-        kv_lens,
-        nnz_qo,
-    )
+    batch_idx = getattr(paged_kv_cache, "prefill_batch_idx", None)
+    pos = getattr(paged_kv_cache, "prefill_pos", None)
+    if batch_idx is not None or pos is not None:
+        if batch_idx is None or pos is None:
+            raise ValueError("incomplete paged_kv_cache prefill token positions")
+        batch_idx = batch_idx.contiguous()
+        pos = pos.contiguous()
+    else:
+        batch_idx, pos = flashinfer.get_batch_indices_positions(
+            qo_indptr,
+            kv_lens,
+            nnz_qo,
+        )
     k_layer = k_cache[layer_idx]
     v_layer = v_cache[layer_idx]
     flashinfer.append_paged_kv_cache(
@@ -362,19 +421,21 @@ def prefill_attention_flashinfer_paged(
         kv_layout="HND",
     )
 
-    wrapper = _flashinfer_paged_prefill_plan(
-        device=device,
-        qo_indptr=qo_indptr,
-        kv_indptr=kv_indptr,
-        kv_indices=kv_indices,
-        kv_last_page_len=kv_last_page_len,
-        num_heads=int(n_heads),
-        head_dim=int(head_dim),
-        page_size=int(page_size),
-        sm_scale=float(sm_scale),
-        causal=bool(causal),
-        q_dtype=q.dtype,
-    )
+    wrapper = getattr(paged_kv_cache, "prefill_wrapper", None)
+    if wrapper is None:
+        wrapper = _flashinfer_paged_prefill_plan(
+            device=device,
+            qo_indptr=qo_indptr,
+            kv_indptr=kv_indptr,
+            kv_indices=kv_indices,
+            kv_last_page_len=kv_last_page_len,
+            num_heads=int(n_heads),
+            head_dim=int(head_dim),
+            page_size=int(page_size),
+            sm_scale=float(sm_scale),
+            causal=bool(causal),
+            q_dtype=q.dtype,
+        )
     o_ragged = wrapper.run(q_ragged, (k_layer, v_layer))
     o_flat = q_flat.new_zeros((int(bsz * seq_len), int(n_heads), int(head_dim)))
     o_flat.index_copy_(0, idx, o_ragged)
@@ -383,6 +444,111 @@ def prefill_attention_flashinfer_paged(
         .permute(0, 2, 1, 3)
         .contiguous()
     )
+
+
+def prefill_attention_flashinfer_paged_varlen(
+    *,
+    q: torch.Tensor,  # [N, H, D]
+    k: torch.Tensor,  # [N, H, D]
+    v: torch.Tensor,  # [N, H, D]
+    paged_kv_cache: Any,
+    layer_idx: int,
+    sm_scale: float,
+    causal: bool,
+) -> torch.Tensor:
+    if flashinfer is None:
+        raise RuntimeError(
+            "flashinfer is not installed; install it to use paged varlen prefill"
+        )
+    if q.dim() != 3 or k.dim() != 3 or v.dim() != 3:
+        raise ValueError("q/k/v must be 3D [N, H, D]")
+    if q.shape != k.shape or q.shape != v.shape:
+        raise ValueError("q/k/v must have the same shape")
+    nnz_qo, n_heads, head_dim = q.shape
+    device = q.device
+    if device.type != "cuda":
+        raise RuntimeError("paged varlen prefill requires CUDA")
+
+    page_size = int(getattr(paged_kv_cache, "block_size"))
+    context_lens = getattr(paged_kv_cache, "context_lens")
+    k_cache = getattr(paged_kv_cache, "k_cache")
+    v_cache = getattr(paged_kv_cache, "v_cache")
+
+    qo_indptr = getattr(paged_kv_cache, "prefill_qo_indptr", None)
+    kv_indptr = getattr(paged_kv_cache, "prefill_kv_indptr", None)
+    kv_indices = getattr(paged_kv_cache, "prefill_kv_indices", None)
+    kv_last_page_len = getattr(paged_kv_cache, "prefill_kv_last_page_len", None)
+    if qo_indptr is None:
+        raise ValueError("paged_kv_cache.prefill_qo_indptr is required for varlen")
+    if kv_indptr is None or kv_indices is None or kv_last_page_len is None:
+        raise ValueError("paged_kv_cache prefill KV metadata is required for varlen")
+    if qo_indptr.dtype != torch.int32:
+        raise ValueError("paged_kv_cache.prefill_qo_indptr must be int32")
+    if kv_indptr.dtype != torch.int32:
+        raise ValueError("paged_kv_cache.prefill_kv_indptr must be int32")
+    if kv_indices.dtype != torch.int32:
+        raise ValueError("paged_kv_cache.prefill_kv_indices must be int32")
+    if kv_last_page_len.dtype != torch.int32:
+        raise ValueError("paged_kv_cache.prefill_kv_last_page_len must be int32")
+    qo_indptr = qo_indptr.contiguous()
+    kv_indptr = kv_indptr.contiguous()
+    kv_indices = kv_indices.contiguous()
+    kv_last_page_len = kv_last_page_len.contiguous()
+
+    bsz = int(qo_indptr.numel()) - 1
+    if bsz <= 0:
+        raise ValueError("empty qo_indptr")
+    if int(qo_indptr[-1].item()) != int(nnz_qo):
+        raise ValueError("q size mismatch (nnz != qo_indptr[-1])")
+
+    kv_lens = context_lens.to(device=device, dtype=torch.int32, non_blocking=True)
+    if int(kv_lens.numel()) != int(bsz):
+        raise ValueError("paged_kv_cache.context_lens must have shape [B]")
+
+    batch_idx = getattr(paged_kv_cache, "prefill_batch_idx", None)
+    pos = getattr(paged_kv_cache, "prefill_pos", None)
+    if batch_idx is not None or pos is not None:
+        if batch_idx is None or pos is None:
+            raise ValueError("incomplete paged_kv_cache prefill token positions")
+        batch_idx = batch_idx.contiguous()
+        pos = pos.contiguous()
+    else:
+        batch_idx, pos = flashinfer.get_batch_indices_positions(
+            qo_indptr,
+            kv_lens,
+            int(nnz_qo),
+        )
+
+    k_layer = k_cache[layer_idx]
+    v_layer = v_cache[layer_idx]
+    flashinfer.append_paged_kv_cache(
+        k,
+        v,
+        batch_idx,
+        pos,
+        (k_layer, v_layer),
+        kv_indices,
+        kv_indptr,
+        kv_last_page_len,
+        kv_layout="HND",
+    )
+
+    wrapper = getattr(paged_kv_cache, "prefill_wrapper", None)
+    if wrapper is None:
+        wrapper = _flashinfer_paged_prefill_plan(
+            device=device,
+            qo_indptr=qo_indptr,
+            kv_indptr=kv_indptr,
+            kv_indices=kv_indices,
+            kv_last_page_len=kv_last_page_len,
+            num_heads=int(n_heads),
+            head_dim=int(head_dim),
+            page_size=int(page_size),
+            sm_scale=float(sm_scale),
+            causal=bool(causal),
+            q_dtype=q.dtype,
+        )
+    return wrapper.run(q, (k_layer, v_layer))
 
 
 def _ragged_token_indices(
