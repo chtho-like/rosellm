@@ -819,23 +819,29 @@ class InferenceEngine:
         if (not do_sample) or temperature <= 0.0:
             return torch.argmax(logits, dim=-1)
 
+        top_k_i = int(top_k)
+        top_p_f = float(top_p)
+
         if (
             self.use_fused_sampler
             and flashinfer is not None
             and logits.is_cuda
             and self._sampling_generator is not None
+            and top_k_i > 0
         ):
-            top_k = int(top_k)
-            top_p = float(top_p)
-            if top_p <= 0.0 or top_p >= 1.0:
-                top_p = 1.0
+            # flashinfer's top-k/top-p sampler may hang when top_k == 0.
+            # Fall back to the PyTorch path for top_k <= 0.
+            if top_p_f <= 0.0 or top_p_f >= 1.0:
+                top_p_f = 1.0
+            if top_k_i > vocab:
+                top_k_i = vocab
             scaled = (
                 logits if float(temperature) == 1.0 else logits / float(temperature)
             )
             sampled = flashinfer.sampling.top_k_top_p_sampling_from_logits(
                 scaled,
-                top_k=top_k,
-                top_p=top_p,
+                top_k=top_k_i,
+                top_p=top_p_f,
                 filter_apply_order="joint",
                 deterministic=True,
                 generator=self._sampling_generator,
@@ -843,13 +849,12 @@ class InferenceEngine:
             # Guard against rare out-of-range ids (would crash embedding lookup).
             return sampled.clamp(min=0, max=max(0, vocab - 1))
         scaled = logits / float(temperature)
-        top_k = int(top_k)
 
-        if top_p <= 0.0 or top_p >= 1.0:
-            if top_k <= 0 or top_k >= vocab:
+        if top_p_f <= 0.0 or top_p_f >= 1.0:
+            if top_k_i <= 0 or top_k_i >= vocab:
                 probs = torch.softmax(scaled, dim=-1).clamp_min(1e-9)
                 return torch.multinomial(probs, num_samples=1).squeeze(-1)
-            k = min(top_k, vocab)
+            k = min(top_k_i, vocab)
             topk_logits, topk_idx = torch.topk(scaled, k, dim=-1)  # [B, K], [B, K]
             probs = torch.softmax(topk_logits, dim=-1).clamp_min(1e-9)
             choice = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
@@ -857,11 +862,11 @@ class InferenceEngine:
 
         # top_p in (0, 1): sample from sorted logits (top-k or full) without
         # scattering back to vocab space.
-        k = vocab if top_k <= 0 else min(top_k, vocab)
+        k = vocab if top_k_i <= 0 else min(top_k_i, vocab)
         sorted_logits, sorted_idx = torch.topk(scaled, k, dim=-1)  # [B, K], [B, K]
         probs = torch.softmax(sorted_logits, dim=-1)  # [B, K]
         cum_probs = torch.cumsum(probs, dim=-1)  # [B, K]
-        mask = cum_probs > float(top_p)
+        mask = cum_probs > float(top_p_f)
         mask[..., 0] = False  # keep at least one token
         probs = probs.masked_fill(mask, 0.0).clamp_min(1e-9)
         choice = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]

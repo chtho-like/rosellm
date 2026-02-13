@@ -1316,8 +1316,7 @@ def create_app(
         except SchedulerManagerOverloadedError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         completion = "".join(sched_manager.stream_text(request_id))
-        text = prompt + completion
-        usage = estimate_usage(tokenizer, prompt, text)
+        usage = estimate_usage(tokenizer, prompt, completion)
         resp = ChatCompletionResponse(
             id=completion_id,
             object="chat.completion",
@@ -1326,7 +1325,7 @@ def create_app(
             choices=[
                 ChatCompletionChoice(
                     index=0,
-                    message=ChatMessage(role="assistant", content=text),
+                    message=ChatMessage(role="assistant", content=completion),
                     finish_reason="stop",
                 )
             ],
