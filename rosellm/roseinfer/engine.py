@@ -228,7 +228,9 @@ class InferenceEngine:
             self.tokenizer, tokenizer_name=tokenizer_name
         )
         block_size = 64
-        max_context = max_position_embeddings or int(self.config.max_position_embeddings)
+        max_context = max_position_embeddings or int(
+            self.config.max_position_embeddings
+        )
         max_context = int(max_context)
         max_concurrency = max(1, int(kv_cache_max_concurrency))
         self.kv_cache_max_concurrency = max_concurrency
@@ -267,7 +269,9 @@ class InferenceEngine:
             kv_cache_mem_fraction = max(0.05, min(0.95, float(kv_cache_mem_fraction)))
 
         head_dim = int(self.config.d_model) // int(self.config.n_heads)
-        kv_dtype = self.amp_dtype if self.use_amp else next(self.model.parameters()).dtype
+        kv_dtype = (
+            self.amp_dtype if self.use_amp else next(self.model.parameters()).dtype
+        )
 
         if kv_cache_max_tokens is not None:
             max_total_tokens = int(kv_cache_max_tokens)
@@ -928,9 +932,8 @@ class InferenceEngine:
             prefill_wrapper=wrapper,
         )
 
-        use_varlen = (
-            bool(self.use_varlen_prefill)
-            and hasattr(eng.model, "forward_varlen")
+        use_varlen = bool(self.use_varlen_prefill) and hasattr(
+            eng.model, "forward_varlen"
         )
         if use_varlen:
             flat_ids: list[int] = []
@@ -1635,7 +1638,9 @@ class InferenceEngine:
             self._paged_global_block_tables is not None
             and self._paged_slot_capacity > 0
         ):
-            new_tables[: self._paged_slot_capacity].copy_(self._paged_global_block_tables)
+            new_tables[: self._paged_slot_capacity].copy_(
+                self._paged_global_block_tables
+            )
         self._paged_global_block_tables = new_tables
         self._paged_free_slots.extend(range(self._paged_slot_capacity, new_cap))
         self._paged_slot_capacity = new_cap
@@ -2024,9 +2029,7 @@ class InferenceEngine:
                     ), record_function("roseinfer.kv.append_token"):
                         ctx_lens = [int(x) for x in seq_lens]
                         write_pos = [int(x) % int(block_size) for x in ctx_lens]
-                        write_logical = [
-                            int(x) // int(block_size) for x in ctx_lens
-                        ]
+                        write_logical = [int(x) // int(block_size) for x in ctx_lens]
                         write_blocks = [
                             int(sess.block_ids[blk])
                             for sess, blk in zip(sessions, write_logical)
@@ -2129,7 +2132,8 @@ class InferenceEngine:
                 write_pos = [int(x) % int(block_size) for x in ctx_lens]
                 write_logical = [int(x) // int(block_size) for x in ctx_lens]
                 write_blocks = [
-                    int(sess.block_ids[blk]) for sess, blk in zip(sessions, write_logical)
+                    int(sess.block_ids[blk])
+                    for sess, blk in zip(sessions, write_logical)
                 ]
                 for layer_idx in range(int(num_layers)):
                     k_b, v_b = presents[layer_idx]  # [B, H, max_len+1, D]
@@ -2206,8 +2210,7 @@ class InferenceSession:
     def get_paged_block_table_row_cpu(
         self,
     ) -> torch.Tensor:
-        row, _ = self.get_paged_block_table_row_cpu_and_dirty(
-        )
+        row, _ = self.get_paged_block_table_row_cpu_and_dirty()
         return row
 
     def set_generation_config(
@@ -3168,6 +3171,20 @@ class OnlineScheduler:
 
         self._next_request_id = next_rid
         return rids
+
+    def adopt_session(
+        self,
+        request_id: int,
+        session: "InferenceSession",
+    ) -> None:
+        rid = int(request_id)
+        if rid in self._sessions:
+            raise ValueError(f"request_id {rid} already exists")
+        self._sessions[rid] = session
+        if rid >= self._next_request_id:
+            self._next_request_id = rid + 1
+        if not session.finished:
+            self._active_rids.append(rid)
 
     def has_unfinished(self) -> bool:
         if self._overlap_schedule and self._overlap_pending:
@@ -4417,6 +4434,53 @@ class GlobalKVBlockManager:
             self._block_infos[bid] = None
             self._free_block_ids.append(bid)
 
+    def clone_blocks_from(
+        self,
+        *,
+        src: "GlobalKVBlockManager",
+        src_block_ids: list[int],
+    ) -> list[int]:
+        if int(self.block_size) != int(src.block_size):
+            raise ValueError("KV block_size mismatch")
+        if int(self.num_layers) != int(src.num_layers):
+            raise ValueError("KV num_layers mismatch")
+        if int(self.num_heads) != int(src.num_heads) or int(self.head_dim) != int(
+            src.head_dim
+        ):
+            raise ValueError("KV shape mismatch")
+        if self.dtype != src.dtype:
+            raise ValueError("KV dtype mismatch")
+
+        out: list[int] = []
+        non_blocking = self.device.type == "cuda"
+        for src_bid in src_block_ids:
+            src_bid = int(src_bid)
+            info = src._block_infos[src_bid]
+            if info is None:
+                raise RuntimeError(f"missing GlobalKVBlockInfo for block {src_bid}")
+            dst_bid = self._alloc_block_id()
+            self._block_infos[dst_bid] = GlobalKVBlockInfo(
+                block_id=dst_bid,
+                start=int(info.start),
+                length=int(info.length),
+            )
+            self._block_refcounts[dst_bid] = 1
+            out.append(dst_bid)
+
+            length = int(info.length)
+            if length <= 0:
+                continue
+            self._k_cache[:, dst_bid, :, :length, :].copy_(
+                src._k_cache[:, src_bid, :, :length, :],
+                non_blocking=non_blocking,
+            )
+            self._v_cache[:, dst_bid, :, :length, :].copy_(
+                src._v_cache[:, src_bid, :, :length, :],
+                non_blocking=non_blocking,
+            )
+
+        return out
+
     def _clone_blocks(
         self,
         *,
@@ -4651,6 +4715,57 @@ class KVBlockManager:
         block_index: int,
     ) -> int:
         return layer_idx * self.max_blocks_per_layer + block_index
+
+    def clone_blocks_from(
+        self,
+        *,
+        src: "KVBlockManager",
+        layer_idx: int,
+        src_block_ids: list[int],
+    ) -> list[int]:
+        if not (0 <= int(layer_idx) < int(self.num_layers)):
+            raise ValueError("layer_idx out of range")
+        if int(self.block_size) != int(src.block_size):
+            raise ValueError("KV block_size mismatch")
+        if int(self.num_heads) != int(src.num_heads) or int(self.head_dim) != int(
+            src.head_dim
+        ):
+            raise ValueError("KV shape mismatch")
+        if self.dtype != src.dtype:
+            raise ValueError("KV dtype mismatch")
+
+        out: list[int] = []
+        non_blocking = self.device.type == "cuda"
+        for global_id in src_block_ids:
+            info = src._block_infos[int(global_id)]
+            if info is None:
+                raise RuntimeError(f"missing KVBlockInfo for block {global_id}")
+            if int(info.layer) != int(layer_idx):
+                raise ValueError("source KV block layer mismatch")
+
+            src_block_idx = int(info.block_index)
+            dst_block_idx = self._alloc_block_index(int(layer_idx))
+            dst_gid = self._to_global_block_id(int(layer_idx), int(dst_block_idx))
+            self._block_infos[int(dst_gid)] = KVBlockInfo(
+                layer=int(layer_idx),
+                block_index=int(dst_block_idx),
+                start=int(info.start),
+                length=int(info.length),
+            )
+            self._block_refcounts[int(dst_gid)] = 1
+
+            length = int(info.length)
+            if length > 0:
+                self._k_cache[int(layer_idx), int(dst_block_idx), :, :length, :].copy_(
+                    src._k_cache[int(layer_idx), int(src_block_idx), :, :length, :],
+                    non_blocking=non_blocking,
+                )
+                self._v_cache[int(layer_idx), int(dst_block_idx), :, :length, :].copy_(
+                    src._v_cache[int(layer_idx), int(src_block_idx), :, :length, :],
+                    non_blocking=non_blocking,
+                )
+            out.append(int(dst_gid))
+        return out
 
     def register_prefill_layer(
         self,

@@ -25,6 +25,16 @@ Notes:
 - vLLM async scheduling is enabled by default for a fairer comparison vs SGLang/TensorRT-LLM; disable with `--vllm-no-async-scheduling`.
 - vLLM attention backend defaults to FlashInfer; override with `--vllm-attention-backend`. When using FlashInfer attention on 12GB GPUs, set `--vllm-max-num-seqs 128` (the scripts auto-set this when `--vllm-attention-backend=flashinfer`).
 - SGLang attention defaults to Triton; override with `--sglang-attention-backend`.
+- roseinfer supports optional prefill/decode disaggregation (two engines). This is primarily for stabilizing tail ITL (it does not improve throughput). Use:
+
+```bash
+python benchmarks/serving/online_compare.py \
+  --model gpt2 --gpu 0,1 --backends roseinfer \
+  --roseinfer-pd-disaggregation \
+  --roseinfer-pd-prefill-device cuda:0 \
+  --roseinfer-pd-decode-device cuda:1 \
+  --roseinfer-no-engine-process
+```
 
 ## Offline (token-id throughput)
 
