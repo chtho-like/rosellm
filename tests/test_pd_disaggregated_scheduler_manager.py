@@ -195,24 +195,46 @@ def test_kv_block_manager_clone_blocks_from_copies_kv() -> None:
 
     src_kvm = eng0.kv_manager
     dst_kvm = eng1.kv_manager
-    for layer_idx in range(int(src_kvm.num_layers)):
-        dst.block_ids_per_layer[layer_idx] = dst_kvm.clone_blocks_from(
-            src=src_kvm,
-            layer_idx=layer_idx,
-            src_block_ids=src.block_ids_per_layer[layer_idx],
-        )
+    dst.block_ids = dst_kvm.clone_blocks_from(
+        src=src_kvm,
+        src_block_ids=src.block_ids,
+    )
 
     total_len = int(src.prompt_length)
     for layer_idx in range(int(src_kvm.num_layers)):
-        k0, v0 = src_kvm.gather_sequence(
-            layer_idx,
-            src.block_ids_per_layer[layer_idx],
-            total_len,
+        k0 = torch.zeros(
+            (
+                int(src_kvm.num_heads),
+                total_len,
+                int(src_kvm.head_dim),
+            ),
+            dtype=src_kvm.dtype,
+            device=src_kvm.device,
         )
-        k1, v1 = dst_kvm.gather_sequence(
-            layer_idx,
-            dst.block_ids_per_layer[layer_idx],
-            total_len,
+        v0 = torch.zeros_like(k0)
+        src_kvm.gather_sequence_into(
+            layer_idx=layer_idx,
+            block_ids=src.block_ids,
+            total_len=total_len,
+            out_k=k0,
+            out_v=v0,
+        )
+        k1 = torch.zeros(
+            (
+                int(dst_kvm.num_heads),
+                total_len,
+                int(dst_kvm.head_dim),
+            ),
+            dtype=dst_kvm.dtype,
+            device=dst_kvm.device,
+        )
+        v1 = torch.zeros_like(k1)
+        dst_kvm.gather_sequence_into(
+            layer_idx=layer_idx,
+            block_ids=dst.block_ids,
+            total_len=total_len,
+            out_k=k1,
+            out_v=v1,
         )
         assert torch.allclose(k0, k1)
         assert torch.allclose(v0, v1)

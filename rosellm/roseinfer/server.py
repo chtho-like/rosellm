@@ -9,7 +9,7 @@ import traceback
 import uuid
 from collections import deque
 from dataclasses import dataclass
-from typing import AsyncIterator, Dict, Iterator, List, Literal, Optional, Sequence
+from typing import Any, AsyncIterator, Dict, Iterator, List, Literal, Optional, Sequence
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -155,6 +155,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: float = 1.0
     top_k: int = 0
     do_sample: bool = True
+    enable_thinking: Optional[bool] = False
     ignore_eos: bool = False
     stream: bool = False
 
@@ -1020,6 +1021,53 @@ def format_messages_as_prompt(messages: List[ChatMessage]) -> str:
     return "".join(lines)
 
 
+def _format_chat_prompt_with_template(
+    tokenizer: Any,
+    messages: List[ChatMessage],
+    *,
+    enable_thinking: bool | None,
+) -> tuple[str | None, list[int] | None]:
+    apply = getattr(tokenizer, "apply_chat_template", None)
+    if not callable(apply):
+        return None, None
+    conv = [{"role": m.role, "content": m.content} for m in messages]
+    kwargs: dict[str, object] = {}
+    if enable_thinking is not None:
+        kwargs["enable_thinking"] = bool(enable_thinking)
+    try:
+        text = apply(
+            conv,
+            tokenize=False,
+            add_generation_prompt=True,
+            **kwargs,
+        )
+        token_ids = apply(
+            conv,
+            tokenize=True,
+            add_generation_prompt=True,
+            **kwargs,
+        )
+    except TypeError:
+        text = apply(
+            conv,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        token_ids = apply(
+            conv,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+    if isinstance(token_ids, list):
+        return str(text), [int(t) for t in token_ids]
+    tolist = getattr(token_ids, "tolist", None)
+    if callable(tolist):
+        out = tolist()
+        if isinstance(out, list):
+            return str(text), [int(t) for t in out]
+    return str(text), None
+
+
 def estimate_usage(
     tokenizer,
     prompt: str,
@@ -1162,7 +1210,14 @@ def create_app(
     def chat_completions(
         body: ChatCompletionRequest,
     ) -> ChatCompletionResponse | StreamingResponse:
-        prompt = format_messages_as_prompt(body.messages)
+        prompt, prompt_token_ids = _format_chat_prompt_with_template(
+            tokenizer,
+            body.messages,
+            enable_thinking=body.enable_thinking,
+        )
+        if prompt is None:
+            prompt = format_messages_as_prompt(body.messages)
+            prompt_token_ids = None
         created = int(time.time())
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         model_name = body.model or "roseinfer"
@@ -1171,6 +1226,7 @@ def create_app(
             try:
                 request_id = sched_manager.add_request(
                     prompt=prompt,
+                    prompt_token_ids=prompt_token_ids,
                     max_new_tokens=body.max_tokens,
                     temperature=body.temperature,
                     top_k=body.top_k,
@@ -1306,6 +1362,7 @@ def create_app(
         try:
             request_id = sched_manager.add_request(
                 prompt=prompt,
+                prompt_token_ids=prompt_token_ids,
                 max_new_tokens=body.max_tokens,
                 temperature=body.temperature,
                 top_k=body.top_k,
@@ -1520,7 +1577,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Load model weights from Hugging Face (GPT-2 only). "
+            "Load model weights from Hugging Face (GPT-2/Qwen3). "
             "If set, --checkpoint-path/--tokenizer-name become optional."
         ),
     )
@@ -1709,6 +1766,35 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--kv-cache-max-tokens",
+        type=int,
+        default=0,
+        help=(
+            "Total KV cache token capacity across all sessions. "
+            "0 means use the legacy max_context * max_concurrency allocator "
+            "(or the auto mem-fraction allocator for long-context models)."
+        ),
+    )
+    parser.add_argument(
+        "--kv-cache-mem-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "Allocate KV cache from a fraction of free CUDA memory after model load. "
+            "0 means disabled (default: 0)."
+        ),
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.0,
+        help=(
+            "vLLM-style KV cache sizing: target fraction of total CUDA memory "
+            "to use for (model weights + KV cache) after model load. "
+            "0 means disabled (default: 0)."
+        ),
+    )
+    parser.add_argument(
         "--prefix-cache-max-entries",
         type=int,
         default=256,
@@ -1859,6 +1945,15 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="pipe",
         help="IPC transport between API and engine process: queue|pipe (default: pipe).",
+    )
+    parser.add_argument(
+        "--mp-start-timeout-s",
+        type=float,
+        default=900.0,
+        help=(
+            "Max time to wait for the engine process to finish initialization (default: 900s). "
+            "On first run, Triton/FlashInfer JIT compilation may take several minutes."
+        ),
     )
     parser.add_argument(
         "--mp-max-recv-per-iter",
@@ -2168,6 +2263,24 @@ def main() -> None:
         raise ValueError(
             "--kv-cache-max-concurrency must be >= --max-inflight-requests when set"
         )
+
+    kv_cache_max_tokens = int(getattr(args, "kv_cache_max_tokens", 0) or 0)
+    if kv_cache_max_tokens <= 0:
+        kv_cache_max_tokens = None
+    kv_cache_mem_fraction = float(getattr(args, "kv_cache_mem_fraction", 0.0) or 0.0)
+    if kv_cache_mem_fraction <= 0.0:
+        kv_cache_mem_fraction = None
+    if kv_cache_mem_fraction is not None and (
+        kv_cache_mem_fraction > 1.0 or kv_cache_mem_fraction <= 0.0
+    ):
+        raise ValueError("--kv-cache-mem-fraction must be in (0, 1]")
+    gpu_memory_utilization = float(getattr(args, "gpu_memory_utilization", 0.0) or 0.0)
+    if gpu_memory_utilization <= 0.0:
+        gpu_memory_utilization = None
+    if gpu_memory_utilization is not None and (
+        gpu_memory_utilization > 1.0 or gpu_memory_utilization <= 0.0
+    ):
+        raise ValueError("--gpu-memory-utilization must be in (0, 1]")
     use_engine_process = bool(args.engine_process)
     pd_disagg = bool(getattr(args, "pd_disaggregation", False))
     if pd_disagg and use_engine_process:
@@ -2219,6 +2332,9 @@ def main() -> None:
             overlap_schedule=bool(args.overlap_schedule),
             max_batch_size=int(max_batch_size),
             kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+            kv_cache_max_tokens=kv_cache_max_tokens,
+            kv_cache_mem_fraction=kv_cache_mem_fraction,
+            gpu_memory_utilization=gpu_memory_utilization,
             prefix_cache_max_entries=int(
                 getattr(args, "prefix_cache_max_entries", 256)
             ),
@@ -2237,6 +2353,7 @@ def main() -> None:
             engine_args=engine_args,
             stream_interval=int(args.stream_interval),
             max_inflight_requests=args.max_inflight_requests,
+            start_timeout_s=float(getattr(args, "mp_start_timeout_s", 900.0) or 900.0),
             ipc_mode=str(getattr(args, "mp_ipc", "pipe")),
             async_admit=bool(getattr(args, "mp_async_admit", False)),
             tokenize_workers=int(getattr(args, "mp_tokenize_workers", 0)),
@@ -2256,6 +2373,9 @@ def main() -> None:
                     use_amp=not args.no_amp,
                     bf16=args.bf16,
                     kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                    kv_cache_max_tokens=kv_cache_max_tokens,
+                    kv_cache_mem_fraction=kv_cache_mem_fraction,
+                    gpu_memory_utilization=gpu_memory_utilization,
                     prefix_cache_max_entries=int(
                         getattr(args, "prefix_cache_max_entries", 256)
                     ),
@@ -2270,18 +2390,50 @@ def main() -> None:
                 )
                 served_model_name = args.tokenizer_name
             else:
-                from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
+                from transformers import AutoConfig
+
+                model_type = str(
+                    getattr(
+                        AutoConfig.from_pretrained(
+                            args.hf_model_id,
+                            trust_remote_code=False,
+                        ),
+                        "model_type",
+                        "",
+                    )
+                    or ""
+                ).lower()
 
                 use_amp = bool(not args.no_amp) and device.type == "cuda"
                 if use_amp:
                     dtype = torch.bfloat16 if args.bf16 else torch.float16
                 else:
                     dtype = torch.float32
-                model, config, tokenizer = load_gpt2_from_hf_pretrained(
-                    args.hf_model_id,
-                    device=device,
-                    dtype=dtype,
-                )
+
+                if model_type == "gpt2":
+                    from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
+
+                    model, config, tokenizer = load_gpt2_from_hf_pretrained(
+                        args.hf_model_id,
+                        device=device,
+                        dtype=dtype,
+                    )
+                elif model_type == "qwen3":
+                    from rosellm.rosetrainer.hf_qwen3 import (
+                        load_qwen3_from_hf_pretrained,
+                    )
+
+                    model, config, tokenizer = load_qwen3_from_hf_pretrained(
+                        args.hf_model_id,
+                        device=device,
+                        dtype=dtype,
+                    )
+                else:
+                    raise ValueError(
+                        "unsupported --hf-model-id model_type="
+                        f"{model_type!r} (supported: gpt2, qwen3)"
+                    )
+
                 engine = InferenceEngine(
                     checkpoint_path=None,
                     tokenizer_name=args.tokenizer_name or args.hf_model_id,
@@ -2289,6 +2441,9 @@ def main() -> None:
                     use_amp=use_amp,
                     bf16=args.bf16,
                     kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                    kv_cache_max_tokens=kv_cache_max_tokens,
+                    kv_cache_mem_fraction=kv_cache_mem_fraction,
+                    gpu_memory_utilization=gpu_memory_utilization,
                     prefix_cache_max_entries=int(
                         getattr(args, "prefix_cache_max_entries", 256)
                     ),
@@ -2305,6 +2460,7 @@ def main() -> None:
                     tokenizer=tokenizer,
                 )
                 served_model_name = args.hf_model_id
+
             tokenizer = engine.tokenizer
             sched_manager = SchedulerManager(
                 engine,
@@ -2340,6 +2496,9 @@ def main() -> None:
                     use_amp=not args.no_amp,
                     bf16=args.bf16,
                     kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                    kv_cache_max_tokens=kv_cache_max_tokens,
+                    kv_cache_mem_fraction=kv_cache_mem_fraction,
+                    gpu_memory_utilization=gpu_memory_utilization,
                     prefix_cache_max_entries=int(
                         getattr(args, "prefix_cache_max_entries", 256)
                     ),
@@ -2360,6 +2519,9 @@ def main() -> None:
                     use_amp=not args.no_amp,
                     bf16=args.bf16,
                     kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                    kv_cache_max_tokens=kv_cache_max_tokens,
+                    kv_cache_mem_fraction=kv_cache_mem_fraction,
+                    gpu_memory_utilization=gpu_memory_utilization,
                     prefix_cache_max_entries=int(
                         getattr(args, "prefix_cache_max_entries", 256)
                     ),
@@ -2374,7 +2536,19 @@ def main() -> None:
                 )
                 served_model_name = args.tokenizer_name
             else:
-                from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
+                from transformers import AutoConfig
+
+                model_type = str(
+                    getattr(
+                        AutoConfig.from_pretrained(
+                            args.hf_model_id,
+                            trust_remote_code=False,
+                        ),
+                        "model_type",
+                        "",
+                    )
+                    or ""
+                ).lower()
 
                 prefill_device = torch.device(prefill_device_str)
                 decode_device = torch.device(decode_device_str)
@@ -2390,19 +2564,45 @@ def main() -> None:
                     if decode_amp and args.bf16
                     else (torch.float16 if decode_amp else torch.float32)
                 )
-                model_p, config_p, tokenizer = load_gpt2_from_hf_pretrained(
-                    args.hf_model_id,
-                    device=prefill_device,
-                    dtype=prefill_dtype,
-                )
-                model_d, config_d, _tok_d = load_gpt2_from_hf_pretrained(
-                    args.hf_model_id,
-                    device=decode_device,
-                    dtype=decode_dtype,
-                )
+
+                if model_type == "gpt2":
+                    from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
+
+                    model_p, config_p, tokenizer = load_gpt2_from_hf_pretrained(
+                        args.hf_model_id,
+                        device=prefill_device,
+                        dtype=prefill_dtype,
+                    )
+                    model_d, config_d, _tok_d = load_gpt2_from_hf_pretrained(
+                        args.hf_model_id,
+                        device=decode_device,
+                        dtype=decode_dtype,
+                    )
+                elif model_type == "qwen3":
+                    from rosellm.rosetrainer.hf_qwen3 import (
+                        load_qwen3_from_hf_pretrained,
+                    )
+
+                    model_p, config_p, tokenizer = load_qwen3_from_hf_pretrained(
+                        args.hf_model_id,
+                        device=prefill_device,
+                        dtype=prefill_dtype,
+                    )
+                    model_d, config_d, _tok_d = load_qwen3_from_hf_pretrained(
+                        args.hf_model_id,
+                        device=decode_device,
+                        dtype=decode_dtype,
+                    )
+                else:
+                    raise ValueError(
+                        "unsupported --hf-model-id model_type="
+                        f"{model_type!r} (supported: gpt2, qwen3)"
+                    )
+
                 del _tok_d
                 if config_p != config_d:
                     raise ValueError("prefill/decode HF config mismatch")
+
                 prefill_engine = InferenceEngine(
                     checkpoint_path=None,
                     tokenizer_name=args.tokenizer_name or args.hf_model_id,
@@ -2410,6 +2610,9 @@ def main() -> None:
                     use_amp=prefill_amp,
                     bf16=args.bf16,
                     kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                    kv_cache_max_tokens=kv_cache_max_tokens,
+                    kv_cache_mem_fraction=kv_cache_mem_fraction,
+                    gpu_memory_utilization=gpu_memory_utilization,
                     prefix_cache_max_entries=int(
                         getattr(args, "prefix_cache_max_entries", 256)
                     ),
@@ -2432,6 +2635,9 @@ def main() -> None:
                     use_amp=decode_amp,
                     bf16=args.bf16,
                     kv_cache_max_concurrency=int(kv_cache_max_concurrency),
+                    kv_cache_max_tokens=kv_cache_max_tokens,
+                    kv_cache_mem_fraction=kv_cache_mem_fraction,
+                    gpu_memory_utilization=gpu_memory_utilization,
                     prefix_cache_max_entries=int(
                         getattr(args, "prefix_cache_max_entries", 256)
                     ),

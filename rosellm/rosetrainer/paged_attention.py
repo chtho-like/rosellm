@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -27,14 +28,21 @@ class PagedKVCache:
     context_lens: torch.Tensor
     block_size: int
     write_kv: bool = False
+    prefill_qo_indptr: torch.Tensor | None = None
+    prefill_kv_indptr: torch.Tensor | None = None
+    prefill_kv_indices: torch.Tensor | None = None
+    prefill_kv_last_page_len: torch.Tensor | None = None
+    prefill_batch_idx: torch.Tensor | None = None
+    prefill_pos: torch.Tensor | None = None
+    prefill_wrapper: Any | None = None
 
 
 def paged_attention_decode_ref(
-    q: torch.Tensor,  # [B, H, D]
-    k_new: torch.Tensor,  # [B, H, D]
-    v_new: torch.Tensor,  # [B, H, D]
-    k_cache_layer: torch.Tensor,  # [N_BLOCKS, H, BS, D]
-    v_cache_layer: torch.Tensor,  # [N_BLOCKS, H, BS, D], BS: block size
+    q: torch.Tensor,  # [B, Hq, D]
+    k_new: torch.Tensor,  # [B, Hkv, D]
+    v_new: torch.Tensor,  # [B, Hkv, D]
+    k_cache_layer: torch.Tensor,  # [N_BLOCKS, Hkv, BS, D]
+    v_cache_layer: torch.Tensor,  # [N_BLOCKS, Hkv, BS, D], BS: block size
     block_table: torch.Tensor,  # [S, N_LOGICAL_BLOCKS]
     slot_mapping: torch.Tensor,  # [B]
     context_lens: torch.Tensor,  # [B]
@@ -44,32 +52,46 @@ def paged_attention_decode_ref(
     write_kv: bool = False,
 ) -> torch.Tensor:  # [B, H, D]
     assert q.dim() == 3
-    assert q.shape == k_new.shape == v_new.shape
+    assert k_new.dim() == 3 and v_new.dim() == 3
+    assert k_new.shape == v_new.shape
     assert k_cache_layer.dim() == 4 and v_cache_layer.dim() == 4
     assert block_table.dim() == 2
     assert slot_mapping.dim() == 1
     assert context_lens.dim() == 1
     assert k_cache_layer.size(2) == block_size
     device = q.device
-    bsz, n_heads, head_dim = q.shape
+    bsz, n_q_heads, head_dim = q.shape
+    n_kv_heads = int(k_new.size(1))
+    if n_q_heads % n_kv_heads != 0:
+        raise ValueError(
+            "GQA requires num_attention_heads to be divisible by num_key_value_heads "
+            f"({n_q_heads} % {n_kv_heads} != 0)"
+        )
+    kv_group = n_q_heads // n_kv_heads
     assert slot_mapping.size(0) == bsz
     num_blocks = block_table.size(1)
     slots = slot_mapping.to(dtype=torch.long)
     q_f = q.float()
-    k_new_f = k_new.float()  # [B, H, D]
-    v_new_f = v_new.float()  # [B, H, D]
-    scores_cur = (q_f * k_new_f).sum(dim=-1) * scale  # [B, H]
+    k_new_f = k_new.float()  # [B, Hkv, D]
+    v_new_f = v_new.float()  # [B, Hkv, D]
+    if kv_group != 1:
+        k_new_f = k_new_f.repeat_interleave(kv_group, dim=1)
+        v_new_f = v_new_f.repeat_interleave(kv_group, dim=1)
+    scores_cur = (q_f * k_new_f).sum(dim=-1) * scale  # [B, Hq]
     # m: max logits so far, [B, H]
     m = scores_cur
     # l: exp-sum, [B, H]
-    l = torch.ones((bsz, n_heads), device=device, dtype=torch.float32)
+    l = torch.ones((bsz, n_q_heads), device=device, dtype=torch.float32)
     # o: weighted sum, [B, H, D]
     o = v_new_f
     pos = torch.arange(block_size, device=device).view(1, 1, block_size)
     for logical_block in range(num_blocks):
         block_ids = block_table[slots, logical_block].to(dtype=torch.long)  # [B]
-        k_blk = k_cache_layer[block_ids].float()  # [B, H, BS, D]
-        v_blk = v_cache_layer[block_ids].float()  # [B, H, BS, D]
+        k_blk = k_cache_layer[block_ids].float()  # [B, Hkv, BS, D]
+        v_blk = v_cache_layer[block_ids].float()  # [B, Hkv, BS, D]
+        if kv_group != 1:
+            k_blk = k_blk.repeat_interleave(kv_group, dim=1)
+            v_blk = v_blk.repeat_interleave(kv_group, dim=1)
         start = logical_block * block_size
         valid = (context_lens - start).clamp(min=0, max=block_size)  # [B]
         mask = pos < valid.view(bsz, 1, 1)  # [B, 1, BS] -> broadcast on head dim
@@ -106,7 +128,7 @@ if TRITON_AVAILABLE:
 
     @triton.autotune(
         configs=_PAGED_ATTN_AUTOTUNE_CONFIGS,
-        key=["H", "D", "BLOCK_SIZE", "MAX_BLOCKS"],
+        key=["H_Q", "H_KV", "D", "BLOCK_SIZE", "MAX_BLOCKS", "GROUP_SIZE"],
     )
     @triton.jit
     def _paged_attn_decode_kernel(
@@ -128,20 +150,24 @@ if TRITON_AVAILABLE:
         stride_vct: tl.constexpr,
         stride_vcd: tl.constexpr,
         scale: tl.constexpr,
-        H: tl.constexpr,
+        H_Q: tl.constexpr,
+        H_KV: tl.constexpr,
         D: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
         MAX_BLOCKS: tl.constexpr,
+        GROUP_SIZE: tl.constexpr,
         WRITE_KV: tl.constexpr,
     ):
         pid = tl.program_id(0)
-        b = pid // H
-        h = pid % H
+        b = pid // H_Q
+        hq = pid % H_Q
+        kv_h = hq // GROUP_SIZE
         d = tl.arange(0, D)
-        base = (b * H + h) * D + d
-        q = tl.load(q_ptr + base, mask=d < D, other=0.0).to(tl.float32)
-        k_new_in = tl.load(k_new_ptr + base, mask=d < D, other=0.0)
-        v_new_in = tl.load(v_new_ptr + base, mask=d < D, other=0.0)
+        base_q = (b * H_Q + hq) * D + d
+        base_kv = (b * H_KV + kv_h) * D + d
+        q = tl.load(q_ptr + base_q, mask=d < D, other=0.0).to(tl.float32)
+        k_new_in = tl.load(k_new_ptr + base_kv, mask=d < D, other=0.0)
+        v_new_in = tl.load(v_new_ptr + base_kv, mask=d < D, other=0.0)
         k_new = k_new_in.to(tl.float32)
         v_new = v_new_in.to(tl.float32)
         score_cur = tl.sum(q * k_new, axis=0) * scale
@@ -154,6 +180,7 @@ if TRITON_AVAILABLE:
             write_block = context_len // BLOCK_SIZE
             write_pos = context_len - write_block * BLOCK_SIZE
             write_ok = write_block < MAX_BLOCKS
+            write_ok = write_ok & ((hq % GROUP_SIZE) == 0)
             write_block_id = tl.load(
                 block_table_ptr + slot * MAX_BLOCKS + write_block,
                 mask=write_ok,
@@ -162,14 +189,14 @@ if TRITON_AVAILABLE:
             k_store_ptrs = (
                 k_cache_ptr
                 + write_block_id * stride_kcb
-                + h * stride_kch
+                + kv_h * stride_kch
                 + write_pos * stride_kct
                 + d * stride_kcd
             )
             v_store_ptrs = (
                 v_cache_ptr
                 + write_block_id * stride_vcb
-                + h * stride_vch
+                + kv_h * stride_vch
                 + write_pos * stride_vct
                 + d * stride_vcd
             )
@@ -189,14 +216,14 @@ if TRITON_AVAILABLE:
             k_ptrs = (
                 k_cache_ptr
                 + block_id * stride_kcb
-                + h * stride_kch
+                + kv_h * stride_kch
                 + t[:, None] * stride_kct
                 + d[None, :] * stride_kcd
             )
             v_ptrs = (
                 v_cache_ptr
                 + block_id * stride_vcb
-                + h * stride_vch
+                + kv_h * stride_vch
                 + t[:, None] * stride_vct
                 + d[None, :] * stride_vcd
             )
@@ -220,15 +247,15 @@ if TRITON_AVAILABLE:
             acc = acc * exp_scale_old + tl.sum(exp_scores[:, None] * v, axis=0)
             m = m_new
         out = acc / l
-        tl.store(out_ptr + base, out, mask=d < D)
+        tl.store(out_ptr + base_q, out, mask=d < D)
 
 
 def paged_attention_decode_triton(
-    q: torch.Tensor,  # [B, H, D]
-    k_new: torch.Tensor,  # [B, H, D]
-    v_new: torch.Tensor,  # [B, H, D]
-    k_cache_layer: torch.Tensor,  # [N_BLOCKS, H, BS, D]
-    v_cache_layer: torch.Tensor,  # [N_BLOCKS, H, BS, D]
+    q: torch.Tensor,  # [B, Hq, D]
+    k_new: torch.Tensor,  # [B, Hkv, D]
+    v_new: torch.Tensor,  # [B, Hkv, D]
+    k_cache_layer: torch.Tensor,  # [N_BLOCKS, Hkv, BS, D]
+    v_cache_layer: torch.Tensor,  # [N_BLOCKS, Hkv, BS, D]
     block_table: torch.Tensor,  # [S, MAX_BLOCKS] int32 cuda
     slot_mapping: torch.Tensor,  # [B] int32 cuda
     context_lens: torch.Tensor,  # [B] int32 cuda
@@ -245,6 +272,19 @@ def paged_attention_decode_triton(
     q = q.contiguous()
     k_new = k_new.contiguous()
     v_new = v_new.contiguous()
+    if q.dim() != 3 or k_new.dim() != 3 or v_new.dim() != 3:
+        raise ValueError("q/k_new/v_new must be 3D [B, H, D]")
+    if k_new.shape != v_new.shape:
+        raise ValueError("k_new/v_new must have the same shape")
+    if int(q.size(0)) != int(k_new.size(0)) or int(q.size(2)) != int(k_new.size(2)):
+        raise ValueError("q/k_new must match on [B, D]")
+    H_Q = int(q.size(1))
+    H_KV = int(k_new.size(1))
+    if H_KV <= 0 or H_Q <= 0:
+        raise ValueError("invalid head counts")
+    if H_Q % H_KV != 0:
+        raise ValueError("Hq must be divisible by Hkv for GQA")
+    group_size = H_Q // H_KV
     if block_table.dtype != torch.int32:
         block_table = block_table.to(torch.int32)
     if slot_mapping.dtype != torch.int32:
@@ -252,9 +292,10 @@ def paged_attention_decode_triton(
     if context_lens.dtype != torch.int32:
         context_lens = context_lens.to(torch.int32)
     slot_mapping = slot_mapping.contiguous()
-    B, H, D = q.shape
-    out = torch.empty_like(q)
-    grid = (B * H,)
+    B = int(q.size(0))
+    D = int(q.size(2))
+    out = torch.empty((B, H_Q, D), device=q.device, dtype=q.dtype)
+    grid = (B * H_Q,)
     _paged_attn_decode_kernel[grid](
         out,
         q,
@@ -274,10 +315,12 @@ def paged_attention_decode_triton(
         stride_vct=v_cache_layer.stride(2),
         stride_vcd=v_cache_layer.stride(3),
         scale=scale,
-        H=H,
+        H_Q=H_Q,
+        H_KV=H_KV,
         D=D,
         BLOCK_SIZE=block_size,
         MAX_BLOCKS=block_table.size(1),
+        GROUP_SIZE=group_size,
         WRITE_KV=bool(write_kv),
     )
     return out

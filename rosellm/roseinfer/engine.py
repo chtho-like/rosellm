@@ -22,6 +22,35 @@ except Exception:  # pragma: no cover
 PrefixCacheKey = str | tuple[int, ...]
 
 
+def _kv_cache_max_tokens_from_total_utilization(
+    *,
+    free_bytes: int,
+    total_bytes: int,
+    gpu_memory_utilization: float,
+    bytes_per_token: int,
+) -> int:
+    if total_bytes <= 0:
+        raise ValueError("total_bytes must be > 0")
+    if free_bytes < 0:
+        raise ValueError("free_bytes must be >= 0")
+    if free_bytes > total_bytes:
+        raise ValueError("free_bytes must be <= total_bytes")
+    if gpu_memory_utilization <= 0.0 or gpu_memory_utilization > 1.0:
+        raise ValueError("gpu_memory_utilization must be in (0, 1]")
+    if bytes_per_token <= 0:
+        raise ValueError("bytes_per_token must be > 0")
+
+    used_bytes = int(total_bytes) - int(free_bytes)
+    target_bytes = int(float(total_bytes) * float(gpu_memory_utilization))
+    budget_bytes = int(target_bytes) - int(used_bytes)
+    if budget_bytes <= 0:
+        raise ValueError(
+            "not enough free memory for the requested gpu_memory_utilization "
+            f"(budget_bytes={budget_bytes})"
+        )
+    return max(1, int(budget_bytes) // int(bytes_per_token))
+
+
 @contextmanager
 def _maybe_nvtx_range(name: str, enabled: bool) -> Iterator[None]:
     if enabled:
@@ -65,6 +94,8 @@ class InferenceEngine:
         max_position_embeddings: Optional[int] = None,
         bf16: bool = False,
         kv_cache_max_concurrency: int = 256,
+        kv_cache_max_tokens: int | None = None,
+        kv_cache_mem_fraction: float | None = None,
         prefix_cache_max_entries: int = 256,
         use_paged_attention: bool = True,
         use_cuda_graph: bool = True,
@@ -77,6 +108,8 @@ class InferenceEngine:
         model: GPTModel | None = None,
         config: GPTConfig | None = None,
         tokenizer=None,
+        gpu_memory_utilization: float | None = None,
+        use_varlen_prefill: bool = True,
     ) -> None:
         super().__init__()
         self.use_paged_attention = bool(use_paged_attention)
@@ -144,6 +177,7 @@ class InferenceEngine:
 
         self.prefill_attn_backend = _resolve_prefill_backend(prefill_attn_backend)
         self.decode_attn_backend = _resolve_decode_backend(decode_attn_backend)
+        self.use_varlen_prefill = bool(use_varlen_prefill)
         self.use_fused_ops = bool(use_fused_ops)
         self.use_fused_mlp = bool(use_fused_mlp)
         self.use_fused_sampler = bool(use_fused_sampler)
@@ -194,23 +228,117 @@ class InferenceEngine:
             self.tokenizer, tokenizer_name=tokenizer_name
         )
         block_size = 64
-        max_context = max_position_embeddings or self.config.max_position_embeddings
-        max_concurrency = max(1, kv_cache_max_concurrency)
+        max_context = max_position_embeddings or int(
+            self.config.max_position_embeddings
+        )
+        max_context = int(max_context)
+        max_concurrency = max(1, int(kv_cache_max_concurrency))
         self.kv_cache_max_concurrency = max_concurrency
-        max_total_tokens = max_context * max_concurrency
-        max_blocks_per_layer = (max_total_tokens + block_size - 1) // block_size
+        if kv_cache_mem_fraction is not None:
+            kv_cache_mem_fraction = float(kv_cache_mem_fraction)
+        if kv_cache_mem_fraction is not None and (
+            kv_cache_mem_fraction <= 0.0 or kv_cache_mem_fraction > 1.0
+        ):
+            raise ValueError("kv_cache_mem_fraction must be in (0, 1]")
+
+        if gpu_memory_utilization is not None:
+            gpu_memory_utilization = float(gpu_memory_utilization)
+        if gpu_memory_utilization is not None and (
+            gpu_memory_utilization <= 0.0 or gpu_memory_utilization > 1.0
+        ):
+            raise ValueError("gpu_memory_utilization must be in (0, 1]")
+
+        if kv_cache_max_tokens is not None:
+            kv_cache_max_tokens = int(kv_cache_max_tokens)
+            if kv_cache_max_tokens <= 0:
+                raise ValueError("kv_cache_max_tokens must be > 0")
+
+        if (
+            kv_cache_max_tokens is None
+            and kv_cache_mem_fraction is None
+            and gpu_memory_utilization is None
+            and self.device.type == "cuda"
+            and torch.cuda.is_available()
+            and max_context >= 8192
+        ):
+            frac_env = os.environ.get("ROSEINFER_KV_CACHE_MEM_FRACTION", "0.5")
+            try:
+                kv_cache_mem_fraction = float(frac_env)
+            except ValueError:
+                kv_cache_mem_fraction = 0.5
+            kv_cache_mem_fraction = max(0.05, min(0.95, float(kv_cache_mem_fraction)))
+
+        head_dim = int(self.config.d_model) // int(self.config.n_heads)
+        kv_dtype = (
+            self.amp_dtype if self.use_amp else next(self.model.parameters()).dtype
+        )
+
+        if kv_cache_max_tokens is not None:
+            max_total_tokens = int(kv_cache_max_tokens)
+        elif (
+            kv_cache_mem_fraction is not None
+            and self.device.type == "cuda"
+            and torch.cuda.is_available()
+        ):
+            free_bytes, _ = torch.cuda.mem_get_info()
+            bytes_per_elem = int(torch.empty((), dtype=kv_dtype).element_size())
+            bytes_per_token = (
+                int(self.config.n_layers)
+                * 2
+                * int(self.config.n_heads)
+                * int(head_dim)
+                * bytes_per_elem
+            )
+            if bytes_per_token <= 0:
+                raise ValueError("invalid KV cache bytes_per_token")
+            target_bytes = int(float(free_bytes) * float(kv_cache_mem_fraction))
+            max_total_tokens = max(1, target_bytes // bytes_per_token)
+        elif (
+            gpu_memory_utilization is not None
+            and self.device.type == "cuda"
+            and torch.cuda.is_available()
+        ):
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            bytes_per_elem = int(torch.empty((), dtype=kv_dtype).element_size())
+            bytes_per_token = (
+                int(self.config.n_layers)
+                * 2
+                * int(self.config.n_heads)
+                * int(head_dim)
+                * bytes_per_elem
+            )
+            max_total_tokens = _kv_cache_max_tokens_from_total_utilization(
+                free_bytes=int(free_bytes),
+                total_bytes=int(total_bytes),
+                gpu_memory_utilization=float(gpu_memory_utilization),
+                bytes_per_token=int(bytes_per_token),
+            )
+        else:
+            max_total_tokens = max_context * max_concurrency
+
+        per_seq_budget = max(1, int(max_total_tokens) // int(max_concurrency))
+        if per_seq_budget < max_context:
+            print(
+                "[warn] KV cache per-seq budget is smaller than max_context; "
+                "clamping max_position_embeddings from "
+                f"{max_context} to {per_seq_budget} "
+                f"(max_total_tokens={max_total_tokens}, "
+                f"kv_cache_max_concurrency={max_concurrency})"
+            )
+            max_context = int(per_seq_budget)
+            self.config.max_position_embeddings = int(per_seq_budget)
+        max_blocks = (max_total_tokens + block_size - 1) // block_size
         self.block_size = block_size
         self.max_context = max_context
         self.max_blocks_per_seq = (max_context + block_size - 1) // block_size
-        model_dtype = next(self.model.parameters()).dtype
-        self.kv_manager = KVBlockManager(
+        self.kv_manager = GlobalKVBlockManager(
             num_layers=self.config.n_layers,
             num_heads=self.config.n_heads,
-            head_dim=self.config.d_model // self.config.n_heads,
+            head_dim=head_dim,
             block_size=block_size,
-            max_blocks_per_layer=max_blocks_per_layer,
+            max_blocks=max_blocks,
             device=self.device,
-            dtype=self.amp_dtype if self.use_amp else model_dtype,
+            dtype=kv_dtype,
         )
         self.prefix_cache = PrefixCache(
             self.kv_manager,
@@ -480,12 +608,52 @@ class InferenceEngine:
             position_ids.masked_fill_(attention_mask == 0, 0)
             attn_mask_for_model = attention_mask
 
+        logits_positions = torch.full(
+            (int(input_ids.size(0)),),
+            int(input_ids.size(1)) - 1,
+            device=input_ids.device,
+            dtype=torch.long,
+        )
         with record_function("roseinfer.prefill_batch.model_forward"):
             if self.use_amp:
                 with autocast(
                     device_type=self.device.type,
                     dtype=self.amp_dtype,
                 ):
+                    try:
+                        logits, _, presents = self.model(
+                            input_ids=input_ids,
+                            attention_mask=attn_mask_for_model,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=True,
+                            position_ids=position_ids,
+                            attn_backend=self.prefill_attn_backend,
+                            logits_positions=logits_positions,
+                        )
+                    except TypeError:
+                        logits, _, presents = self.model(
+                            input_ids=input_ids,
+                            attention_mask=attn_mask_for_model,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=True,
+                            position_ids=position_ids,
+                            attn_backend=self.prefill_attn_backend,
+                        )
+            else:
+                try:
+                    logits, _, presents = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attn_mask_for_model,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        position_ids=position_ids,
+                        attn_backend=self.prefill_attn_backend,
+                        logits_positions=logits_positions,
+                    )
+                except TypeError:
                     logits, _, presents = self.model(
                         input_ids=input_ids,
                         attention_mask=attn_mask_for_model,
@@ -495,33 +663,34 @@ class InferenceEngine:
                         position_ids=position_ids,
                         attn_backend=self.prefill_attn_backend,
                     )
-            else:
-                logits, _, presents = self.model(
-                    input_ids=input_ids,
-                    attention_mask=attn_mask_for_model,
-                    labels=None,
-                    past_key_values=None,
-                    use_cache=True,
-                    position_ids=position_ids,
-                    attn_backend=self.prefill_attn_backend,
-                )
         kvm = self.kv_manager
         with record_function("roseinfer.prefill_batch.register_kv"):
+            for b, sess in enumerate(sessions):
+                seq_len_b = int(lengths[b])
+                sess.prompt_length = seq_len_b
+                sess.block_ids = []
+                sess.clear_paged_block_table_cache()
+                kvm.reserve_append_tokens(
+                    block_ids=sess.block_ids,
+                    n_append=seq_len_b,
+                )
             for layer_idx, layer_past in enumerate(presents):
-                if layer_idx >= kvm.num_layers:
+                if layer_idx >= int(kvm.num_layers):
                     break
                 k_layer, v_layer = layer_past  # [B, H, T, D]
                 for b, sess in enumerate(sessions):
-                    seq_len = int(lengths[b])
-                    sess.prompt_length = seq_len
-                    k = k_layer[b : b + 1, :, -seq_len:, :]
-                    v = v_layer[b : b + 1, :, -seq_len:, :]
-                    block_ids = kvm.register_prefill_layer(
-                        layer_idx,
-                        k,
-                        v,
+                    seq_len_b = int(lengths[b])
+                    if seq_len_b <= 0:
+                        continue
+                    k = k_layer[b, :, -seq_len_b:, :]
+                    v = v_layer[b, :, -seq_len_b:, :]
+                    kvm.copy_prefill_into_cache(
+                        layer_idx=layer_idx,
+                        block_ids=sess.block_ids,
+                        key=k,
+                        value=v,
+                        total_len=seq_len_b,
                     )
-                    sess.block_ids_per_layer[layer_idx] = block_ids
         last_logits = logits[:, -1, :]  # [B, V]
         return last_logits
 
@@ -533,9 +702,7 @@ class InferenceEngine:
             return
         if self.device.type != "cuda" or not torch.cuda.is_available():
             return
-        global_block_tables = self._get_paged_global_block_tables()
-        max_blocks_per_layer = int(self.kv_manager.max_blocks_per_layer)
-        num_layers = int(self.kv_manager.num_layers)
+        global_block_table = self._get_paged_global_block_tables()
 
         dirty_idx: list[int] = []
         slot_ids: list[int] = []
@@ -543,10 +710,7 @@ class InferenceEngine:
             if sess.paged_slot_id is None:
                 raise RuntimeError("paged_slot_id must be allocated before syncing")
             slot_ids.append(int(sess.paged_slot_id))
-            _, dirty = sess.get_paged_block_table_row_cpu_and_dirty(
-                layer_idx=0,
-                offset=0,
-            )
+            _, dirty = sess.get_paged_block_table_row_cpu_and_dirty()
             if dirty:
                 dirty_idx.append(idx)
 
@@ -562,22 +726,14 @@ class InferenceEngine:
         n_dirty = len(dirty_idx)
         rows_cpu = self._get_paged_dirty_rows_cpu_buf(n_dirty)[:n_dirty]
         rows_buf = self._get_paged_dirty_rows_buf(n_dirty)[:n_dirty]
-        for layer_idx in range(num_layers):
-            offset = layer_idx * max_blocks_per_layer
-            rows = [
-                sessions[idx].get_paged_block_table_row_cpu(
-                    layer_idx=layer_idx,
-                    offset=offset,
-                )
-                for idx in dirty_idx
-            ]
-            torch.stack(rows, dim=0, out=rows_cpu)
-            rows_buf.copy_(rows_cpu, non_blocking=True)
-            global_block_tables[layer_idx].index_copy_(
-                0,
-                dirty_slot_ids_t,
-                rows_buf,
-            )
+        rows = [sessions[idx].get_paged_block_table_row_cpu() for idx in dirty_idx]
+        torch.stack(rows, dim=0, out=rows_cpu)
+        rows_buf.copy_(rows_cpu, non_blocking=True)
+        global_block_table.index_copy_(
+            0,
+            dirty_slot_ids_t,
+            rows_buf,
+        )
 
     @torch.no_grad()
     def prefill_chunk_sessions(
@@ -632,12 +788,10 @@ class InferenceEngine:
 
         # Reserve KV metadata for the appended tokens (and clone on write when needed).
         for sess, n_append in zip(sessions, chunk_lens):
-            for layer_idx in range(num_layers):
-                kvm.reserve_append_tokens(
-                    layer_idx=layer_idx,
-                    block_ids=sess.block_ids_per_layer[layer_idx],
-                    n_append=n_append,
-                )
+            kvm.reserve_append_tokens(
+                block_ids=sess.block_ids,
+                n_append=n_append,
+            )
 
         # Update prompt lengths after KV reservation.
         for sess, nxt in zip(sessions, new_lens):
@@ -676,6 +830,11 @@ class InferenceEngine:
             device=self.device,
             dtype=torch.long,
         )
+        last_pos = torch.tensor(
+            [int(n) - 1 for n in chunk_lens],
+            device=self.device,
+            dtype=torch.long,
+        )
 
         slot_mapping = torch.tensor(
             [int(sess.paged_slot_id) for sess in sessions],
@@ -687,10 +846,76 @@ class InferenceEngine:
             device=self.device,
             dtype=torch.int32,
         )
+        qo_indptr_list = [0]
+        for n in chunk_lens:
+            qo_indptr_list.append(int(qo_indptr_list[-1]) + int(n))
+        qo_indptr = torch.tensor(
+            qo_indptr_list,
+            device=self.device,
+            dtype=torch.int32,
+        )
+
+        kv_indptr_list = [0]
+        kv_last_page_len_list: list[int] = []
+        kv_indices_list: list[int] = []
+        for sess, kv_len in zip(sessions, new_lens):
+            kv_len = int(kv_len)
+            num_pages = (kv_len + block_size - 1) // block_size
+            kv_indptr_list.append(int(kv_indptr_list[-1]) + int(num_pages))
+            kv_last_page_len_list.append(
+                int(kv_len - (num_pages - 1) * int(block_size))
+            )
+            if len(sess.block_ids) < int(num_pages):
+                raise RuntimeError("session KV blocks are not reserved for prefill")
+            kv_indices_list.extend(int(x) for x in sess.block_ids[: int(num_pages)])
+
+        kv_indptr = torch.tensor(
+            kv_indptr_list,
+            device=self.device,
+            dtype=torch.int32,
+        )
+        kv_indices = torch.tensor(
+            kv_indices_list,
+            device=self.device,
+            dtype=torch.int32,
+        )
+        kv_last_page_len = torch.tensor(
+            kv_last_page_len_list,
+            device=self.device,
+            dtype=torch.int32,
+        )
+        if int(kv_indices.numel()) != int(kv_indptr[-1].item()):
+            raise RuntimeError("kv_indices size mismatch for flashinfer prefill")
+
+        if flashinfer is None:
+            raise RuntimeError(
+                "flashinfer is not installed; it is required for chunked prefill"
+            )
+        batch_idx, pos = flashinfer.get_batch_indices_positions(
+            qo_indptr,
+            context_lens,
+            int(qo_indptr[-1].item()),
+        )
+        from rosellm.rosetrainer.attention_backends import (
+            plan_flashinfer_paged_prefill_wrapper,
+        )
+
+        wrapper = plan_flashinfer_paged_prefill_wrapper(
+            device=self.device,
+            qo_indptr=qo_indptr,
+            kv_indptr=kv_indptr,
+            kv_indices=kv_indices,
+            kv_last_page_len=kv_last_page_len,
+            num_q_heads=int(kvm.num_heads),
+            num_kv_heads=int(kvm.num_heads),
+            head_dim=int(kvm.head_dim),
+            page_size=int(block_size),
+            sm_scale=float(kvm.head_dim**-0.5),
+            causal=True,
+            q_dtype=eng.amp_dtype or torch.float16,
+        )
         global_block_tables = self._get_paged_global_block_tables()
-        block_tables = [
-            global_block_tables[layer_idx] for layer_idx in range(num_layers)
-        ]
+        block_tables = [global_block_tables for _ in range(num_layers)]
         paged = PagedKVCache(
             k_cache=kvm._k_cache,
             v_cache=kvm._v_cache,
@@ -698,7 +923,57 @@ class InferenceEngine:
             slot_mapping=slot_mapping,
             context_lens=context_lens,
             block_size=block_size,
+            prefill_qo_indptr=qo_indptr,
+            prefill_kv_indptr=kv_indptr,
+            prefill_kv_indices=kv_indices,
+            prefill_kv_last_page_len=kv_last_page_len,
+            prefill_batch_idx=batch_idx,
+            prefill_pos=pos,
+            prefill_wrapper=wrapper,
         )
+
+        use_varlen = bool(self.use_varlen_prefill) and hasattr(
+            eng.model, "forward_varlen"
+        )
+        if use_varlen:
+            flat_ids: list[int] = []
+            flat_pos: list[int] = []
+            for start, chunk in zip(start_lens, chunk_token_ids):
+                start = int(start)
+                for i, tok_id in enumerate(chunk):
+                    flat_ids.append(int(tok_id))
+                    flat_pos.append(int(start + i))
+            input_ids_flat = torch.tensor(
+                flat_ids,
+                device=self.device,
+                dtype=torch.long,
+            )
+            position_ids_flat = torch.tensor(
+                flat_pos,
+                device=self.device,
+                dtype=torch.long,
+            )
+            with record_function("roseinfer.prefill_chunk.model_forward_varlen"):
+                if eng.use_amp:
+                    with autocast(
+                        device_type=eng.device.type,
+                        dtype=eng.amp_dtype,
+                    ):
+                        logits_flat = eng.model.forward_varlen(
+                            input_ids=input_ids_flat,
+                            position_ids=position_ids_flat,
+                            paged_kv_cache=paged,
+                            attn_backend="flashinfer_paged",
+                        )
+                else:
+                    logits_flat = eng.model.forward_varlen(
+                        input_ids=input_ids_flat,
+                        position_ids=position_ids_flat,
+                        paged_kv_cache=paged,
+                        attn_backend="flashinfer_paged",
+                    )
+            last_idx = (qo_indptr[1:] - 1).to(dtype=torch.long)
+            return logits_flat.index_select(0, last_idx)
 
         with record_function("roseinfer.prefill_chunk.model_forward"):
             if eng.use_amp:
@@ -706,6 +981,43 @@ class InferenceEngine:
                     device_type=eng.device.type,
                     dtype=eng.amp_dtype,
                 ):
+                    try:
+                        logits, _ = eng.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=False,
+                            position_ids=position_ids,
+                            paged_kv_cache=paged,
+                            attn_backend="flashinfer_paged",
+                            logits_positions=last_pos,
+                        )
+                    except TypeError:
+                        logits, _ = eng.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=False,
+                            position_ids=position_ids,
+                            paged_kv_cache=paged,
+                            attn_backend="flashinfer_paged",
+                        )
+            else:
+                try:
+                    logits, _ = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=False,
+                        position_ids=position_ids,
+                        paged_kv_cache=paged,
+                        attn_backend="flashinfer_paged",
+                        logits_positions=last_pos,
+                    )
+                except TypeError:
                     logits, _ = eng.model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
@@ -716,25 +1028,11 @@ class InferenceEngine:
                         paged_kv_cache=paged,
                         attn_backend="flashinfer_paged",
                     )
-            else:
-                logits, _ = eng.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=None,
-                    past_key_values=None,
-                    use_cache=False,
-                    position_ids=position_ids,
-                    paged_kv_cache=paged,
-                    attn_backend="flashinfer_paged",
-                )
 
         # Return last logits for each sequence's last valid token in this chunk.
+        if logits.dim() == 3 and int(logits.size(1)) == 1:
+            return logits[:, -1, :]
         bsz = int(input_ids.size(0))
-        last_pos = torch.tensor(
-            [int(n) - 1 for n in chunk_lens],
-            device=self.device,
-            dtype=torch.long,
-        )
         row = torch.arange(bsz, device=self.device, dtype=torch.long)
         return logits[row, last_pos, :]
 
@@ -1290,7 +1588,6 @@ class InferenceEngine:
             cap = max(batch_size, self._paged_block_tables_capacity * 2, 16)
             self._paged_block_tables_buf = torch.empty(
                 (
-                    self.config.n_layers,
                     cap,
                     self.max_blocks_per_seq,
                 ),
@@ -1311,7 +1608,6 @@ class InferenceEngine:
             cap = max(batch_size, self._paged_block_tables_cpu_capacity * 2, 16)
             self._paged_block_tables_cpu_buf = torch.empty(
                 (
-                    self.config.n_layers,
                     cap,
                     self.max_blocks_per_seq,
                 ),
@@ -1334,7 +1630,7 @@ class InferenceEngine:
         min_capacity = max(1, int(min_capacity))
         new_cap = max(min_capacity, self._paged_slot_capacity * 2, 128)
         new_tables = torch.zeros(
-            (self.config.n_layers, new_cap, self.max_blocks_per_seq),
+            (new_cap, self.max_blocks_per_seq),
             device=self.device,
             dtype=torch.int32,
         )
@@ -1342,7 +1638,7 @@ class InferenceEngine:
             self._paged_global_block_tables is not None
             and self._paged_slot_capacity > 0
         ):
-            new_tables[:, : self._paged_slot_capacity].copy_(
+            new_tables[: self._paged_slot_capacity].copy_(
                 self._paged_global_block_tables
             )
         self._paged_global_block_tables = new_tables
@@ -1430,9 +1726,7 @@ class InferenceEngine:
         from rosellm.rosetrainer.paged_attention import PagedKVCache
 
         num_layers = int(self.kv_manager.num_layers)
-        block_tables = [
-            global_block_tables[layer_idx] for layer_idx in range(num_layers)
-        ]
+        block_tables = [global_block_tables for _ in range(num_layers)]
 
         input_ids = torch.zeros(
             (batch_size, 1),
@@ -1584,10 +1878,9 @@ class InferenceEngine:
             num_layers = kvm.num_layers
             num_heads = kvm.num_heads
             head_dim = kvm.head_dim
+            block_size = int(kvm.block_size)
             if self.use_paged_attention:
                 nvtx = device.type == "cuda" and os.environ.get("ROSEINFER_NVTX") == "1"
-                block_size = kvm.block_size
-                max_blocks_per_layer = kvm.max_blocks_per_layer
                 fused_kv_append = bool(self.use_fused_kv_append)
                 slot_ids: list[int] = []
                 for sess in sessions:
@@ -1597,17 +1890,14 @@ class InferenceEngine:
                     assert sess.paged_slot_id is not None
                     slot_ids.append(sess.paged_slot_id)
 
-                if fused_kv_append:
-                    with _maybe_nvtx_range(
-                        "roseinfer.kv.reserve_append_token", nvtx
-                    ), record_function("roseinfer.kv.reserve_append_token"):
-                        for layer_idx in range(num_layers):
-                            for sess in sessions:
-                                kvm.reserve_append_tokens(
-                                    layer_idx=layer_idx,
-                                    block_ids=sess.block_ids_per_layer[layer_idx],
-                                    n_append=1,
-                                )
+                with _maybe_nvtx_range(
+                    "roseinfer.kv.reserve_append_token", nvtx
+                ), record_function("roseinfer.kv.reserve_append_token"):
+                    for sess in sessions:
+                        kvm.reserve_append_tokens(
+                            block_ids=sess.block_ids,
+                            n_append=1,
+                        )
                 global_block_tables = self._get_paged_global_block_tables()
 
                 with _maybe_nvtx_range(
@@ -1618,10 +1908,7 @@ class InferenceEngine:
                 ):
                     dirty_idx: list[int] = []
                     for idx, sess in enumerate(sessions):
-                        _, dirty = sess.get_paged_block_table_row_cpu_and_dirty(
-                            layer_idx=0,
-                            offset=0,
-                        )
+                        _, dirty = sess.get_paged_block_table_row_cpu_and_dirty()
                         if dirty:
                             dirty_idx.append(idx)
                     if dirty_idx:
@@ -1634,22 +1921,17 @@ class InferenceEngine:
                         n_dirty = len(dirty_idx)
                         rows_cpu = self._get_paged_dirty_rows_cpu_buf(n_dirty)[:n_dirty]
                         rows_buf = self._get_paged_dirty_rows_buf(n_dirty)[:n_dirty]
-                        for layer_idx in range(num_layers):
-                            offset = layer_idx * max_blocks_per_layer
-                            rows = [
-                                sessions[idx].get_paged_block_table_row_cpu(
-                                    layer_idx=layer_idx,
-                                    offset=offset,
-                                )
-                                for idx in dirty_idx
-                            ]
-                            torch.stack(rows, dim=0, out=rows_cpu)
-                            rows_buf.copy_(rows_cpu, non_blocking=True)
-                            global_block_tables[layer_idx].index_copy_(
-                                0,
-                                dirty_slot_ids_t,
-                                rows_buf,
-                            )
+                        rows = [
+                            sessions[idx].get_paged_block_table_row_cpu()
+                            for idx in dirty_idx
+                        ]
+                        torch.stack(rows, dim=0, out=rows_cpu)
+                        rows_buf.copy_(rows_cpu, non_blocking=True)
+                        global_block_tables.index_copy_(
+                            0,
+                            dirty_slot_ids_t,
+                            rows_buf,
+                        )
 
                 if self.use_cuda_graph:
                     graph = self._get_or_create_paged_decode_cuda_graph(
@@ -1699,10 +1981,7 @@ class InferenceEngine:
                         device=device,
                         dtype=torch.int32,
                     )
-                    block_tables = [
-                        global_block_tables[layer_idx]
-                        for layer_idx in range(num_layers)
-                    ]
+                    block_tables = [global_block_tables for _ in range(num_layers)]
                     paged = PagedKVCache(
                         k_cache=kvm._k_cache,
                         v_cache=kvm._v_cache,
@@ -1748,19 +2027,24 @@ class InferenceEngine:
                     with _maybe_nvtx_range(
                         "roseinfer.kv.append_token", nvtx
                     ), record_function("roseinfer.kv.append_token"):
-                        for layer_idx in range(num_layers):
+                        ctx_lens = [int(x) for x in seq_lens]
+                        write_pos = [int(x) % int(block_size) for x in ctx_lens]
+                        write_logical = [int(x) // int(block_size) for x in ctx_lens]
+                        write_blocks = [
+                            int(sess.block_ids[blk])
+                            for sess, blk in zip(sessions, write_logical)
+                        ]
+                        for layer_idx in range(int(num_layers)):
                             k_step, v_step = presents[layer_idx]  # [B, H, 1, D]
                             k_step = k_step.squeeze(2)  # [B, H, D]
                             v_step = v_step.squeeze(2)
-                            block_ids_list = [
-                                sess.block_ids_per_layer[layer_idx] for sess in sessions
-                            ]
-                            kvm.append_token_batch(
-                                layer_idx,
-                                block_ids_list,
-                                k_step,
-                                v_step,
-                            )
+                            k_layer = kvm._k_cache[layer_idx]
+                            v_layer = kvm._v_cache[layer_idx]
+                            for b in range(batch_size):
+                                bid = write_blocks[b]
+                                pos = write_pos[b]
+                                k_layer[bid, :, pos, :].copy_(k_step[b])
+                                v_layer[bid, :, pos, :].copy_(v_step[b])
                 return last_logits
 
             lens = torch.tensor(seq_lens, device=device, dtype=torch.long)
@@ -1804,13 +2088,12 @@ class InferenceEngine:
                     v_cat = torch.zeros_like(k_cat)
                     for idx, sess in enumerate(sessions):
                         seq_len = seq_lens[idx]
-                        block_ids = sess.block_ids_per_layer[layer_idx]
                         kvm.gather_sequence_into(
-                            layer_idx,
-                            block_ids,
-                            seq_len,
-                            k_cat[idx],
-                            v_cat[idx],
+                            layer_idx=layer_idx,
+                            block_ids=sess.block_ids,
+                            total_len=seq_len,
+                            out_k=k_cat[idx],
+                            out_v=v_cat[idx],
                         )
                     batched_past.append((k_cat, v_cat))
             with record_function("roseinfer.model.forward"):
@@ -1840,19 +2123,29 @@ class InferenceEngine:
                     )
             last_logits = logits[:, -1, :]  # [B, V]
             with record_function("roseinfer.kv.append_token"):
-                for layer_idx in range(num_layers):
+                ctx_lens = [int(x) for x in seq_lens]
+                for sess in sessions:
+                    kvm.reserve_append_tokens(
+                        block_ids=sess.block_ids,
+                        n_append=1,
+                    )
+                write_pos = [int(x) % int(block_size) for x in ctx_lens]
+                write_logical = [int(x) // int(block_size) for x in ctx_lens]
+                write_blocks = [
+                    int(sess.block_ids[blk])
+                    for sess, blk in zip(sessions, write_logical)
+                ]
+                for layer_idx in range(int(num_layers)):
                     k_b, v_b = presents[layer_idx]  # [B, H, max_len+1, D]
                     k_step = k_b.select(2, max_len)  # [B, H, D]
                     v_step = v_b.select(2, max_len)  # [B, H, D]
-                    block_ids_list = [
-                        sess.block_ids_per_layer[layer_idx] for sess in sessions
-                    ]
-                    kvm.append_token_batch(
-                        layer_idx,
-                        block_ids_list,
-                        k_step,
-                        v_step,
-                    )
+                    k_layer = kvm._k_cache[layer_idx]
+                    v_layer = kvm._v_cache[layer_idx]
+                    for b in range(batch_size):
+                        bid = write_blocks[b]
+                        pos = write_pos[b]
+                        k_layer[bid, :, pos, :].copy_(k_step[b])
+                        v_layer[bid, :, pos, :].copy_(v_step[b])
             return last_logits
 
 
@@ -1872,66 +2165,52 @@ class InferenceSession:
         self.step_count: int = 0
         self.committed_step_count: int = 0
         self.kv_manager = engine.kv_manager
-        self.block_ids_per_layer: list[list[int]] = [
-            [] for _ in range(self.kv_manager.num_layers)
-        ]
+        self.block_ids: list[int] = []
         self.prompt_length: int = 0
         self.paged_slot_id: int | None = None
-        self._paged_block_table_rows_cpu: list[torch.Tensor] | None = None
-        self._paged_block_table_sig: list[tuple[int, int]] | None = None
+        self._paged_block_table_row_cpu: torch.Tensor | None = None
+        self._paged_block_table_sig: tuple[int, int] | None = None
 
     def clear_paged_block_table_cache(self) -> None:
-        self._paged_block_table_rows_cpu = None
+        self._paged_block_table_row_cpu = None
         self._paged_block_table_sig = None
 
     def get_paged_block_table_row_cpu_and_dirty(
         self,
-        *,
-        layer_idx: int,
-        offset: int,
     ) -> tuple[torch.Tensor, bool]:
         max_blocks = int(self.engine.max_blocks_per_seq)
-        if self._paged_block_table_rows_cpu is None:
-            num_layers = int(self.kv_manager.num_layers)
-            self._paged_block_table_rows_cpu = [
-                torch.empty(
-                    (max_blocks,),
-                    dtype=torch.int32,
-                    device="cpu",
-                    pin_memory=(self.engine.device.type == "cuda"),
-                ).zero_()
-                for _ in range(num_layers)
-            ]
-            self._paged_block_table_sig = [(-1, -1) for _ in range(num_layers)]
+        if self._paged_block_table_row_cpu is None:
+            self._paged_block_table_row_cpu = torch.empty(
+                (max_blocks,),
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=(self.engine.device.type == "cuda"),
+            ).zero_()
+            self._paged_block_table_sig = (-1, -1)
+        assert self._paged_block_table_row_cpu is not None
         assert self._paged_block_table_sig is not None
 
-        ids = self.block_ids_per_layer[layer_idx]
+        ids = self.block_ids
         sig = (len(ids), int(ids[-1]) if ids else -1)
-        if sig != self._paged_block_table_sig[layer_idx]:
-            row = self._paged_block_table_rows_cpu[layer_idx]
+        if sig != self._paged_block_table_sig:
+            row = self._paged_block_table_row_cpu
             row.zero_()
             if ids:
                 n = min(len(ids), max_blocks)
                 row[:n].copy_(
                     torch.tensor(
-                        [gid - offset for gid in ids[:n]],
+                        [int(gid) for gid in ids[:n]],
                         dtype=torch.int32,
                     )
                 )
-            self._paged_block_table_sig[layer_idx] = sig
+            self._paged_block_table_sig = sig
             return row, True
-        return self._paged_block_table_rows_cpu[layer_idx], False
+        return self._paged_block_table_row_cpu, False
 
     def get_paged_block_table_row_cpu(
         self,
-        *,
-        layer_idx: int,
-        offset: int,
     ) -> torch.Tensor:
-        row, _ = self.get_paged_block_table_row_cpu_and_dirty(
-            layer_idx=layer_idx,
-            offset=offset,
-        )
+        row, _ = self.get_paged_block_table_row_cpu_and_dirty()
         return row
 
     def set_generation_config(
@@ -1970,20 +2249,27 @@ class InferenceSession:
     ) -> None:
         if self.kv_manager is None:
             return
+        seq_len = int(seq_len)
         self.prompt_length = seq_len
-        self.block_ids_per_layer = [[] for _ in range(self.kv_manager.num_layers)]
+        self.block_ids = []
+        self.clear_paged_block_table_cache()
+        self.kv_manager.reserve_append_tokens(
+            block_ids=self.block_ids,
+            n_append=seq_len,
+        )
         for layer_idx, layer_past in enumerate(presents):
-            if layer_idx >= self.kv_manager.num_layers:
+            if layer_idx >= int(self.kv_manager.num_layers):
                 break
             key, value = layer_past  # [B, H, T, D]
-            if key.size(2) != seq_len:
+            if int(key.size(2)) != seq_len:
                 continue
-            block_ids = self.kv_manager.register_prefill_layer(
-                layer_idx,
-                key,
-                value,
+            self.kv_manager.copy_prefill_into_cache(
+                layer_idx=layer_idx,
+                block_ids=self.block_ids,
+                key=key[0],
+                value=value[0],
+                total_len=seq_len,
             )
-            self.block_ids_per_layer[layer_idx] = block_ids
 
     @torch.no_grad()
     def prefill(
@@ -1994,8 +2280,45 @@ class InferenceSession:
 
         eng = self.engine
         input_ids = eng._maybe_truncate(prompt_ids)
+        logits_positions = torch.full(
+            (int(input_ids.size(0)),),
+            int(input_ids.size(1)) - 1,
+            device=input_ids.device,
+            dtype=torch.long,
+        )
         if eng.use_amp:
             with autocast(device_type=eng.device.type, dtype=eng.amp_dtype):
+                try:
+                    logits, _, presents = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=None,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        attn_backend=eng.prefill_attn_backend,
+                        logits_positions=logits_positions,
+                    )
+                except TypeError:
+                    logits, _, presents = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=None,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        attn_backend=eng.prefill_attn_backend,
+                    )
+        else:
+            try:
+                logits, _, presents = eng.model(
+                    input_ids=input_ids,
+                    attention_mask=None,
+                    labels=None,
+                    past_key_values=None,
+                    use_cache=True,
+                    attn_backend=eng.prefill_attn_backend,
+                    logits_positions=logits_positions,
+                )
+            except TypeError:
                 logits, _, presents = eng.model(
                     input_ids=input_ids,
                     attention_mask=None,
@@ -2004,15 +2327,6 @@ class InferenceSession:
                     use_cache=True,
                     attn_backend=eng.prefill_attn_backend,
                 )
-        else:
-            logits, _, presents = eng.model(
-                input_ids=input_ids,
-                attention_mask=None,
-                labels=None,
-                past_key_values=None,
-                use_cache=True,
-                attn_backend=eng.prefill_attn_backend,
-            )
         self._register_prefill_kv(presents, input_ids.size(1))
         self.kv_cache = presents
         return logits  # [..., T0, vocab]
@@ -2029,11 +2343,48 @@ class InferenceSession:
         input_ids = eng._maybe_truncate(input_ids)
         if attention_mask is not None and input_ids.size(1) < attention_mask.size(1):
             attention_mask = attention_mask[:, -input_ids.size(1) :]
+        logits_positions = torch.full(
+            (int(input_ids.size(0)),),
+            int(input_ids.size(1)) - 1,
+            device=input_ids.device,
+            dtype=torch.long,
+        )
         if eng.use_amp:
             with autocast(
                 device_type=eng.device.type,
                 dtype=eng.amp_dtype,
             ):
+                try:
+                    logits, _, presents = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        attn_backend=eng.prefill_attn_backend,
+                        logits_positions=logits_positions,
+                    )
+                except TypeError:
+                    logits, _, presents = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        attn_backend=eng.prefill_attn_backend,
+                    )
+        else:
+            try:
+                logits, _, presents = eng.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=None,
+                    past_key_values=None,
+                    use_cache=True,
+                    attn_backend=eng.prefill_attn_backend,
+                    logits_positions=logits_positions,
+                )
+            except TypeError:
                 logits, _, presents = eng.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -2042,15 +2393,6 @@ class InferenceSession:
                     use_cache=True,
                     attn_backend=eng.prefill_attn_backend,
                 )
-        else:
-            logits, _, presents = eng.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=None,
-                past_key_values=None,
-                use_cache=True,
-                attn_backend=eng.prefill_attn_backend,
-            )
         if input_ids.size(0) == 1:  # temporarily only support batch size 1
             self._register_prefill_kv(presents, input_ids.size(1))
         self.kv_cache = presents
@@ -2151,11 +2493,9 @@ class InferenceSession:
         self.kv_cache = None
         if self.kv_manager is None:
             return
-        for layer_idx, block_ids in enumerate(self.block_ids_per_layer):
-            if not block_ids:
-                continue
-            self.kv_manager.free_blocks(layer_idx, block_ids)
-        self.block_ids_per_layer = [[] for _ in range(self.kv_manager.num_layers)]
+        if self.block_ids:
+            self.kv_manager.free_blocks(self.block_ids)
+        self.block_ids = []
 
     @torch.no_grad()
     def decode_step_batch(
@@ -2199,12 +2539,12 @@ class PrefixCacheEntry:
         self,
         key: PrefixCacheKey,
         prompt_length: int,
-        blocks_ids_per_layer: list[list[int]],
+        block_ids: list[int],
         last_logits: torch.Tensor,
     ) -> None:
         self.key = key
         self.prompt_length = int(prompt_length)
-        self.blocks_ids_per_layer = [list(ids) for ids in blocks_ids_per_layer]
+        self.block_ids = [int(x) for x in block_ids]
         self.last_logits = last_logits.detach().clone()
 
 
@@ -2285,7 +2625,7 @@ class _TokenTrie:
 class PrefixCache:
     def __init__(
         self,
-        kv_manager: "KVBlockManager",
+        kv_manager: "GlobalKVBlockManager",
         max_entries: int = 256,
     ) -> None:
         self.kv_manager = kv_manager
@@ -2294,9 +2634,8 @@ class PrefixCache:
         self._token_trie = _TokenTrie()
 
     def _release_entry(self, entry: PrefixCacheEntry) -> None:
-        for layer_idx, block_ids in enumerate(entry.blocks_ids_per_layer):
-            if block_ids:
-                self.kv_manager.free_blocks(layer_idx, block_ids)
+        if entry.block_ids:
+            self.kv_manager.free_blocks(entry.block_ids)
 
     def _evict_one(self) -> None:
         if not self._entries:
@@ -2341,15 +2680,13 @@ class PrefixCache:
         if session.kv_manager is None:
             return
         prompt_length = session.prompt_length
-        block_ids_per_layer = [list(ids) for ids in session.block_ids_per_layer]
-        for block_ids in block_ids_per_layer:
-            if not block_ids:
-                continue
+        block_ids = [int(x) for x in session.block_ids]
+        if block_ids:
             self.kv_manager.incref_blocks(block_ids)
         entry = PrefixCacheEntry(
             key=key,
             prompt_length=prompt_length,
-            blocks_ids_per_layer=block_ids_per_layer,
+            block_ids=block_ids,
             last_logits=last_logits,
         )
         while self.max_entries > 0 and len(self._entries) >= self.max_entries:
@@ -2369,13 +2706,9 @@ class PrefixCache:
             return None
         self._entries.move_to_end(key)
         session.prompt_length = entry.prompt_length
-        session.block_ids_per_layer = []
-        for block_ids in entry.blocks_ids_per_layer:
-            if not block_ids:
-                session.block_ids_per_layer.append([])
-                continue
-            self.kv_manager.incref_blocks(block_ids)
-            session.block_ids_per_layer.append(list(block_ids))
+        session.block_ids = [int(x) for x in entry.block_ids]
+        if entry.block_ids:
+            self.kv_manager.incref_blocks(entry.block_ids)
         last_logits = entry.last_logits.to(session.engine.device)
         return last_logits
 
@@ -2797,12 +3130,10 @@ class OnlineScheduler:
                     sess.finished = True
                     continue
                 sess.prompt_length = src_sess.prompt_length
-                sess.block_ids_per_layer = [[] for _ in range(kvm.num_layers)]
-                for layer_idx, block_ids in enumerate(src_sess.block_ids_per_layer):
-                    if not block_ids:
-                        continue
-                    kvm.incref_blocks(block_ids)
-                    sess.block_ids_per_layer[layer_idx] = list(block_ids)
+                sess.block_ids = [int(x) for x in src_sess.block_ids]
+                sess.clear_paged_block_table_cache()
+                if sess.block_ids:
+                    kvm.incref_blocks(sess.block_ids)
                 last_logits_per_req[idx] = last_logits_per_req[src]
 
         for idx, sess in enumerate(sessions):
@@ -4027,6 +4358,312 @@ class KVBlockInfo:
     block_index: int
     start: int
     length: int
+
+
+@dataclass(slots=True)
+class GlobalKVBlockInfo:
+    block_id: int
+    start: int
+    length: int
+
+
+class GlobalKVBlockManager:
+    def __init__(
+        self,
+        *,
+        num_layers: int,
+        num_heads: int,
+        head_dim: int,
+        block_size: int,
+        max_blocks: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> None:
+        self.num_layers = int(num_layers)
+        self.num_heads = int(num_heads)
+        self.head_dim = int(head_dim)
+        self.block_size = int(block_size)
+        self.max_blocks = int(max_blocks)
+        self.device = device
+        self.dtype = dtype
+
+        self._next_block_id: int = 0
+        self._free_block_ids: list[int] = []
+        self._block_infos: list[GlobalKVBlockInfo | None] = [
+            None for _ in range(self.max_blocks)
+        ]
+        self._block_refcounts: list[int] = [0 for _ in range(self.max_blocks)]
+
+        self._k_cache = torch.empty(
+            (
+                self.num_layers,
+                self.max_blocks,
+                self.num_heads,
+                self.block_size,
+                self.head_dim,
+            ),
+            device=self.device,
+            dtype=self.dtype,
+        )
+        self._v_cache = torch.empty_like(self._k_cache)
+
+    def _alloc_block_id(self) -> int:
+        if self._free_block_ids:
+            return int(self._free_block_ids.pop())
+        block_id = int(self._next_block_id)
+        if block_id >= int(self.max_blocks):
+            raise RuntimeError("no more KV blocks available")
+        self._next_block_id = block_id + 1
+        return block_id
+
+    def incref_blocks(self, block_ids: list[int]) -> None:
+        for bid in block_ids:
+            bid = int(bid)
+            self._block_refcounts[bid] += 1
+
+    def free_blocks(self, block_ids: list[int]) -> None:
+        for bid in block_ids:
+            bid = int(bid)
+            ref = int(self._block_refcounts[bid])
+            if ref <= 0:
+                continue
+            ref -= 1
+            self._block_refcounts[bid] = ref
+            if ref > 0:
+                continue
+            self._block_infos[bid] = None
+            self._free_block_ids.append(bid)
+
+    def clone_blocks_from(
+        self,
+        *,
+        src: "GlobalKVBlockManager",
+        src_block_ids: list[int],
+    ) -> list[int]:
+        if int(self.block_size) != int(src.block_size):
+            raise ValueError("KV block_size mismatch")
+        if int(self.num_layers) != int(src.num_layers):
+            raise ValueError("KV num_layers mismatch")
+        if int(self.num_heads) != int(src.num_heads) or int(self.head_dim) != int(
+            src.head_dim
+        ):
+            raise ValueError("KV shape mismatch")
+        if self.dtype != src.dtype:
+            raise ValueError("KV dtype mismatch")
+
+        out: list[int] = []
+        non_blocking = self.device.type == "cuda"
+        for src_bid in src_block_ids:
+            src_bid = int(src_bid)
+            info = src._block_infos[src_bid]
+            if info is None:
+                raise RuntimeError(f"missing GlobalKVBlockInfo for block {src_bid}")
+            dst_bid = self._alloc_block_id()
+            self._block_infos[dst_bid] = GlobalKVBlockInfo(
+                block_id=dst_bid,
+                start=int(info.start),
+                length=int(info.length),
+            )
+            self._block_refcounts[dst_bid] = 1
+            out.append(dst_bid)
+
+            length = int(info.length)
+            if length <= 0:
+                continue
+            self._k_cache[:, dst_bid, :, :length, :].copy_(
+                src._k_cache[:, src_bid, :, :length, :],
+                non_blocking=non_blocking,
+            )
+            self._v_cache[:, dst_bid, :, :length, :].copy_(
+                src._v_cache[:, src_bid, :, :length, :],
+                non_blocking=non_blocking,
+            )
+
+        return out
+
+    def _clone_blocks(
+        self,
+        *,
+        src_block_ids: list[int],
+        dst_block_ids: list[int],
+    ) -> None:
+        if len(src_block_ids) != len(dst_block_ids):
+            raise ValueError("src/dst block id size mismatch")
+        if not src_block_ids:
+            return
+        src_t = torch.tensor(
+            src_block_ids,
+            device=self.device,
+            dtype=torch.long,
+        )
+        dst_t = torch.tensor(
+            dst_block_ids,
+            device=self.device,
+            dtype=torch.long,
+        )
+        k_src = self._k_cache.index_select(1, src_t)
+        v_src = self._v_cache.index_select(1, src_t)
+        self._k_cache.index_copy_(1, dst_t, k_src)
+        self._v_cache.index_copy_(1, dst_t, v_src)
+
+    def reserve_append_tokens(
+        self,
+        *,
+        block_ids: list[int],
+        n_append: int,
+    ) -> None:
+        n_append = int(n_append)
+        if n_append <= 0:
+            return
+
+        # Ensure at least one block exists.
+        if not block_ids:
+            block_id = self._alloc_block_id()
+            info = GlobalKVBlockInfo(
+                block_id=block_id,
+                start=0,
+                length=0,
+            )
+            self._block_infos[block_id] = info
+            self._block_refcounts[block_id] = 1
+            block_ids.append(block_id)
+
+        block_size = int(self.block_size)
+
+        # If the last block is full, allocate a new empty one first.
+        last_bid = int(block_ids[-1])
+        last_info = self._block_infos[last_bid]
+        if last_info is None:
+            raise RuntimeError(f"missing GlobalKVBlockInfo for block {last_bid}")
+        if int(last_info.length) >= block_size:
+            block_id = self._alloc_block_id()
+            info = GlobalKVBlockInfo(
+                block_id=block_id,
+                start=int(last_info.start + last_info.length),
+                length=0,
+            )
+            self._block_infos[block_id] = info
+            self._block_refcounts[block_id] = 1
+            block_ids.append(block_id)
+            last_bid = block_id
+            last_info = info
+
+        # Copy-on-write for shared last block if we will write into it.
+        ref = int(self._block_refcounts[last_bid])
+        if ref != 1 and int(last_info.length) < block_size:
+            old_bid = last_bid
+            old_info = last_info
+            old_len = int(old_info.length)
+            self._block_refcounts[old_bid] = ref - 1
+            new_bid = self._alloc_block_id()
+            new_info = GlobalKVBlockInfo(
+                block_id=new_bid,
+                start=int(old_info.start),
+                length=int(old_len),
+            )
+            self._block_infos[new_bid] = new_info
+            self._block_refcounts[new_bid] = 1
+            block_ids[-1] = new_bid
+            self._clone_blocks(
+                src_block_ids=[old_bid],
+                dst_block_ids=[new_bid],
+            )
+            last_bid = new_bid
+            last_info = new_info
+
+        # Fill remaining space in the last block.
+        avail = block_size - int(last_info.length)
+        take = min(avail, n_append)
+        last_info.length += int(take)
+        n_append -= int(take)
+        if n_append <= 0:
+            return
+
+        # Allocate additional blocks for remaining tokens.
+        prev_info = last_info
+        while n_append > 0:
+            block_id = self._alloc_block_id()
+            info = GlobalKVBlockInfo(
+                block_id=block_id,
+                start=int(prev_info.start + prev_info.length),
+                length=0,
+            )
+            self._block_infos[block_id] = info
+            self._block_refcounts[block_id] = 1
+            block_ids.append(block_id)
+            fill_len = min(block_size, n_append)
+            info.length = int(fill_len)
+            n_append -= int(fill_len)
+            prev_info = info
+
+    def gather_sequence_into(
+        self,
+        *,
+        layer_idx: int,
+        block_ids: list[int],
+        total_len: int,
+        out_k: torch.Tensor,  # [H, >=total_len, D]
+        out_v: torch.Tensor,  # [H, >=total_len, D]
+    ) -> None:
+        layer_idx = int(layer_idx)
+        if not (0 <= layer_idx < int(self.num_layers)):
+            raise ValueError("layer_idx out of range")
+        cur = 0
+        for bid in block_ids:
+            bid = int(bid)
+            info = self._block_infos[bid]
+            if info is None:
+                continue
+            length = int(info.length)
+            if length <= 0:
+                continue
+            end = min(cur + length, int(total_len))
+            take = end - cur
+            if take <= 0:
+                break
+            k_block = self._k_cache[layer_idx, bid]
+            v_block = self._v_cache[layer_idx, bid]
+            out_k[:, cur:end, :].copy_(k_block[:, :take, :])
+            out_v[:, cur:end, :].copy_(v_block[:, :take, :])
+            cur = end
+            if cur >= int(total_len):
+                break
+
+    def copy_prefill_into_cache(
+        self,
+        *,
+        layer_idx: int,
+        block_ids: list[int],
+        key: torch.Tensor,  # [H, T, D]
+        value: torch.Tensor,  # [H, T, D]
+        total_len: int,
+    ) -> None:
+        layer_idx = int(layer_idx)
+        total_len = int(total_len)
+        if not (0 <= layer_idx < int(self.num_layers)):
+            raise ValueError("layer_idx out of range")
+        if total_len <= 0:
+            return
+        if key.dim() != 3 or value.dim() != 3:
+            raise ValueError("key/value must be [H, T, D]")
+        if int(key.size(1)) < total_len or int(value.size(1)) < total_len:
+            raise ValueError("key/value total_len out of range")
+        block_size = int(self.block_size)
+        for logical, bid in enumerate(block_ids):
+            bid = int(bid)
+            start = logical * block_size
+            if start >= total_len:
+                break
+            end = min(start + block_size, total_len)
+            take = end - start
+            if take <= 0:
+                break
+            self._k_cache[layer_idx, bid, :, :take, :].copy_(
+                key[:, start:end, :],
+            )
+            self._v_cache[layer_idx, bid, :, :take, :].copy_(
+                value[:, start:end, :],
+            )
 
 
 class KVBlockManager:

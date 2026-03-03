@@ -849,14 +849,11 @@ class PDDisaggregatedSchedulerManager:
 
         src_kvm = self.prefill_engine.kv_manager
         dst_kvm = self.decode_engine.kv_manager
-        for layer_idx in range(int(dst_kvm.num_layers)):
-            src_blocks = src_sess.block_ids_per_layer[layer_idx]
-            dst_blocks = dst_kvm.clone_blocks_from(
-                src=src_kvm,
-                layer_idx=layer_idx,
-                src_block_ids=src_blocks,
-            )
-            dst_sess.block_ids_per_layer[layer_idx] = dst_blocks
+        dst_sess.block_ids = dst_kvm.clone_blocks_from(
+            src=src_kvm,
+            src_block_ids=src_sess.block_ids,
+        )
+        dst_sess.clear_paged_block_table_cache()
 
         copy_evt: torch.cuda.Event | None = None
         if self.decode_engine.device.type == "cuda" and torch.cuda.is_available():
