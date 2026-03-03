@@ -1,0 +1,6 @@
+/.venv/
+/results/
+/*.json
+/*.png
+/sgemm_*
+*.o

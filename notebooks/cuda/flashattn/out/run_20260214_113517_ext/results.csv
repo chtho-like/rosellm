@@ -1,0 +1,107 @@
+backend,batch,heads,seq_len,head_dim,dtype,causal,avg_ms,tflops,max_abs_err,error
+flash_attn,1,32,256,64,fp16,True,0.024007999897003175,11.224759794906472,0.00048828125,
+torch_matmul_softmax,1,32,256,64,fp16,True,0.07270304203033447,3.7066403890990016,0.001953125,
+torch_sdpa,1,32,256,64,fp16,True,0.023752000331878662,11.345740494888465,,
+triton_v0_baseline,1,32,256,64,fp16,True,0.0408406400680542,6.598428221275407,0.00048828125,
+triton_v1_codegen_hints,1,32,256,64,fp16,True,0.04493855953216553,5.996721630721436,0.00048828125,
+triton_v2_autotune,1,32,256,64,fp16,True,0.027752959728240968,9.710100639312257,0.00048828125,
+triton_v3_fixed_best,1,32,256,64,fp16,True,0.027921280860900878,9.651564100605704,0.00048828125,
+triton_v4_causal_cutoff,1,32,256,64,fp16,True,0.021778559684753417,12.373822507126516,0.00048828125,
+triton_v5_even_fastpath,1,32,256,64,fp16,True,0.021811521053314208,12.355123301180893,0.00048828125,
+triton_v6_autotune_cutoff,1,32,256,64,fp16,True,0.02736448049545288,9.847949864963809,0.00048828125,
+triton_v7_fixed_best_cutoff,1,32,256,64,fp16,True,0.017630720138549806,15.284913485227953,0.00048828125,
+flash_attn,1,32,512,64,fp16,True,0.057164478302001956,18.820061128106598,,
+torch_matmul_softmax,1,32,512,64,fp16,True,0.2691267204284668,3.997518248233383,,
+torch_sdpa,1,32,512,64,fp16,True,0.05433279991149902,19.800911746723894,,
+triton_v0_baseline,1,32,512,64,fp16,True,0.06532896041870118,16.468025345954054,,
+triton_v1_codegen_hints,1,32,512,64,fp16,True,0.07555168151855468,14.239775401104547,,
+triton_v2_autotune,1,32,512,64,fp16,True,0.06286431789398193,17.113666576552344,,
+triton_v3_fixed_best,1,32,512,64,fp16,True,0.07547904014587402,14.253479825932969,,
+triton_v4_causal_cutoff,1,32,512,64,fp16,True,0.05791679859161377,18.575594683435753,,
+triton_v5_even_fastpath,1,32,512,64,fp16,True,0.05754623889923096,18.695209219214107,,
+triton_v6_autotune_cutoff,1,32,512,64,fp16,True,0.04528416156768799,23.757511208237823,,
+triton_v7_fixed_best_cutoff,1,32,512,64,fp16,True,0.04535679817199707,23.719464762929725,,
+flash_attn,1,32,1024,64,fp16,True,0.15647007942199706,27.475934158665805,,
+torch_matmul_softmax,1,32,1024,64,fp16,True,1.584660186767578,2.712986440815123,,
+torch_sdpa,1,32,1024,64,fp16,True,0.15513919830322265,27.711639914479917,,
+triton_v0_baseline,1,32,1024,64,fp16,True,0.24221920013427733,17.749053739822045,,
+triton_v1_codegen_hints,1,32,1024,64,fp16,True,0.2813430404663086,15.280852843825127,,
+triton_v2_autotune,1,32,1024,64,fp16,True,0.2326595115661621,18.478340176423153,,
+triton_v3_fixed_best,1,32,1024,64,fp16,True,0.28114240646362304,15.291757846414635,,
+triton_v4_causal_cutoff,1,32,1024,64,fp16,True,0.17539615631103517,24.511150588591978,,
+triton_v5_even_fastpath,1,32,1024,64,fp16,True,0.17395423889160155,24.714325028198907,,
+triton_v6_autotune_cutoff,1,32,1024,64,fp16,True,0.14077343940734863,30.539579185529053,,
+triton_v7_fixed_best_cutoff,1,32,1024,64,fp16,True,0.14061920166015626,30.573076430842413,,
+flash_attn,1,32,2048,64,fp16,True,0.5134694290161133,33.47474420226995,,
+torch_sdpa,1,32,2048,64,fp16,True,0.509439697265625,33.7395336175342,,
+triton_v0_baseline,1,32,2048,64,fp16,True,0.9394214630126954,18.296641570097613,,
+triton_v1_codegen_hints,1,32,2048,64,fp16,True,1.088556137084961,15.789959935395107,,
+triton_v2_autotune,1,32,2048,64,fp16,True,0.8715654754638672,19.721132004284605,,
+triton_v3_fixed_best,1,32,2048,64,fp16,True,1.0874489593505858,15.80603636079128,,
+triton_v4_causal_cutoff,1,32,2048,64,fp16,True,0.5902479934692383,29.12040020835038,,
+triton_v5_even_fastpath,1,32,2048,64,fp16,True,0.5836956787109375,29.447293202443095,,
+triton_v6_autotune_cutoff,1,32,2048,64,fp16,True,0.48359935760498046,35.542350339596446,,
+triton_v7_fixed_best_cutoff,1,32,2048,64,fp16,True,0.4846006393432617,35.468912742859345,,
+flash_attn,1,32,4096,64,fp16,True,1.8516883850097656,37.12085386960911,,
+torch_sdpa,1,32,4096,64,fp16,True,1.8419775390625,37.316553809328354,,
+triton_v0_baseline,1,32,4096,64,fp16,True,3.5656512451171873,19.277335114062996,,
+triton_v1_codegen_hints,1,32,4096,64,fp16,True,4.136660461425781,16.616363511814235,,
+triton_v2_autotune,1,32,4096,64,fp16,True,3.38105224609375,20.32984081550749,,
+triton_v3_fixed_best,1,32,4096,64,fp16,True,4.139560546875,16.604722451490595,,
+triton_v4_causal_cutoff,1,32,4096,64,fp16,True,2.1522979736328125,31.936216450541796,,
+triton_v5_even_fastpath,1,32,4096,64,fp16,True,2.126953582763672,32.3167625795985,,
+triton_v6_autotune_cutoff,1,32,4096,64,fp16,True,1.7945730590820312,38.30228789189575,,
+triton_v7_fixed_best_cutoff,1,32,4096,64,fp16,True,1.7956201171875,38.27995314491262,,
+flash_attn,1,32,256,128,fp16,True,0.030175039768218993,17.861387031796156,,
+torch_matmul_softmax,1,32,256,128,fp16,True,0.08593119621276855,6.272088458602354,,
+torch_sdpa,1,32,256,128,fp16,True,0.029109439849853515,18.515233092082745,,
+triton_v0_baseline,1,32,256,128,fp16,True,0.0521731185913086,10.33037852733966,,
+triton_v1_codegen_hints,1,32,256,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v2_autotune,1,32,256,128,fp16,True,0.0595088005065918,9.056947197924085,,
+triton_v3_fixed_best,1,32,256,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v4_causal_cutoff,1,32,256,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v5_even_fastpath,1,32,256,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v6_autotune_cutoff,1,32,256,128,fp16,True,0.03588576078414917,15.01899506163078,,
+triton_v7_fixed_best_cutoff,1,32,256,128,fp16,True,0.047337918281555175,11.3855463773109,,
+flash_attn,1,32,512,128,fp16,True,0.07847968101501465,27.417006850325286,,
+torch_matmul_softmax,1,32,512,128,fp16,True,0.3000022315979004,7.1722064883968635,,
+torch_sdpa,1,32,512,128,fp16,True,0.08020223617553711,26.828154108953562,,
+triton_v0_baseline,1,32,512,128,fp16,True,0.1409987163543701,15.26026624662467,,
+triton_v1_codegen_hints,1,32,512,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v2_autotune,1,32,512,128,fp16,True,0.13778623580932617,15.616058740276305,,
+triton_v3_fixed_best,1,32,512,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v4_causal_cutoff,1,32,512,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v5_even_fastpath,1,32,512,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v6_autotune_cutoff,1,32,512,128,fp16,True,0.0952137565612793,22.598393653496764,,
+triton_v7_fixed_best_cutoff,1,32,512,128,fp16,True,0.1407414436340332,15.28816172722343,,
+flash_attn,1,32,1024,128,fp16,True,0.25256736755371095,34.04368221944381,,
+torch_matmul_softmax,1,32,1024,128,fp16,True,1.6811952209472656,5.114410921984,,
+torch_sdpa,1,32,1024,128,fp16,True,0.257289924621582,33.41881036595692,,
+triton_v0_baseline,1,32,1024,128,fp16,True,0.5324953460693359,16.147226944741064,,
+triton_v1_codegen_hints,1,32,1024,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v2_autotune,1,32,1024,128,fp16,True,0.5228364944458008,16.445529895754692,,
+triton_v3_fixed_best,1,32,1024,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v4_causal_cutoff,1,32,1024,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v5_even_fastpath,1,32,1024,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v6_autotune_cutoff,1,32,1024,128,fp16,True,0.2901148796081543,29.63764978760616,,
+triton_v7_fixed_best_cutoff,1,32,1024,128,fp16,True,0.4693132781982422,18.321073788941444,,
+flash_attn,1,32,2048,128,fp16,True,0.9075574493408203,37.87806007098333,,
+torch_sdpa,1,32,2048,128,fp16,True,0.920928955078125,37.328086378914804,,
+triton_v0_baseline,1,32,2048,128,fp16,True,2.0760758972167968,16.558409849122288,,
+triton_v1_codegen_hints,1,32,2048,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v2_autotune,1,32,2048,128,fp16,True,2.0486431884765626,16.78013808229997,,
+triton_v3_fixed_best,1,32,2048,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v4_causal_cutoff,1,32,2048,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v5_even_fastpath,1,32,2048,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v6_autotune_cutoff,1,32,2048,128,fp16,True,0.9812268829345703,35.03421704182179,,
+triton_v7_fixed_best_cutoff,1,32,2048,128,fp16,True,1.7011660766601562,20.207618794921125,,
+flash_attn,1,32,4096,128,fp16,True,3.395478515625,40.4869320395908,,
+torch_sdpa,1,32,4096,128,fp16,True,3.4482421875,39.867416622400455,,
+triton_v0_baseline,1,32,4096,128,fp16,True,7.89596435546875,17.410477265995567,,
+triton_v1_codegen_hints,1,32,4096,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v2_autotune,1,32,4096,128,fp16,True,7.778961791992187,17.672346462161165,,
+triton_v3_fixed_best,1,32,4096,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v4_causal_cutoff,1,32,4096,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v5_even_fastpath,1,32,4096,128,fp16,True,,,,"out of resource: shared memory, Required: 131072, Hardware limit: 101376. Reducing block sizes or `num_stages` may help."
+triton_v6_autotune_cutoff,1,32,4096,128,fp16,True,3.5570950317382812,38.64740938248701,,
+triton_v7_fixed_best_cutoff,1,32,4096,128,fp16,True,6.442252197265625,21.339199971455535,,

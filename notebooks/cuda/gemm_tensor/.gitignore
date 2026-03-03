@@ -1,0 +1,8 @@
+/.venv/
+/results/
+/*.json
+/*.png
+/hgemm_*
+*.o
+*.ncu-rep
+*.nsys-rep

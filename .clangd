@@ -1,0 +1,25 @@
+CompileFlags:
+  Add:
+    - -I/usr/local/cuda/include
+    - -I/usr/include/nvshmem_12
+---
+If:
+  PathMatch: .*deepseek-ai/DeepEP/csrc/kernels/.*\\.(cu|cuh)$
+CompileFlags:
+  Add:
+    - -std=c++17
+    - -DNVSHMEM_HOSTLIB_ONLY
+    - -include
+    - assert.h
+    - -Wno-unknown-cuda-version
+---
+If:
+  PathMatch: .*deepseek-ai/DeepEP/csrc/.*\\.(cpp|hpp)$
+CompileFlags:
+  Add:
+    - -std=c++17
+    - -I/data/projects/rosellm/.conda/include/python3.11
+    - -I/data/projects/rosellm/.conda/lib/python3.11/site-packages/torch/include
+    - -I/data/projects/rosellm/.conda/lib/python3.11/site-packages/torch/include/torch/csrc/api/include
+    - -I/data/projects/rosellm/.conda/lib/python3.11/site-packages/torch/include/TH
+    - -I/data/projects/rosellm/.conda/lib/python3.11/site-packages/torch/include/THC

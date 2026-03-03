@@ -1,0 +1,10 @@
+/.venv/
+/out/
+/results/
+/__pycache__/
+*.o
+*.so
+*.a
+*.ncu-rep
+flashattn_*
+
