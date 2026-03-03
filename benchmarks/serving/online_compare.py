@@ -220,68 +220,60 @@ def _collect_versions(
     except Exception:
         pass
 
-    if (
-        vllm_python
-        and versions.get("vllm") == "not installed"
-        and Path(str(vllm_python)).is_file()
-    ):
+    def probe_pkg_version(python_exe: str, pkg: str) -> str | None:
         try:
             out = subprocess.check_output(
                 [
-                    str(vllm_python),
+                    python_exe,
                     "-c",
-                    "import importlib.metadata as md; print(md.version('vllm'))",
+                    (
+                        "import importlib.metadata as md; "
+                        f"print(md.version('{pkg}'))"
+                    ),
                 ],
                 stderr=subprocess.DEVNULL,
                 timeout=15,
             )
             probed = out.decode("utf-8", errors="replace").strip()
-            if probed:
-                versions["vllm"] = probed
+            return probed or None
         except Exception:
-            pass
+            return None
 
-    if (
-        sglang_python
-        and versions.get("sglang") == "not installed"
-        and Path(str(sglang_python)).is_file()
-    ):
+    def probe_python_version(python_exe: str) -> str | None:
         try:
             out = subprocess.check_output(
-                [
-                    str(sglang_python),
-                    "-c",
-                    "import importlib.metadata as md; print(md.version('sglang'))",
-                ],
+                [python_exe, "-c", "import sys; print(sys.version.split()[0])"],
                 stderr=subprocess.DEVNULL,
                 timeout=15,
             )
             probed = out.decode("utf-8", errors="replace").strip()
-            if probed:
-                versions["sglang"] = probed
+            return probed or None
         except Exception:
-            pass
+            return None
 
-    if (
-        trtllm_python
-        and versions.get("tensorrt_llm") == "not installed"
-        and Path(str(trtllm_python)).is_file()
-    ):
-        try:
-            out = subprocess.check_output(
-                [
-                    str(trtllm_python),
-                    "-c",
-                    "import importlib.metadata as md; print(md.version('tensorrt_llm'))",
-                ],
-                stderr=subprocess.DEVNULL,
-                timeout=15,
-            )
-            probed = out.decode("utf-8", errors="replace").strip()
-            if probed:
-                versions["tensorrt_llm"] = probed
-        except Exception:
-            pass
+    if vllm_python and Path(str(vllm_python)).is_file():
+        probed = probe_pkg_version(str(vllm_python), "vllm")
+        if probed:
+            versions["vllm"] = probed
+        py_ver = probe_python_version(str(vllm_python))
+        if py_ver:
+            versions["vllm_python_version"] = py_ver
+
+    if sglang_python and Path(str(sglang_python)).is_file():
+        probed = probe_pkg_version(str(sglang_python), "sglang")
+        if probed:
+            versions["sglang"] = probed
+        py_ver = probe_python_version(str(sglang_python))
+        if py_ver:
+            versions["sglang_python_version"] = py_ver
+
+    if trtllm_python and Path(str(trtllm_python)).is_file():
+        probed = probe_pkg_version(str(trtllm_python), "tensorrt_llm")
+        if probed:
+            versions["tensorrt_llm"] = probed
+        py_ver = probe_python_version(str(trtllm_python))
+        if py_ver:
+            versions["trtllm_python_version"] = py_ver
     git_rev = _try_git_rev()
     if git_rev:
         versions["git_rev"] = git_rev
@@ -2419,6 +2411,16 @@ def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     max_ctx = _resolve_model_max_context(args.model, tokenizer)
+    if args.max_input_len is not None and args.max_output_len is not None:
+        overhead = max(0, int(args.prompt_overhead_tokens))
+        target = (
+            int(args.max_input_len)
+            + int(args.max_output_len)
+            + overhead
+            + 1
+        )
+        if target > 0:
+            max_ctx = min(int(max_ctx), int(target))
     rows = _read_trace_a_jsonl(trace_path, n=int(args.n))
 
     summaries: list[OnlineBenchmarkSummary] = []

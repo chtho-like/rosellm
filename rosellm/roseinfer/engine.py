@@ -22,6 +22,35 @@ except Exception:  # pragma: no cover
 PrefixCacheKey = str | tuple[int, ...]
 
 
+def _kv_cache_max_tokens_from_total_utilization(
+    *,
+    free_bytes: int,
+    total_bytes: int,
+    gpu_memory_utilization: float,
+    bytes_per_token: int,
+) -> int:
+    if total_bytes <= 0:
+        raise ValueError("total_bytes must be > 0")
+    if free_bytes < 0:
+        raise ValueError("free_bytes must be >= 0")
+    if free_bytes > total_bytes:
+        raise ValueError("free_bytes must be <= total_bytes")
+    if gpu_memory_utilization <= 0.0 or gpu_memory_utilization > 1.0:
+        raise ValueError("gpu_memory_utilization must be in (0, 1]")
+    if bytes_per_token <= 0:
+        raise ValueError("bytes_per_token must be > 0")
+
+    used_bytes = int(total_bytes) - int(free_bytes)
+    target_bytes = int(float(total_bytes) * float(gpu_memory_utilization))
+    budget_bytes = int(target_bytes) - int(used_bytes)
+    if budget_bytes <= 0:
+        raise ValueError(
+            "not enough free memory for the requested gpu_memory_utilization "
+            f"(budget_bytes={budget_bytes})"
+        )
+    return max(1, int(budget_bytes) // int(bytes_per_token))
+
+
 @contextmanager
 def _maybe_nvtx_range(name: str, enabled: bool) -> Iterator[None]:
     if enabled:
@@ -65,6 +94,8 @@ class InferenceEngine:
         max_position_embeddings: Optional[int] = None,
         bf16: bool = False,
         kv_cache_max_concurrency: int = 256,
+        kv_cache_max_tokens: int | None = None,
+        kv_cache_mem_fraction: float | None = None,
         prefix_cache_max_entries: int = 256,
         use_paged_attention: bool = True,
         use_cuda_graph: bool = True,
@@ -77,6 +108,7 @@ class InferenceEngine:
         model: GPTModel | None = None,
         config: GPTConfig | None = None,
         tokenizer=None,
+        gpu_memory_utilization: float | None = None,
         use_varlen_prefill: bool = True,
     ) -> None:
         super().__init__()
@@ -196,23 +228,113 @@ class InferenceEngine:
             self.tokenizer, tokenizer_name=tokenizer_name
         )
         block_size = 64
-        max_context = max_position_embeddings or self.config.max_position_embeddings
-        max_concurrency = max(1, kv_cache_max_concurrency)
+        max_context = max_position_embeddings or int(self.config.max_position_embeddings)
+        max_context = int(max_context)
+        max_concurrency = max(1, int(kv_cache_max_concurrency))
         self.kv_cache_max_concurrency = max_concurrency
-        max_total_tokens = max_context * max_concurrency
+        if kv_cache_mem_fraction is not None:
+            kv_cache_mem_fraction = float(kv_cache_mem_fraction)
+        if kv_cache_mem_fraction is not None and (
+            kv_cache_mem_fraction <= 0.0 or kv_cache_mem_fraction > 1.0
+        ):
+            raise ValueError("kv_cache_mem_fraction must be in (0, 1]")
+
+        if gpu_memory_utilization is not None:
+            gpu_memory_utilization = float(gpu_memory_utilization)
+        if gpu_memory_utilization is not None and (
+            gpu_memory_utilization <= 0.0 or gpu_memory_utilization > 1.0
+        ):
+            raise ValueError("gpu_memory_utilization must be in (0, 1]")
+
+        if kv_cache_max_tokens is not None:
+            kv_cache_max_tokens = int(kv_cache_max_tokens)
+            if kv_cache_max_tokens <= 0:
+                raise ValueError("kv_cache_max_tokens must be > 0")
+
+        if (
+            kv_cache_max_tokens is None
+            and kv_cache_mem_fraction is None
+            and gpu_memory_utilization is None
+            and self.device.type == "cuda"
+            and torch.cuda.is_available()
+            and max_context >= 8192
+        ):
+            frac_env = os.environ.get("ROSEINFER_KV_CACHE_MEM_FRACTION", "0.5")
+            try:
+                kv_cache_mem_fraction = float(frac_env)
+            except ValueError:
+                kv_cache_mem_fraction = 0.5
+            kv_cache_mem_fraction = max(0.05, min(0.95, float(kv_cache_mem_fraction)))
+
+        head_dim = int(self.config.d_model) // int(self.config.n_heads)
+        kv_dtype = self.amp_dtype if self.use_amp else next(self.model.parameters()).dtype
+
+        if kv_cache_max_tokens is not None:
+            max_total_tokens = int(kv_cache_max_tokens)
+        elif (
+            kv_cache_mem_fraction is not None
+            and self.device.type == "cuda"
+            and torch.cuda.is_available()
+        ):
+            free_bytes, _ = torch.cuda.mem_get_info()
+            bytes_per_elem = int(torch.empty((), dtype=kv_dtype).element_size())
+            bytes_per_token = (
+                int(self.config.n_layers)
+                * 2
+                * int(self.config.n_heads)
+                * int(head_dim)
+                * bytes_per_elem
+            )
+            if bytes_per_token <= 0:
+                raise ValueError("invalid KV cache bytes_per_token")
+            target_bytes = int(float(free_bytes) * float(kv_cache_mem_fraction))
+            max_total_tokens = max(1, target_bytes // bytes_per_token)
+        elif (
+            gpu_memory_utilization is not None
+            and self.device.type == "cuda"
+            and torch.cuda.is_available()
+        ):
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            bytes_per_elem = int(torch.empty((), dtype=kv_dtype).element_size())
+            bytes_per_token = (
+                int(self.config.n_layers)
+                * 2
+                * int(self.config.n_heads)
+                * int(head_dim)
+                * bytes_per_elem
+            )
+            max_total_tokens = _kv_cache_max_tokens_from_total_utilization(
+                free_bytes=int(free_bytes),
+                total_bytes=int(total_bytes),
+                gpu_memory_utilization=float(gpu_memory_utilization),
+                bytes_per_token=int(bytes_per_token),
+            )
+        else:
+            max_total_tokens = max_context * max_concurrency
+
+        per_seq_budget = max(1, int(max_total_tokens) // int(max_concurrency))
+        if per_seq_budget < max_context:
+            print(
+                "[warn] KV cache per-seq budget is smaller than max_context; "
+                "clamping max_position_embeddings from "
+                f"{max_context} to {per_seq_budget} "
+                f"(max_total_tokens={max_total_tokens}, "
+                f"kv_cache_max_concurrency={max_concurrency})"
+            )
+            max_context = int(per_seq_budget)
+            self.config.max_position_embeddings = int(per_seq_budget)
         max_blocks = (max_total_tokens + block_size - 1) // block_size
         self.block_size = block_size
         self.max_context = max_context
         self.max_blocks_per_seq = (max_context + block_size - 1) // block_size
-        model_dtype = next(self.model.parameters()).dtype
         self.kv_manager = GlobalKVBlockManager(
             num_layers=self.config.n_layers,
             num_heads=self.config.n_heads,
-            head_dim=self.config.d_model // self.config.n_heads,
+            head_dim=head_dim,
             block_size=block_size,
             max_blocks=max_blocks,
             device=self.device,
-            dtype=self.amp_dtype if self.use_amp else model_dtype,
+            dtype=kv_dtype,
         )
         self.prefix_cache = PrefixCache(
             self.kv_manager,
@@ -482,12 +604,52 @@ class InferenceEngine:
             position_ids.masked_fill_(attention_mask == 0, 0)
             attn_mask_for_model = attention_mask
 
+        logits_positions = torch.full(
+            (int(input_ids.size(0)),),
+            int(input_ids.size(1)) - 1,
+            device=input_ids.device,
+            dtype=torch.long,
+        )
         with record_function("roseinfer.prefill_batch.model_forward"):
             if self.use_amp:
                 with autocast(
                     device_type=self.device.type,
                     dtype=self.amp_dtype,
                 ):
+                    try:
+                        logits, _, presents = self.model(
+                            input_ids=input_ids,
+                            attention_mask=attn_mask_for_model,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=True,
+                            position_ids=position_ids,
+                            attn_backend=self.prefill_attn_backend,
+                            logits_positions=logits_positions,
+                        )
+                    except TypeError:
+                        logits, _, presents = self.model(
+                            input_ids=input_ids,
+                            attention_mask=attn_mask_for_model,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=True,
+                            position_ids=position_ids,
+                            attn_backend=self.prefill_attn_backend,
+                        )
+            else:
+                try:
+                    logits, _, presents = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attn_mask_for_model,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        position_ids=position_ids,
+                        attn_backend=self.prefill_attn_backend,
+                        logits_positions=logits_positions,
+                    )
+                except TypeError:
                     logits, _, presents = self.model(
                         input_ids=input_ids,
                         attention_mask=attn_mask_for_model,
@@ -497,16 +659,6 @@ class InferenceEngine:
                         position_ids=position_ids,
                         attn_backend=self.prefill_attn_backend,
                     )
-            else:
-                logits, _, presents = self.model(
-                    input_ids=input_ids,
-                    attention_mask=attn_mask_for_model,
-                    labels=None,
-                    past_key_values=None,
-                    use_cache=True,
-                    position_ids=position_ids,
-                    attn_backend=self.prefill_attn_backend,
-                )
         kvm = self.kv_manager
         with record_function("roseinfer.prefill_batch.register_kv"):
             for b, sess in enumerate(sessions):
@@ -674,6 +826,11 @@ class InferenceEngine:
             device=self.device,
             dtype=torch.long,
         )
+        last_pos = torch.tensor(
+            [int(n) - 1 for n in chunk_lens],
+            device=self.device,
+            dtype=torch.long,
+        )
 
         slot_mapping = torch.tensor(
             [int(sess.paged_slot_id) for sess in sessions],
@@ -745,7 +902,8 @@ class InferenceEngine:
             kv_indptr=kv_indptr,
             kv_indices=kv_indices,
             kv_last_page_len=kv_last_page_len,
-            num_heads=int(kvm.num_heads),
+            num_q_heads=int(kvm.num_heads),
+            num_kv_heads=int(kvm.num_heads),
             head_dim=int(kvm.head_dim),
             page_size=int(block_size),
             sm_scale=float(kvm.head_dim**-0.5),
@@ -820,6 +978,43 @@ class InferenceEngine:
                     device_type=eng.device.type,
                     dtype=eng.amp_dtype,
                 ):
+                    try:
+                        logits, _ = eng.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=False,
+                            position_ids=position_ids,
+                            paged_kv_cache=paged,
+                            attn_backend="flashinfer_paged",
+                            logits_positions=last_pos,
+                        )
+                    except TypeError:
+                        logits, _ = eng.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=None,
+                            past_key_values=None,
+                            use_cache=False,
+                            position_ids=position_ids,
+                            paged_kv_cache=paged,
+                            attn_backend="flashinfer_paged",
+                        )
+            else:
+                try:
+                    logits, _ = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=False,
+                        position_ids=position_ids,
+                        paged_kv_cache=paged,
+                        attn_backend="flashinfer_paged",
+                        logits_positions=last_pos,
+                    )
+                except TypeError:
                     logits, _ = eng.model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
@@ -830,25 +1025,11 @@ class InferenceEngine:
                         paged_kv_cache=paged,
                         attn_backend="flashinfer_paged",
                     )
-            else:
-                logits, _ = eng.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=None,
-                    past_key_values=None,
-                    use_cache=False,
-                    position_ids=position_ids,
-                    paged_kv_cache=paged,
-                    attn_backend="flashinfer_paged",
-                )
 
         # Return last logits for each sequence's last valid token in this chunk.
+        if logits.dim() == 3 and int(logits.size(1)) == 1:
+            return logits[:, -1, :]
         bsz = int(input_ids.size(0))
-        last_pos = torch.tensor(
-            [int(n) - 1 for n in chunk_lens],
-            device=self.device,
-            dtype=torch.long,
-        )
         row = torch.arange(bsz, device=self.device, dtype=torch.long)
         return logits[row, last_pos, :]
 
@@ -2096,8 +2277,45 @@ class InferenceSession:
 
         eng = self.engine
         input_ids = eng._maybe_truncate(prompt_ids)
+        logits_positions = torch.full(
+            (int(input_ids.size(0)),),
+            int(input_ids.size(1)) - 1,
+            device=input_ids.device,
+            dtype=torch.long,
+        )
         if eng.use_amp:
             with autocast(device_type=eng.device.type, dtype=eng.amp_dtype):
+                try:
+                    logits, _, presents = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=None,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        attn_backend=eng.prefill_attn_backend,
+                        logits_positions=logits_positions,
+                    )
+                except TypeError:
+                    logits, _, presents = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=None,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        attn_backend=eng.prefill_attn_backend,
+                    )
+        else:
+            try:
+                logits, _, presents = eng.model(
+                    input_ids=input_ids,
+                    attention_mask=None,
+                    labels=None,
+                    past_key_values=None,
+                    use_cache=True,
+                    attn_backend=eng.prefill_attn_backend,
+                    logits_positions=logits_positions,
+                )
+            except TypeError:
                 logits, _, presents = eng.model(
                     input_ids=input_ids,
                     attention_mask=None,
@@ -2106,15 +2324,6 @@ class InferenceSession:
                     use_cache=True,
                     attn_backend=eng.prefill_attn_backend,
                 )
-        else:
-            logits, _, presents = eng.model(
-                input_ids=input_ids,
-                attention_mask=None,
-                labels=None,
-                past_key_values=None,
-                use_cache=True,
-                attn_backend=eng.prefill_attn_backend,
-            )
         self._register_prefill_kv(presents, input_ids.size(1))
         self.kv_cache = presents
         return logits  # [..., T0, vocab]
@@ -2131,11 +2340,48 @@ class InferenceSession:
         input_ids = eng._maybe_truncate(input_ids)
         if attention_mask is not None and input_ids.size(1) < attention_mask.size(1):
             attention_mask = attention_mask[:, -input_ids.size(1) :]
+        logits_positions = torch.full(
+            (int(input_ids.size(0)),),
+            int(input_ids.size(1)) - 1,
+            device=input_ids.device,
+            dtype=torch.long,
+        )
         if eng.use_amp:
             with autocast(
                 device_type=eng.device.type,
                 dtype=eng.amp_dtype,
             ):
+                try:
+                    logits, _, presents = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        attn_backend=eng.prefill_attn_backend,
+                        logits_positions=logits_positions,
+                    )
+                except TypeError:
+                    logits, _, presents = eng.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=None,
+                        past_key_values=None,
+                        use_cache=True,
+                        attn_backend=eng.prefill_attn_backend,
+                    )
+        else:
+            try:
+                logits, _, presents = eng.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=None,
+                    past_key_values=None,
+                    use_cache=True,
+                    attn_backend=eng.prefill_attn_backend,
+                    logits_positions=logits_positions,
+                )
+            except TypeError:
                 logits, _, presents = eng.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -2144,15 +2390,6 @@ class InferenceSession:
                     use_cache=True,
                     attn_backend=eng.prefill_attn_backend,
                 )
-        else:
-            logits, _, presents = eng.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=None,
-                past_key_values=None,
-                use_cache=True,
-                attn_backend=eng.prefill_attn_backend,
-            )
         if input_ids.size(0) == 1:  # temporarily only support batch size 1
             self._register_prefill_kv(presents, input_ids.size(1))
         self.kv_cache = presents

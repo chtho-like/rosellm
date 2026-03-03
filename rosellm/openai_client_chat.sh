@@ -2,6 +2,13 @@
 
 set -euo pipefail
 
+# Examples:
+# - Chat with the server started by openai_server.sh:
+#     ./openai_client_chat.sh
+#
+# - Chat with a Qwen3 server:
+#     ROSEINFER_MODEL="Qwen/Qwen3-0.6B" ./openai_client_chat.sh
+
 BASE_URL="${ROSEINFER_BASE_URL:-http://127.0.0.1:8888/v1}"
 MODEL="${ROSEINFER_MODEL:-gpt2}"
 MAX_TOKENS="${ROSEINFER_MAX_TOKENS:-128}"

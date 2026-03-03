@@ -1,5 +1,6 @@
 **/.vscode/
 .vscode
+.conda
 notebooks/.vscode/
 .conda/
 .conda-*/
