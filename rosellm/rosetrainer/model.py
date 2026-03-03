@@ -435,6 +435,7 @@ class GPTModel(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         paged_kv_cache: Optional[PagedKVCache] = None,
         attn_backend: str | None = None,
+        logits_positions: Optional[torch.Tensor] = None,  # [B]
     ):
         bsz, seq_len = input_ids.size()
         device = input_ids.device
@@ -522,7 +523,21 @@ class GPTModel(nn.Module):
             )
         else:
             x = self.ln_f(x)
-        logits = self.lm_head(x)
+        if logits_positions is not None:
+            if labels is not None:
+                raise ValueError("logits_positions is not supported with labels")
+            logits_positions = logits_positions.to(device=device, dtype=torch.long)
+            if logits_positions.dim() != 1 or int(logits_positions.numel()) != bsz:
+                raise ValueError("logits_positions must be a 1D tensor of shape [B]")
+            if int(logits_positions.min().item()) < 0:
+                raise ValueError("logits_positions must be >= 0")
+            if int(logits_positions.max().item()) >= int(seq_len):
+                raise ValueError("logits_positions must be < seq_len")
+            row = torch.arange(bsz, device=device, dtype=torch.long)
+            x_sel = x[row, logits_positions, :]  # [B, D]
+            logits = self.lm_head(x_sel).unsqueeze(1)  # [B, 1, V]
+        else:
+            logits = self.lm_head(x)
         loss = None
         if labels is not None:
             shift_logits = logits[:, :-1, :].contiguous()  # [B, T-1, V]

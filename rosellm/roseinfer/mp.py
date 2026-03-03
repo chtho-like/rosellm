@@ -70,6 +70,9 @@ class EngineProcessArgs:
     overlap_schedule: bool
     max_batch_size: int
     kv_cache_max_concurrency: int = 256
+    kv_cache_max_tokens: int | None = None
+    kv_cache_mem_fraction: float | None = None
+    gpu_memory_utilization: float | None = None
     prefix_cache_max_entries: int = 256
     toy: ToyEngineSpec | None = None
     mp_torch_num_threads: int | None = None
@@ -652,18 +655,45 @@ def _build_engine(args: EngineProcessArgs) -> InferenceEngine:
             tokenizer=tokenizer,
         )
     if args.hf_model_id is not None:
-        from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
+        from transformers import AutoConfig
 
         use_amp = (not bool(args.no_amp)) and device.type == "cuda"
         if use_amp:
             dtype = torch.bfloat16 if bool(args.bf16) else torch.float16
         else:
             dtype = torch.float32
-        model, config, tokenizer = load_gpt2_from_hf_pretrained(
-            args.hf_model_id,
-            device=device,
-            dtype=dtype,
-        )
+        model_type = str(
+            getattr(
+                AutoConfig.from_pretrained(
+                    args.hf_model_id,
+                    trust_remote_code=False,
+                ),
+                "model_type",
+                "",
+            )
+            or ""
+        ).lower()
+        if model_type == "gpt2":
+            from rosellm.rosetrainer.hf_gpt2 import load_gpt2_from_hf_pretrained
+
+            model, config, tokenizer = load_gpt2_from_hf_pretrained(
+                args.hf_model_id,
+                device=device,
+                dtype=dtype,
+            )
+        elif model_type == "qwen3":
+            from rosellm.rosetrainer.hf_qwen3 import load_qwen3_from_hf_pretrained
+
+            model, config, tokenizer = load_qwen3_from_hf_pretrained(
+                args.hf_model_id,
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            raise ValueError(
+                "unsupported hf_model_id model_type="
+                f"{model_type!r} (supported: gpt2, qwen3)"
+            )
         return InferenceEngine(
             checkpoint_path=None,
             tokenizer_name=args.tokenizer_name,
@@ -671,6 +701,9 @@ def _build_engine(args: EngineProcessArgs) -> InferenceEngine:
             use_amp=use_amp,
             bf16=bool(args.bf16),
             kv_cache_max_concurrency=int(args.kv_cache_max_concurrency),
+            kv_cache_max_tokens=args.kv_cache_max_tokens,
+            kv_cache_mem_fraction=args.kv_cache_mem_fraction,
+            gpu_memory_utilization=args.gpu_memory_utilization,
             prefix_cache_max_entries=int(args.prefix_cache_max_entries),
             use_paged_attention=bool(args.paged_attn),
             use_cuda_graph=bool(args.cuda_graph),
@@ -693,6 +726,9 @@ def _build_engine(args: EngineProcessArgs) -> InferenceEngine:
         use_amp=not bool(args.no_amp),
         bf16=bool(args.bf16),
         kv_cache_max_concurrency=int(args.kv_cache_max_concurrency),
+        kv_cache_max_tokens=args.kv_cache_max_tokens,
+        kv_cache_mem_fraction=args.kv_cache_mem_fraction,
+        gpu_memory_utilization=args.gpu_memory_utilization,
         prefix_cache_max_entries=int(args.prefix_cache_max_entries),
         use_paged_attention=bool(args.paged_attn),
         use_cuda_graph=bool(args.cuda_graph),

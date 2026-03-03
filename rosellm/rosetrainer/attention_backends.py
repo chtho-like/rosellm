@@ -46,7 +46,8 @@ def _flashinfer_prefill_plan(
     device: torch.device,
     batch_size: int,
     lengths: torch.Tensor,  # [B] int32 cuda
-    num_heads: int,
+    num_q_heads: int,
+    num_kv_heads: int,
     head_dim: int,
     sm_scale: float,
     causal: bool,
@@ -89,7 +90,8 @@ def _flashinfer_prefill_plan(
     sig = (
         int(batch_size),
         tuple(int(x) for x in lengths_cpu.tolist()),
-        int(num_heads),
+        int(num_q_heads),
+        int(num_kv_heads),
         int(head_dim),
         bool(causal),
         float(sm_scale),
@@ -110,8 +112,8 @@ def _flashinfer_prefill_plan(
         cache.wrapper.plan(
             qo_indptr=qo_indptr,
             kv_indptr=kv_indptr,
-            num_qo_heads=int(num_heads),
-            num_kv_heads=int(num_heads),
+            num_qo_heads=int(num_q_heads),
+            num_kv_heads=int(num_kv_heads),
             head_dim_qk=int(head_dim),
             causal=bool(causal),
             sm_scale=float(sm_scale),
@@ -129,7 +131,8 @@ def _flashinfer_paged_prefill_plan(
     kv_indptr: torch.Tensor,  # [B+1] int32 cuda
     kv_indices: torch.Tensor,  # [kv_indptr[-1]] int32 cuda
     kv_last_page_len: torch.Tensor,  # [B] int32 cuda
-    num_heads: int,
+    num_q_heads: int,
+    num_kv_heads: int,
     head_dim: int,
     page_size: int,
     sm_scale: float,
@@ -183,7 +186,8 @@ def _flashinfer_paged_prefill_plan(
         tuple(int(x) for x in qo_lens.tolist()),
         tuple(int(x) for x in kv_lens.tolist()),
         tuple(int(x) for x in kv_indices_cpu.tolist()),
-        int(num_heads),
+        int(num_q_heads),
+        int(num_kv_heads),
         int(head_dim),
         int(page_size),
         bool(causal),
@@ -196,8 +200,8 @@ def _flashinfer_paged_prefill_plan(
             paged_kv_indptr=kv_indptr,
             paged_kv_indices=kv_indices,
             paged_kv_last_page_len=kv_last_page_len,
-            num_qo_heads=int(num_heads),
-            num_kv_heads=int(num_heads),
+            num_qo_heads=int(num_q_heads),
+            num_kv_heads=int(num_kv_heads),
             head_dim_qk=int(head_dim),
             page_size=int(page_size),
             causal=bool(causal),
@@ -211,9 +215,9 @@ def _flashinfer_paged_prefill_plan(
 
 def prefill_attention_flashinfer_paged(
     *,
-    q: torch.Tensor,  # [B, H, T, D]
-    k: torch.Tensor,  # [B, H, T, D]
-    v: torch.Tensor,  # [B, H, T, D]
+    q: torch.Tensor,  # [B, Hq, T, D]
+    k: torch.Tensor,  # [B, Hkv, T, D]
+    v: torch.Tensor,  # [B, Hkv, T, D]
     attention_mask: torch.Tensor | None,  # [B, T] or None
     paged_kv_cache: Any,
     layer_idx: int,
@@ -226,9 +230,19 @@ def prefill_attention_flashinfer_paged(
         )
     if q.dim() != 4 or k.dim() != 4 or v.dim() != 4:
         raise ValueError("q/k/v must be 4D [B, H, T, D]")
-    if q.shape != k.shape or q.shape != v.shape:
-        raise ValueError("q/k/v must have the same shape")
-    bsz, n_heads, seq_len, head_dim = q.shape
+    if (
+        int(q.size(0)) != int(k.size(0))
+        or int(q.size(0)) != int(v.size(0))
+        or int(k.size(2)) != int(q.size(2))
+        or int(v.size(2)) != int(q.size(2))
+        or int(k.size(3)) != int(q.size(3))
+        or int(v.size(3)) != int(q.size(3))
+    ):
+        raise ValueError("q/k/v must match on [B, T, D]")
+    if k.shape != v.shape:
+        raise ValueError("k/v must have the same shape")
+    bsz, n_q_heads, seq_len, head_dim = q.shape
+    n_kv_heads = int(k.size(1))
     device = q.device
     if device.type != "cuda":
         raise RuntimeError("flashinfer paged prefill attention backend requires CUDA")
@@ -314,17 +328,17 @@ def prefill_attention_flashinfer_paged(
     q_flat = (
         q.permute(0, 2, 1, 3)
         .contiguous()
-        .view(int(bsz * seq_len), int(n_heads), int(head_dim))
+        .view(int(bsz * seq_len), int(n_q_heads), int(head_dim))
     )
     k_flat = (
         k.permute(0, 2, 1, 3)
         .contiguous()
-        .view(int(bsz * seq_len), int(n_heads), int(head_dim))
+        .view(int(bsz * seq_len), int(n_kv_heads), int(head_dim))
     )
     v_flat = (
         v.permute(0, 2, 1, 3)
         .contiguous()
-        .view(int(bsz * seq_len), int(n_heads), int(head_dim))
+        .view(int(bsz * seq_len), int(n_kv_heads), int(head_dim))
     )
     if attention_mask is None:
         idx = torch.arange(int(bsz * seq_len), device=device, dtype=torch.long)
@@ -368,7 +382,8 @@ def prefill_attention_flashinfer_paged(
         kv_indptr=kv_indptr,
         kv_indices=kv_indices,
         kv_last_page_len=kv_last_page_len,
-        num_heads=int(n_heads),
+        num_q_heads=int(n_q_heads),
+        num_kv_heads=int(n_kv_heads),
         head_dim=int(head_dim),
         page_size=int(page_size),
         sm_scale=float(sm_scale),
@@ -376,10 +391,10 @@ def prefill_attention_flashinfer_paged(
         q_dtype=q.dtype,
     )
     o_ragged = wrapper.run(q_ragged, (k_layer, v_layer))
-    o_flat = q_flat.new_zeros((int(bsz * seq_len), int(n_heads), int(head_dim)))
+    o_flat = q_flat.new_zeros((int(bsz * seq_len), int(n_q_heads), int(head_dim)))
     o_flat.index_copy_(0, idx, o_ragged)
     return (
-        o_flat.view(int(bsz), int(seq_len), int(n_heads), int(head_dim))
+        o_flat.view(int(bsz), int(seq_len), int(n_q_heads), int(head_dim))
         .permute(0, 2, 1, 3)
         .contiguous()
     )
@@ -422,18 +437,28 @@ def _ragged_token_indices(
 
 def prefill_attention_flashinfer(
     *,
-    q: torch.Tensor,  # [B, H, T, D]
-    k: torch.Tensor,  # [B, H, T, D]
-    v: torch.Tensor,  # [B, H, T, D]
+    q: torch.Tensor,  # [B, Hq, T, D]
+    k: torch.Tensor,  # [B, Hkv, T, D]
+    v: torch.Tensor,  # [B, Hkv, T, D]
     attention_mask: Optional[torch.Tensor],  # [B, T] or None
     sm_scale: float,
     causal: bool,
 ) -> torch.Tensor:
     if q.dim() != 4 or k.dim() != 4 or v.dim() != 4:
         raise ValueError("q/k/v must be 4D [B, H, T, D]")
-    if q.shape != k.shape or q.shape != v.shape:
-        raise ValueError("q/k/v must have the same shape")
-    bsz, n_heads, seq_len, head_dim = q.shape
+    if (
+        int(q.size(0)) != int(k.size(0))
+        or int(q.size(0)) != int(v.size(0))
+        or int(k.size(2)) != int(q.size(2))
+        or int(v.size(2)) != int(q.size(2))
+        or int(k.size(3)) != int(q.size(3))
+        or int(v.size(3)) != int(q.size(3))
+    ):
+        raise ValueError("q/k/v must match on [B, T, D]")
+    if k.shape != v.shape:
+        raise ValueError("k/v must have the same shape")
+    bsz, n_q_heads, seq_len, head_dim = q.shape
+    n_kv_heads = int(k.size(1))
     device = q.device
     if attention_mask is None:
         lengths = torch.full(
@@ -457,7 +482,8 @@ def prefill_attention_flashinfer(
         device=device,
         batch_size=int(bsz),
         lengths=lengths,
-        num_heads=int(n_heads),
+        num_q_heads=int(n_q_heads),
+        num_kv_heads=int(n_kv_heads),
         head_dim=int(head_dim),
         sm_scale=float(sm_scale),
         causal=bool(causal),
@@ -468,17 +494,17 @@ def prefill_attention_flashinfer(
     q_flat = (
         q.permute(0, 2, 1, 3)
         .contiguous()
-        .view(int(bsz * seq_len), int(n_heads), int(head_dim))
+        .view(int(bsz * seq_len), int(n_q_heads), int(head_dim))
     )
     k_flat = (
         k.permute(0, 2, 1, 3)
         .contiguous()
-        .view(int(bsz * seq_len), int(n_heads), int(head_dim))
+        .view(int(bsz * seq_len), int(n_kv_heads), int(head_dim))
     )
     v_flat = (
         v.permute(0, 2, 1, 3)
         .contiguous()
-        .view(int(bsz * seq_len), int(n_heads), int(head_dim))
+        .view(int(bsz * seq_len), int(n_kv_heads), int(head_dim))
     )
 
     if idx is None:
@@ -489,11 +515,11 @@ def prefill_attention_flashinfer(
         v_ragged = v_flat.index_select(0, idx)
 
         o_ragged = wrapper.run(q_ragged, k_ragged, v_ragged)
-        o_flat = q_flat.new_zeros((int(bsz * seq_len), int(n_heads), int(head_dim)))
+        o_flat = q_flat.new_zeros((int(bsz * seq_len), int(n_q_heads), int(head_dim)))
         o_flat.index_copy_(0, idx, o_ragged)
     # [B, T, H, D] -> [B, H, T, D]
     return (
-        o_flat.view(int(bsz), int(seq_len), int(n_heads), int(head_dim))
+        o_flat.view(int(bsz), int(seq_len), int(n_q_heads), int(head_dim))
         .permute(0, 2, 1, 3)
         .contiguous()
     )
