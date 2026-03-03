@@ -12,6 +12,7 @@ from rosellm.rosetrainer.attention_backends import (
     prefill_attention_flashattn,
     prefill_attention_flashinfer,
     prefill_attention_flashinfer_paged,
+    prefill_attention_flashinfer_paged_varlen,
 )
 from rosellm.rosetrainer.config import GPTConfig
 from rosellm.rosetrainer.fused_layernorm import add_layer_norm_, layer_norm
@@ -222,6 +223,53 @@ class MultiHeadSelfAttention(nn.Module):
             return out, (k, v)
         return out
 
+    def forward_varlen(
+        self,
+        x: torch.Tensor,  # [N, D]
+        *,
+        paged_kv_cache: PagedKVCache,
+        layer_idx: int,
+        attn_backend: str | None = None,
+    ) -> torch.Tensor:
+        if x.dim() != 2:
+            raise ValueError("varlen attention expects x to be 2D [N, D]")
+        if paged_kv_cache is None:
+            raise ValueError("paged_kv_cache is required for varlen attention")
+        backend = (attn_backend or "naive").lower()
+        if backend not in ("flashinfer_paged", "flashinfer-paged"):
+            raise ValueError(
+                "paged varlen prefill requires attn_backend='flashinfer_paged' "
+                f"(got attn_backend={attn_backend})"
+            )
+        if self.training or x.requires_grad:
+            raise ValueError("paged varlen attention only supports inference")
+
+        n_tokens, _ = x.size()
+        qkv = self.qkv_proj(x)  # [N, 3*D]
+        head_dim = int(self.d_head)
+        local_heads = int(self.local_heads)
+        proj_dim = int(local_heads * head_dim)
+        q_proj, k_proj, v_proj = qkv.split(proj_dim, dim=-1)
+        q = q_proj.view(int(n_tokens), local_heads, head_dim)
+        k = k_proj.view(int(n_tokens), local_heads, head_dim)
+        v = v_proj.view(int(n_tokens), local_heads, head_dim)
+        attn_out = prefill_attention_flashinfer_paged_varlen(
+            q=q,
+            k=k,
+            v=v,
+            paged_kv_cache=paged_kv_cache,
+            layer_idx=int(layer_idx),
+            sm_scale=float(self.d_head**-0.5),
+            causal=True,
+        )  # [N, H, D]
+        attn_out = attn_out.contiguous().view(
+            int(n_tokens),
+            int(local_heads * head_dim),
+        )
+        out = self.out_proj(attn_out)
+        out = self.dropout(out)
+        return out
+
 
 def gelu_new(x: torch.Tensor) -> torch.Tensor:
     return (
@@ -377,6 +425,59 @@ class TransformerBlock(nn.Module):
                 x = x + mlp_out
         if return_kv:
             return x, present_kv
+        return x
+
+    def forward_varlen(
+        self,
+        x: torch.Tensor,  # [N, D]
+        *,
+        paged_kv_cache: PagedKVCache,
+        layer_idx: int = 0,
+        attn_backend: str | None = None,
+        use_fused_ops: bool = False,
+        use_fused_mlp: bool = False,
+    ) -> torch.Tensor:
+        fused_ok = bool(use_fused_ops) and (not self.training) and (not x.requires_grad)
+        if fused_ok:
+            x_ln1 = layer_norm(
+                x,
+                self.ln1.weight,
+                self.ln1.bias,
+                eps=float(self.ln1.eps),
+            )
+        else:
+            x_ln1 = self.ln1(x)
+
+        attn_out = self.attn.forward_varlen(
+            x_ln1,
+            paged_kv_cache=paged_kv_cache,
+            layer_idx=int(layer_idx),
+            attn_backend=attn_backend,
+        )
+        if fused_ok:
+            x_ln2 = add_layer_norm_(
+                x,
+                attn_out,
+                self.ln2.weight,
+                self.ln2.bias,
+                eps=float(self.ln2.eps),
+            )
+        else:
+            x = x + attn_out
+            x_ln2 = self.ln2(x)
+
+        if fused_ok and bool(use_fused_mlp):
+            x = self.mlp(
+                x_ln2,
+                residual=x,
+                use_fused_mlp=True,
+            )
+        else:
+            mlp_out = self.mlp(x_ln2)
+            if fused_ok:
+                x.add_(mlp_out)
+            else:
+                x = x + mlp_out
         return x
 
 
@@ -549,3 +650,52 @@ class GPTModel(nn.Module):
         if use_cache:
             return logits, loss, presents
         return logits, loss  # [B, T, V], []
+
+    def forward_varlen(
+        self,
+        *,
+        input_ids: torch.Tensor,  # [N]
+        position_ids: torch.Tensor,  # [N]
+        paged_kv_cache: PagedKVCache,
+        attn_backend: str | None = None,
+    ) -> torch.Tensor:  # [N, V]
+        if input_ids.dim() != 1:
+            raise ValueError("varlen forward expects input_ids to be 1D [N]")
+        if position_ids.dim() != 1:
+            raise ValueError("varlen forward expects position_ids to be 1D [N]")
+        if input_ids.numel() != position_ids.numel():
+            raise ValueError("input_ids/position_ids size mismatch")
+        if paged_kv_cache is None:
+            raise ValueError("paged_kv_cache is required for varlen forward")
+
+        device = input_ids.device
+        token_emb = self.token_embedding(input_ids)  # [N, D]
+        position_ids = position_ids.to(device=device, dtype=torch.long)
+        pos_emb = self.position_embedding(position_ids)  # [N, D]
+        x = token_emb + pos_emb
+        x = self.dropout(x)
+        for layer_idx, block in enumerate(self.blocks):
+            x = block.forward_varlen(
+                x,
+                paged_kv_cache=paged_kv_cache,
+                layer_idx=int(layer_idx),
+                attn_backend=attn_backend,
+                use_fused_ops=bool(self.use_fused_ops),
+                use_fused_mlp=bool(self.use_fused_mlp),
+            )
+        if (
+            bool(self.use_fused_ops)
+            and (not self.training)
+            and (not x.requires_grad)
+            and x.is_cuda
+        ):
+            x = layer_norm(
+                x,
+                self.ln_f.weight,
+                self.ln_f.bias,
+                eps=float(self.ln_f.eps),
+            )
+        else:
+            x = self.ln_f(x)
+        logits = self.lm_head(x)  # [N, V]
+        return logits
