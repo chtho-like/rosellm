@@ -9,12 +9,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rosellm"
 version = "0.1.0"
-description = "A comprehensive RLHF framework for Large Language Models"
+description = "A source-cited LLM learning repository and executable training and inference lab"
 authors = [{ name = "wineandchord", email = "guoqizhou19@gmail.com" }]
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
-keywords = ["llm", "rlhf", "distributed", "training", "inference"]
+keywords = ["llm", "agentic-rl", "rlhf", "distributed", "training", "inference"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

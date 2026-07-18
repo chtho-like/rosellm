@@ -1,396 +1,395 @@
-# CUDA GEMM 面试“拷打”全景路线图（从零到极深）
+# CUDA GEMM Interview "Interrogation" Roadmap (From Zero to Advanced Internals)
 
-你可以把 CUDA GEMM 面试看成一棵会不断向下“追问”的树：
+You can think of a CUDA GEMM interview as a tree of progressively deeper follow-up questions:
 
-1) 先问你是否理解 GEMM 的数学与内存布局  
-2) 再问你能不能把它映射到 GPU 的线程/内存层次  
-3) 再一路追到共享内存、寄存器、流水线、cp.async、多 stage  
-4) 最后追到 Tensor Cores：WMMA → MMA PTX → ldmatrix → SMEM swizzle → collective store  
+1) First, the interviewer asks whether you understand the mathematics and memory layouts of GEMM
+2) Next, they ask whether you can map GEMM onto the GPU's thread and memory hierarchy
+3) They continue down through shared memory, registers, pipelining, cp.async, and multistage execution
+4) Finally, they reach Tensor Cores: WMMA → MMA PTX → ldmatrix → SMEM swizzle → collective store
 
-本目录的代码是按这条追问路径组织的：`cuda/gemm2/gemm_*.cu`。
+The code in this directory follows that sequence of questions: `cuda/gemm2/gemm_*.cu`.
 
-读法建议：
+Suggested reading paths:
 
-- 纯新手：按 Level 0 → 20 顺序读，每个 Level 只抓“核心概念 + 一两个坑”
-- 面试准备：把每个 Level 的“你必须能讲清楚/写出来”当作 checklist
-- 真正手撕：按每个 Level 的 Hands-on 指向的 `.cu` 文件练
+- Absolute beginners: read Levels 0 → 20 in order, focusing on only the core concept and one or two pitfalls at each level
+- Interview preparation: treat each level's "What you must be able to explain/implement" items as a checklist
+- Whiteboard coding practice: implement the `.cu` file listed under Hands-on for each level
 
-## Level 0：你真的懂 GEMM 是什么吗？
+## Level 0: Do you actually understand GEMM?
 
-你必须能从零解释清楚：
+You must be able to explain the following from first principles:
 
-- GEMM 是什么：`C = A @ B`，其中 `A` 是 `M×K`，`B` 是 `K×N`，`C` 是 `M×N`
-- 单个输出元素：`C[i,j] = sum_{kk=0..K-1} A[i,kk] * B[kk,j]`
-- Row-major（行主序）索引公式：
-  - `A[i,kk]` 在内存里是 `A[i*K + kk]`
-  - `B[kk,j]` 在内存里是 `B[kk*N + j]`
-  - `C[i,j]` 在内存里是 `C[i*N + j]`
+- What GEMM is: `C = A @ B`, where `A` is `M×K`, `B` is `K×N`, and `C` is `M×N`
+- One output element: `C[i,j] = sum_{kk=0..K-1} A[i,kk] * B[kk,j]`
+- Row-major indexing formulas:
+  - `A[i,kk]` is stored at `A[i*K + kk]`
+  - `B[kk,j]` is stored at `B[kk*N + j]`
+  - `C[i,j]` is stored at `C[i*N + j]`
 
-面试官常见追问：
+Common interviewer follow-ups:
 
-- “如果 B 是 col-major 呢？”（你要能写出索引）
-- “如果是 `C = alpha*A@B + beta*C` 呢？”（你要能解释为什么这是 GEMM 的真实形态）
+- "What if B is column-major?" (You must be able to write the indexing expression.)
+- "What about `C = alpha*A@B + beta*C`?" (You must explain why this is GEMM's practical form.)
 
-Hands-on：
+Hands-on:
 
-- 读/改 `gemm_0_naive.cu`：把索引写到你完全不需要思考为止
+- Read and modify `gemm_0_naive.cu` until you can write the indexing without having to think about it
 
-## Level 1：GPU 上怎么映射线程？
+## Level 1: How do you map threads on a GPU?
 
-最经典的第一版：
+The canonical first implementation is:
 
-- 1 thread 负责 1 个 `C[i,j]`
-- `threadIdx.x` 对应列 `j`
-- `threadIdx.y` 对应行 `i`
+- 1 thread computes 1 element `C[i,j]`
+- `threadIdx.x` maps to column `j`
+- `threadIdx.y` maps to row `i`
 
-你要能讲清楚：
+You must be able to explain:
 
-- block 和 grid 的含义
-- 为什么需要边界判断（`i >= M` 或 `j >= N`）
-- 为什么这种写法很慢（下一关就要追问你）
+- What blocks and grids represent
+- Why boundary checks are required (`i >= M` or `j >= N`)
+- Why this implementation is slow (which leads directly to the next question)
 
-Hands-on：
+Hands-on:
 
 - `gemm_0_naive.cu`
 
-## Level 2：为什么 naive 慢？（内存层次与复用）
+## Level 2: Why is the naive implementation slow? (Memory hierarchy and reuse)
 
-你必须从第一性原理解释：
+You must explain from first principles:
 
-- 计算量：每个 `C[i,j]` 做 `K` 次乘加（FMA）
-- 内存量：naive 会对 `A` 和 `B` 做大量重复读取
-- 在 GPU 上，瓶颈经常是“内存带宽”，不是算力
+- Computation: each `C[i,j]` performs `K` multiply-add operations (FMAs)
+- Memory traffic: the naive implementation repeatedly reloads the same `A` and `B` values
+- On a GPU, memory bandwidth is often the bottleneck rather than arithmetic throughput
 
-面试官常见追问：
+Common interviewer follow-ups:
 
-- “global memory coalescing 是什么？”
-- “同一个 warp 的线程访问全局内存，什么模式最理想？”
-- “A 和 B 哪个更容易被复用？复用的方向是什么？”
+- "What is global-memory coalescing?"
+- "What is the ideal global-memory access pattern for threads in the same warp?"
+- "Which operand, A or B, is easier to reuse, and along which dimension is it reused?"
 
-核心回答：
+Core answer:
 
-- **A 的一行**会被 C 的很多列复用；**B 的一列**会被 C 的很多行复用  
-  所以你要把 A 和 B 的子块搬到更快的存储（shared memory）里，多次复用
+- **One row of A** is reused across many columns of C, and **one column of B** is reused across many rows of C
+  Therefore, you should move subtiles of A and B into faster storage (shared memory) and reuse them repeatedly
 
-Hands-on：
+Hands-on:
 
-- 继续看 `gemm_0_naive.cu` 的内层 `kk` 循环，想清楚“同一个 A/B 元素会被多少次使用”
+- Continue examining the inner `kk` loop in `gemm_0_naive.cu`, and determine how many times each A/B element is reused
 
-## Level 3：共享内存分块（Block tile + K tile）
+## Level 3: Shared-memory tiling (Block tile + K tile)
 
-这就是面试里最经典的“第一层优化”：
+This is the canonical first optimization in an interview:
 
-- 每个 block 负责计算 C 的一个小块（例如 `16×16`）
-- K 维度分块：每次只加载 `K_tile` 这段到 shared memory
-- 计算时反复使用 shared memory 中的 A_tile、B_tile
+- Each block computes a small tile of C (for example, `16×16`)
+- Partition the K dimension: load only the current `K_tile` segment into shared memory
+- Repeatedly reuse the A and B tiles in shared memory during computation
 
-你必须能讲清楚：
+You must be able to explain:
 
-- 为什么要 `__syncthreads()`（保证 tile 被整个 block 写完再读）
-- 为什么 K 要循环分块（shared memory 放不下整个 K）
+- Why `__syncthreads()` is necessary (the entire block must finish writing the tile before any thread reads it)
+- Why K must be processed in tiles (shared memory cannot hold the entire K dimension)
 
-Hands-on：
+Hands-on:
 
 - `gemm_1_tiled_smem.cu`
 
-## Level 4：线程寄存器分块（Thread tile / Register blocking）
+## Level 4: Per-thread register tiling (Thread tile / Register blocking)
 
-面试官开始“加压力”的常见套路：
+A common way for the interviewer to increase the pressure is:
 
-> “你这个每个 thread 只算一个输出，太稀疏了。能不能让每个 thread 多算一些？”
+> "Computing only one output per thread is too sparse. Can each thread compute several outputs?"
 
-核心点：
+Core idea:
 
-- 让每个 thread 计算一个 `TM×TN` 小块（存在寄存器里）
-- 这样一来：
-  - 同样的 shared memory 读可以贡献更多计算
-  - 每个 thread 的算术强度更高
+- Have each thread compute a `TM×TN` subtile held in registers
+- This provides two benefits:
+  - The same shared-memory loads contribute to more arithmetic
+  - Each thread has higher arithmetic intensity
 
-Hands-on：
+Hands-on:
 
-- `gemm_2_thread_tile_8x8_float4.cu`：每 thread 计算 8×8
+- `gemm_2_thread_tile_8x8_float4.cu`: each thread computes an 8×8 tile
 
-## Level 5：向量化 LD/ST（Pack 128-bit）
+## Level 5: Vectorized LD/ST (Pack 128-bit)
 
-继续追问：
+The next follow-up is:
 
-> “你能不能减少 load/store 指令数量？”
+> "Can you reduce the number of load/store instructions?"
 
-核心点：
+Core idea:
 
-- 使用 `float4`（FP32）或 `int4`（8 个 FP16）进行 128-bit 读写
-- 前提条件：
-  - 地址对齐（通常要求维度是 4 或 8 的倍数）
-  - 访问模式连续
+- Use `float4` for FP32 or `int4` for eight FP16 values to perform 128-bit loads and stores
+- Preconditions:
+  - Proper address alignment (dimensions generally must be multiples of 4 or 8)
+  - Contiguous access patterns
 
-Hands-on：
+Hands-on:
 
-- `gemm_2_thread_tile_8x8_float4.cu`（float4）
-- `gemm_10_mma_m16n8k16_smem_swizzle.cu`（int4/8 half）
+- `gemm_2_thread_tile_8x8_float4.cu` (float4)
+- `gemm_10_mma_m16n8k16_smem_swizzle.cu` (int4/8 half values)
 
-常见坑：
+Common pitfalls:
 
-- 没有对齐就强行 `reinterpret_cast<float4*>`（可能变慢甚至出错）
-- 边界块（tail block）怎么处理（生产代码要有“边界版”）
+- Forcing `reinterpret_cast<float4*>` on an unaligned address (this may reduce performance or even produce an error)
+- Handling boundary tiles (tail blocks require a boundary-safe path in production code)
 
-## Level 6：shared memory bank conflicts（你会被追问到崩）
+## Level 6: Shared-memory bank conflicts (Expect aggressive follow-ups)
 
-如果你写了 shared memory，面试官很可能会问：
+If you use shared memory, the interviewer will very likely ask:
 
-> “你知道 bank conflict 吗？你的代码会不会冲突？”
+> "Do you know what a bank conflict is? Does your code have any?"
 
-第一性原理解释（你要能用自己的话讲）：
+First-principles explanation that you must be able to give in your own words:
 
-- shared memory 被分成 32 个 bank
-- 一个 warp 同时访问 shared memory 时：
-  - 如果每个线程落在不同 bank：并行、快
-  - 如果多个线程落在同一个 bank 的不同地址：冲突，硬件会拆成多次事务
-  - 如果所有线程读同一个地址：broadcast，通常不算冲突
+- Shared memory is divided into 32 banks
+- When a warp accesses shared memory concurrently:
+  - If every thread addresses a different bank, accesses proceed in parallel and are fast
+  - If multiple threads address different locations in the same bank, a conflict occurs and the hardware splits the request into multiple transactions
+  - If all threads read the same address, the access is broadcast and normally does not count as a conflict
 
-常见缓解手段（LeetCUDA 里强调的）：
+Common mitigation techniques emphasized in LeetCUDA:
 
-- **padding**：让一行的长度不再是“坏的倍数”，打散 bank 映射
-- **layout transform**：例如把 A_tile 变成 `[BK][BM]`（在 SMEM 中转置）
-- **swizzle/permutation**：对索引做 xor/zigzag，让 ldmatrix/ld.shared 更冲突少
+- **Padding**: change each row's length so it is no longer an unfavorable multiple, dispersing the bank mapping
+- **Layout transform**: for example, store A_tile as `[BK][BM]` (transposed in SMEM)
+- **Swizzle/permutation**: apply XOR or zigzag index transformations to reduce conflicts in ldmatrix/ld.shared access patterns
 
-Hands-on：
+Hands-on:
 
-- `gemm_3_smem_padding_bcf.cu`（padding + A_tile 在 SMEM 中按 `[BK][BM]` 存）
+- `gemm_3_smem_padding_bcf.cu` (padding + A_tile stored as `[BK][BM]` in SMEM)
 
-## Level 7：双缓冲（Double buffering）
+## Level 7: Double buffering
 
-追问升级：
+The follow-up becomes:
 
-> “你每次 tile 都 `load -> syncthreads -> compute -> syncthreads`，能不能减少同步？”
+> "Every tile performs `load -> syncthreads -> compute -> syncthreads`. Can you reduce synchronization?"
 
-核心思路：
+Core approach:
 
-- 用两个 shared memory buffer 轮换
-- tile t 计算时，预取 tile t+1 的数据（先到寄存器）
-- 这样每个 tile 主循环通常只需要 1 次 `__syncthreads()`
+- Alternate between two shared-memory buffers
+- While computing tile t, prefetch tile t+1 into registers
+- This usually reduces the main tile loop to one `__syncthreads()` per tile
 
-Hands-on：
+Hands-on:
 
 - `gemm_4_double_buffered.cu`
 
-## Level 8：cp.async + 多 stage（SM80+）
+## Level 8: cp.async + multistage pipeline (SM80+)
 
-这通常是“高级 GPU 岗”最常见的深挖点之一：
+This is one of the most common deep-dive topics for advanced GPU roles:
 
-> “你知道 cp.async 吗？能不能把 gmem->smem 和 compute overlap？”
+> "Do you understand cp.async? Can you overlap gmem->smem transfers with computation?"
 
-必须能讲清楚：
+You must be able to explain:
 
-- cp.async 是“异步拷贝队列”：把 global memory 的数据搬到 shared memory
-- `commit_group`：提交一组拷贝
-- `wait_group`：等待队列里某些组完成（典型是保持 pipeline 深度）
-- 为什么需要多 stage（2~4 很常见）：让更多拷贝在飞，隐藏更长的内存延迟
+- cp.async provides an asynchronous copy queue that moves data from global memory into shared memory
+- `commit_group` submits a group of copies
+- `wait_group` waits until a specified number of queued groups remain outstanding, which is how pipeline depth is typically maintained
+- Why multiple stages are necessary (2–4 are common): more in-flight copies can hide longer memory latency
 
-Hands-on：
+Hands-on:
 
-- `gemm_5_cp_async_multistage.cu`（3 stages）
-- `gemm_9_wmma_tf32_stages.cu`（Tensor Core 版本的 cp.async + stage + drain tail）
+- `gemm_5_cp_async_multistage.cu` (3 stages)
+- `gemm_9_wmma_tf32_stages.cu` (Tensor Core version with cp.async, staging, and a drain tail)
 
-更深的追问（你至少要知道关键词）：
+Deeper follow-ups (you should at least recognize the terminology):
 
-- “cp.async 的 zero-fill/valid bytes 怎么做？”
-- “cp.async.bulk / TMA 是什么？（Hopper/SM90）”
-- “异步拷贝与 `__syncthreads()` 的关系是什么？为什么经常一起出现？”
+- "How do cp.async zero-fill and valid bytes work?"
+- "What are cp.async.bulk and TMA?" (Hopper/SM90)
+- "What is the relationship between asynchronous copies and `__syncthreads()`? Why are they often used together?"
 
-## Level 9：Occupancy 与资源权衡（别只会背 kernel）
+## Level 9: Occupancy and resource trade-offs (Do not merely memorize a kernel)
 
-你写的 kernel 很可能会被问：
+Likely questions about your kernel include:
 
-- 这个 block 用了多少 shared memory？
-- 每个线程大概多少寄存器？
-- occupancy 怎么估？为什么 occupancy 高不一定更快？
+- How much shared memory does each block use?
+- Approximately how many registers does each thread use?
+- How do you estimate occupancy, and why is higher occupancy not always faster?
 
-你必须能讲清楚“权衡”：
+You must be able to explain the trade-offs:
 
-- tile 大：算术强度高，但 shared/register 多，occupancy 可能下降
-- tile 小：occupancy 高，但复用差，容易内存瓶颈
+- Larger tiles: higher arithmetic intensity, but more shared memory and registers, potentially reducing occupancy
+- Smaller tiles: higher occupancy, but less reuse and a greater risk of becoming memory-bound
 
-Hands-on：
+Hands-on:
 
-- 对比 `gemm_2`、`gemm_3`、`gemm_4`：改 tile 大小观察寄存器/SMEM 增长趋势（真实 profiling 需要 GPU）
+- Compare `gemm_2`, `gemm_3`, and `gemm_4`: change tile sizes and observe the trend in register/SMEM use (real profiling requires a GPU)
 
-## Level 10：Split-K（原子 vs workspace）
+## Level 10: Split-K (Atomics vs workspace)
 
-追问：
+Follow-up:
 
-> “如果 K 特别大，但 M/N 不大，怎么提高并行度？”
+> "If K is very large but M and N are small, how do you increase parallelism?"
 
-两种典型答案：
+Two standard answers:
 
-- 面试友好：Split-K + atomicAdd（简单但会有 contention、非确定性）
-- 生产友好：Split-K + workspace + reduce（确定性更强，常更快）
+- Interview-friendly: Split-K + atomicAdd (simple, but introduces contention and nondeterminism)
+- Production-friendly: Split-K + workspace + reduction (more deterministic and often faster)
 
-Hands-on：
+Hands-on:
 
 - `gemm_6_splitk_workspace.cu`
 
-你要能讲 trade-off：
+You must be able to explain the trade-off:
 
-- workspace 需要额外显存
-- reduce kernel 有额外开销
-- 但避免了大量 atomics
+- A workspace requires additional device memory
+- A reduction kernel introduces additional overhead
+- It avoids a large number of atomic operations
 
-## Level 11：Epilogue fusion（面试官最爱问“工程化”的点）
+## Level 11: Epilogue fusion (A favorite engineering-focused interview topic)
 
-追问：
+Follow-up:
 
-> “GEMM 后面通常还接什么？能不能 fuse？”
+> "What operations commonly follow GEMM? Can you fuse them?"
 
-常见 epilogue：
+Common epilogue operations:
 
 - bias / add
-- activation（ReLU/GELU/SwiGLU 的一部分）
-- scaling（例如量化/反量化的 scale）
-- `alpha/beta`（BLAS 语义）
+- activation (ReLU/GELU/part of SwiGLU)
+- scaling (for example, quantization/dequantization scales)
+- `alpha/beta` (BLAS semantics)
 
-Hands-on：
+Hands-on:
 
-- `gemm_7_epilogue_fusion.cu`（GEMM + bias + ReLU）
+- `gemm_7_epilogue_fusion.cu` (GEMM + bias + ReLU)
 
-## Level 12：Tensor Cores 入门（你不能只会背 TFLOPS）
+## Level 12: Tensor Core fundamentals (You must understand more than the TFLOPS number)
 
-你必须能讲清楚：
+You must be able to explain:
 
-- Tensor Core 是什么：专门做矩阵乘加的硬件单元（warp 级别）
-- 支持的数据类型：FP16/BF16/TF32/更低位（视架构而定）
-- “TF32 是什么”：用 FP32 输入但内部截断 mantissa（更快但精度下降）
+- What a Tensor Core is: a hardware unit specialized for warp-level matrix multiply-accumulate operations
+- Supported data types: FP16/BF16/TF32/lower-precision formats, depending on the architecture
+- What TF32 is: FP32 inputs with a truncated internal mantissa, providing higher performance at reduced precision
 
-Hands-on：
+Hands-on:
 
-- `gemm_8_wmma_fp16_tensorcore.cu`（WMMA FP16）
+- `gemm_8_wmma_fp16_tensorcore.cu` (WMMA FP16)
 
-## Level 13：WMMA API（能写出来就很加分）
+## Level 13: WMMA API (Being able to implement this is a strong signal)
 
-你要能写并解释：
+You must be able to write and explain:
 
-- fragment 类型：matrix_a / matrix_b / accumulator
-- `load_matrix_sync`：从内存装载到 fragment
-- `mma_sync`：执行 Tensor Core GEMM
-- `store_matrix_sync`：把 accumulator 写回内存
+- Fragment types: matrix_a / matrix_b / accumulator
+- `load_matrix_sync`: load from memory into a fragment
+- `mma_sync`: execute the Tensor Core GEMM operation
+- `store_matrix_sync`: write the accumulator back to memory
 
-常见坑：
+Common pitfalls:
 
-- layout（row_major vs col_major）写错
-- leading dimension（stride）传错
-- 维度不是 WMMA tile 的整数倍
+- Using the wrong layout (row_major vs col_major)
+- Passing the wrong leading dimension (stride)
+- Dimensions that are not integer multiples of the WMMA tile
 
-Hands-on：
+Hands-on:
 
 - `gemm_8_wmma_fp16_tensorcore.cu`
 
-## Level 14：TF32 Tensor Core SGEMM（更贴近 LLM 推理/训练）
+## Level 14: TF32 Tensor Core SGEMM (More relevant to LLM inference/training)
 
-追问：
+Follow-up:
 
-> “FP32 GEMM 你为什么不用 TF32 Tensor Core？”
+> "Why are you not using TF32 Tensor Cores for FP32 GEMM?"
 
-你要能讲：
+You must be able to explain:
 
-- TF32 的精度 vs 性能
-- 对 LLM 来说通常精度够不够（取决于场景）
+- The precision/performance trade-off of TF32
+- Whether its precision is sufficient for LLMs (the answer depends on the use case)
 
-Hands-on：
+Hands-on:
 
 - `gemm_9_wmma_tf32_stages.cu`
 
-## Level 15：Tensor Core 的层次化分块（Block / Warp / WMMA）
+## Level 15: Hierarchical Tensor Core tiling (Block / Warp / WMMA)
 
-这是很多候选人卡住的地方：他们能写一个 warp 的 WMMA，但说不清怎么扩到 128×128 这种 block tile。
+This is where many candidates struggle: they can implement WMMA for one warp but cannot explain how it scales to a block tile such as 128×128.
 
-你要能讲清楚：
+You must be able to explain:
 
-- block tile（128×128）由多少 warps 组成
-- 每个 warp 负责哪一块输出
-- 一个 warp 内为什么还要做多次 WMMA（tile MMAs）
+- How many warps compose a 128×128 block tile
+- Which output region each warp computes
+- Why one warp still executes multiple WMMA operations (tile MMAs)
 
-Hands-on：
+Hands-on:
 
-- `gemm_9_wmma_tf32_stages.cu`（8 warps/block，warp 内 2×4 WMMA tiles）
+- `gemm_9_wmma_tf32_stages.cu` (8 warps/block, with 2×4 WMMA tiles per warp)
 
-## Level 16：多 stage pipeline 的“drain tail”（很多人写不对）
+## Level 16: Draining the tail of a multistage pipeline (A frequent implementation error)
 
-追问：
+Follow-up:
 
-> “你用了 3-stage，那最后剩下的 stage 怎么处理？”
+> "You use a 3-stage pipeline. How do you handle the remaining stages at the end?"
 
-关键点：
+Key points:
 
-- pipeline 主循环通常只计算一部分 tiles
-- 最后要“排空”（drain）剩余 stage，否则少算 K 的最后几块
+- The pipeline's main loop usually computes only a subset of the tiles
+- At the end, you must drain the remaining stages, or the last few K tiles will not be computed
 
-Hands-on：
+Hands-on:
 
-- `gemm_9_wmma_tf32_stages.cu`（最后有 drain tail）
+- `gemm_9_wmma_tf32_stages.cu` (contains a drain tail at the end)
 
-## Level 17：MMA PTX（这已经非常深）
+## Level 17: MMA PTX (This is already very advanced)
 
-面试官如果真的要“拷打到骨头”，可能会问：
+If the interviewer truly wants to probe the lowest levels, they may ask:
 
-> “WMMA 只是 API。你会不会 mma.sync？ldmatrix 你知道吗？”
+> "WMMA is only an API. Can you use mma.sync? Do you understand ldmatrix?"
 
-你要能讲清楚：
+You must be able to explain:
 
-- `ldmatrix`：把 shared memory 的矩阵块按 Tensor Core 需要的方式装到寄存器
-- `mma.sync`：真正的 Tensor Core 指令（warp 级）
-- “寄存器里的 fragment 到底每个 lane 拿了哪些元素？”（非常深，但至少要知道有官方 mapping 文档）
+- `ldmatrix`: loads a shared-memory matrix tile into registers in the layout required by Tensor Cores
+- `mma.sync`: the actual warp-level Tensor Core instruction
+- "Exactly which fragment elements does each lane hold in registers?" (This is highly advanced, but you should at least know that the official mapping documentation exists.)
 
-Hands-on：
+Hands-on:
 
 - `gemm_10_mma_m16n8k16_smem_swizzle.cu`
 
-## Level 18：SMEM swizzle / permuted layout（为什么需要）
+## Level 18: SMEM swizzle / permuted layout (Why it is necessary)
 
-追问：
+Follow-up:
 
-> “你用 ldmatrix 读 SMEM，会不会 bank conflict？怎么解决？”
+> "Will reading SMEM with ldmatrix cause bank conflicts? How do you resolve them?"
 
-核心点：
+Core points:
 
-- ldmatrix 的访问模式很特殊，容易触发 bank conflicts
-- 常见解法：对 SMEM 的存储布局做 swizzle（xor / zigzag / permute）
-- CUTLASS/CuTe 里会把这一步做成可组合的 layout 变换
+- ldmatrix has a specialized access pattern that can readily trigger bank conflicts
+- A common solution is to swizzle the SMEM storage layout with XOR, zigzag, or another permutation
+- CUTLASS/CuTe expresses this operation as a composable layout transformation
 
-Hands-on：
+Hands-on:
 
-- `gemm_10_mma_m16n8k16_smem_swizzle.cu`（`SwizzleACol`）
+- `gemm_10_mma_m16n8k16_smem_swizzle.cu` (`SwizzleACol`)
 
-## Level 19：Collective store（shfl 打包 128-bit store）
+## Level 19: Collective store (shfl packing for 128-bit stores)
 
-追问：
+Follow-up:
 
-> “你每个 lane scatter store 太多了，能不能更像 CUTLASS 那样写 epilogue？”
+> "Each lane issues many scattered stores. Can you implement an epilogue more like CUTLASS?"
 
-核心点：
+Core points:
 
-- 每个 lane 手里只有一小部分输出
-- 如果让每个 lane 都去 store，会产生很多小 store（带宽不友好）
-- 用 `__shfl_sync` 把 4 个 lane 的 half2 聚合成 128-bit，再一次写回
+- Each lane holds only a small subset of the output
+- If every lane stores independently, the kernel issues many small stores, which is inefficient for memory bandwidth
+- Use `__shfl_sync` to aggregate half2 values from four lanes into one 128-bit store
 
-更深的点（知道关键词即可）：
+Deeper point (recognizing the term is sufficient):
 
-- Hopper/SM90 有 `stmatrix`，可以更高效地从 regs 写回 SMEM
+- Hopper/SM90 provides `stmatrix`, which can write data from registers back to SMEM more efficiently
 
-Hands-on：
+Hands-on:
 
-- `gemm_10_mma_m16n8k16_smem_swizzle.cu`（warp shuffle + `uint4` store）
+- `gemm_10_mma_m16n8k16_smem_swizzle.cu` (warp shuffle + `uint4` store)
 
-## Level 20：再往下还能多深？（极限深挖方向）
+## Level 20: How much deeper can this go? (Advanced follow-up directions)
 
-到这里，已经超过大多数面试“手撕”要求了，但如果你写了“精通”，面试官依然可能沿着这些方向继续问：
+At this point, you are already beyond the whiteboard-coding expectations of most interviews. However, if your resume says "expert," the interviewer may continue in these directions:
 
-- Hopper WGMMA（warp-group MMA）：为什么需要 warp-group？调度/同步怎么做？
-- TMA（Tensor Memory Accelerator）：为什么比 cp.async 更强？如何做多维搬运？
-- Cluster launch：为什么要 cluster？和共享 L2/SMEM 有什么关系？
-- L2 persistence / cache policy：怎么让 B 的某些块更留在 L2？
-- Persistent GEMM：让一个 CTA 处理多个 tiles，减少 launch/scheduling 开销
-- 更复杂的 epilogue：bias + activation + scaling + quantize/dequantize 全融合
-- 数值与确定性：Split-K 的可复现性、累加顺序、Kahan、FP32 accumulate
-- 实际系统：与通信（AllReduce）重叠、与多流并行、与框架（cuBLASLt）接口
+- Hopper WGMMA (warp-group MMA): Why are warp groups necessary? How are scheduling and synchronization handled?
+- TMA (Tensor Memory Accelerator): Why is it more capable than cp.async? How does it perform multidimensional transfers?
+- Cluster launch: Why use clusters? How do they relate to shared L2/SMEM resources?
+- L2 persistence / cache policy: How can selected tiles of B remain resident in L2?
+- Persistent GEMM: Have one CTA process multiple tiles to reduce launch/scheduling overhead
+- More elaborate epilogues: fully fuse bias + activation + scaling + quantization/dequantization
+- Numerical behavior and determinism: Split-K reproducibility, accumulation order, Kahan summation, and FP32 accumulation
+- Real systems: overlap with communication (AllReduce), concurrency across multiple streams, and framework integration (cuBLASLt)
 
-如果你能把 Level 0~19 的代码和原理讲清楚，再能对 Level 20 的关键词给出合理解释与取舍，基本就属于“写在简历上也不怕被拷打”的程度。
-
+If you can explain the code and principles in Levels 0–19, and can discuss the terminology and trade-offs in Level 20 coherently, you can safely claim this expertise on your resume and withstand detailed technical questioning.
