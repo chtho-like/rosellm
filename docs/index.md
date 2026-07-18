@@ -1,4 +1,4 @@
-# RoseLLM: Learn the Whole LLM Stack
+# RoseLLM: Learn the Whole Large Language Model Stack
 
 RoseLLM is a textbook that can be executed and a codebase that can be studied.
 Its scope is the complete lifecycle of a large language model: data, modeling,
@@ -50,11 +50,13 @@ protocol.
 
 ## Current focus
 
-The active focus is Agentic RL: reinforcement learning in which an LLM policy
+The active focus is **Agentic Reinforcement Learning (Agentic RL)**:
+reinforcement learning in which a **Large Language Model (LLM)** policy
 interacts with a stateful environment over multiple turns. The treatment covers
 both the scientific object and the engineering system:
 
-1. the POMDP and policy-gradient formulation;
+1. the **Partially Observable Markov Decision Process (POMDP)** and
+   policy-gradient formulation;
 2. prompts, observations, actions, tools, memory, and state transitions;
 3. offline demonstrations, online rollouts, rejection sampling, and curriculum
    construction;

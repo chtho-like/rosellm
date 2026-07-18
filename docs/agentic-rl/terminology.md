@@ -1,12 +1,12 @@
 # Terminology and Boundaries
 
-The term “Agentic RL” is used inconsistently. This chapter fixes the vocabulary
+The term **Agentic Reinforcement Learning (Agentic RL)** is used inconsistently. This chapter fixes the vocabulary
 used throughout RoseLLM and gives operational tests for ambiguous cases.
 
 ## A minimal definition
 
 **Agentic reinforcement learning** is policy optimization from experience in
-which an LLM-controlled agent makes temporally extended decisions in a stateful
+which a **Large Language Model (LLM)**-controlled agent makes temporally extended decisions in a stateful
 environment and receives feedback causally downstream of those decisions.
 
 Four properties matter:
@@ -21,18 +21,21 @@ Four properties matter:
    of the actions that produced it.
 
 This definition excludes ordinary tool-call imitation and fixed preference
-training, while including online and off-policy agent RL.
+training, while including online and off-policy agent RL. A **Markov Decision
+Process (MDP)** exposes a complete decision state; a **Partially Observable
+Markov Decision Process (POMDP)** exposes observations from which the agent must
+infer the hidden state.
 
 ## The neighboring concepts
 
 | Concept | Data | Interaction during optimization | Typical feedback | Canonical mathematical view |
 |---|---|---:|---|---|
 | Pretraining | fixed corpus | no | next-token target | maximum likelihood |
-| SFT / behavioral cloning | fixed demonstrations | no | demonstrated token | conditional maximum likelihood |
+| Supervised Fine-Tuning (SFT) / behavioral cloning | fixed demonstrations | no | demonstrated token | conditional maximum likelihood |
 | Reward-model training | fixed comparisons/ratings | no | human or AI label | ranking/regression |
-| DPO-family preference optimization | fixed or refreshed preferences | usually no environment | preferred vs rejected response | implicit-reward classification objective |
-| One-response RLHF | policy samples | prompt then response | learned scalar reward | contextual bandit or one-step MDP approximation |
-| RLVR / reasoning RL | policy samples | often one response; may include executable calls | verifiable correctness | bandit, MDP, or search process depending on boundary |
+| Direct Preference Optimization (DPO) family | fixed or refreshed preferences | usually no environment | preferred vs rejected response | implicit-reward classification objective |
+| One-response Reinforcement Learning from Human Feedback (RLHF) | policy samples | prompt then response | learned scalar reward | contextual bandit or one-step MDP approximation |
+| Reinforcement Learning with Verifiable Rewards (RLVR) / reasoning RL | policy samples | often one response; may include executable calls | verifiable correctness | bandit, MDP, or search process depending on boundary |
 | Agentic RL | interactive trajectories | yes | outcome, process, preference, constraint, cost | finite-horizon MDP/POMDP |
 | Test-time search | samples from fixed model | possibly | verifier/judge/search score | inference algorithm; no parameter update required |
 | In-context “learning” | context changes | possibly | observations/demonstrations in context | stateful inference; not gradient-based RL by itself |

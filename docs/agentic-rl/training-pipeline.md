@@ -1,9 +1,13 @@
 # End-to-End Training Pipeline
 
-This chapter follows one Agentic RL run from task specification to a promoted
+This chapter follows one **Agentic Reinforcement Learning (Agentic RL)** run from task specification to a promoted
 checkpoint. It describes the operational pipeline that an optimizer equation
 leaves out: data lineage, exact token handling, environment execution, reward,
 advantage construction, distributed updates, evaluation, and rollback.
+
+The diagram uses **Supervised Fine-Tuning (SFT)** for demonstration imitation.
+Later online stages may use **Proximal Policy Optimization (PPO)** with a critic
+or **Group Relative Policy Optimization (GRPO)** with a response-group baseline.
 
 ## 1. The pipeline at a glance
 

@@ -1,6 +1,6 @@
 # Agentic Reinforcement Learning: Zero-to-Researcher Curriculum
 
-Agentic reinforcement learning trains a language-model policy through repeated
+**Agentic Reinforcement Learning (Agentic RL)** trains a language-model policy through repeated
 interaction with a stateful environment. The defining difficulty is not merely
 that a response contains several reasoning tokens. The policy takes actions,
 receives new observations, changes the world, and must assign delayed outcomes
@@ -8,11 +8,12 @@ back to earlier decisions.
 
 The clean formal boundary is a useful starting point:
 
-- ordinary one-response LLM RL can often be approximated as a contextual bandit
-  or a degenerate one-step MDP;
-- agentic RL is normally a finite-horizon, partially observable Markov decision
-  process (POMDP) with semantic actions, environment transitions, and horizon
-  greater than one.
+- ordinary one-response **Large Language Model (LLM) Reinforcement Learning
+  (RL)** can often be approximated as a contextual bandit or a degenerate
+  one-step **Markov Decision Process (MDP)**;
+- agentic RL is normally a finite-horizon **Partially Observable Markov Decision
+  Process (POMDP)**: the complete environment state is hidden, so the policy
+  acts from observations and history over more than one consequential step.
 
 This distinction follows the formalization in Zhang et al.,
 [*The Landscape of Agentic Reinforcement Learning for LLMs*](https://arxiv.org/abs/2509.02547)

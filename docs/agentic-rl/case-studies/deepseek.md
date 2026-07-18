@@ -1,8 +1,42 @@
-# DeepSeek: From Domain Data to Million-Token Agentic RL
+# DeepSeek: From Domain Data to Million-Token Agentic Reinforcement Learning
 
 **Verified through:** 2026-07-19. **Sources:** DeepSeek papers, official model
 cards, repositories, and release notes. Benchmark results are vendor-reported
 unless marked reproduced.
+
+## Reader's terminology key
+
+These terms recur throughout this chapter:
+
+- **Supervised Fine-Tuning (SFT):** next-token imitation on curated target
+  answers or trajectories.
+- **Direct Preference Optimization (DPO):** an offline objective that increases
+  preferred responses relative to rejected responses and a reference policy.
+- **Group Relative Policy Optimization (GRPO):** a critic-free online method
+  that compares a group of responses sampled for the same prompt.
+- **Reinforcement Learning with Verifiable Rewards (RLVR):** policy training
+  from mechanically checkable outcomes such as exact answers or unit tests.
+- **Mixture of Experts (MoE):** sparse feed-forward routing in which each token
+  activates only a small subset of many experts.
+- **Multi-head Latent Attention (MLA):** DeepSeek's compressed key/value latent
+  representation for reducing inference cache and bandwidth.
+- **Multi-Token Prediction (MTP):** auxiliary prediction of several future
+  tokens, later also used for speculative decoding.
+- **DeepSeek Sparse Attention (DSA):** DeepSeek's selected-token long-context
+  attention mechanism.
+- **On-Policy Distillation (OPD):** matching teachers on states and tokens
+  sampled by the student policy, rather than only on a fixed offline corpus.
+- **Fill-in-the-Middle (FIM):** generating a missing span from both its prefix
+  and suffix; important in code-model data.
+- **Grouped-Query Attention (GQA):** several query heads share fewer key/value
+  heads to reduce memory.
+- **Byte-Level Byte Pair Encoding (BBPE):** subword tokenization over bytes,
+  making arbitrary input representable.
+- **Root Mean Square Layer Normalization (RMSNorm)** and **Rotary Position
+  Embedding (RoPE):** the normalization and relative-position mechanisms used
+  by many DeepSeek generations.
+- **Key-Value (KV) cache:** stored attention keys and values reused during
+  autoregressive decoding.
 
 ## 1. Executive conclusions
 

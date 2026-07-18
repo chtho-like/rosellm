@@ -42,12 +42,14 @@ extra_javascript:
 nav:
   - Home: index.md
   - Learning Roadmap: learning-roadmap.md
+  - Glossary: glossary.md
   - Research Standard: research-method.md
   - Agentic Reinforcement Learning:
       - Curriculum and Knowledge Map: agentic-rl/index.md
       - Terminology and Boundaries: agentic-rl/terminology.md
       - Historical Development: agentic-rl/history.md
       - Mathematical Foundations: agentic-rl/mathematical-foundations.md
+      - Step-by-Step Derivations and Code: agentic-rl/derivations-and-code.md
       - Data and Environments: agentic-rl/data-and-environments.md
       - End-to-End Training Pipeline: agentic-rl/training-pipeline.md
       - Algorithms: agentic-rl/algorithms.md

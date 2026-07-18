@@ -1,6 +1,6 @@
 # Evaluation and Safety
 
-An Agentic RL score is a property of a complete system under a protocol:
+An **Agentic Reinforcement Learning (Agentic RL)** score is a property of a complete system under a protocol:
 
 \[
 \text{result}=f(\text{model},\text{scaffold},\text{tools},\text{environment},
@@ -19,10 +19,10 @@ Use several layers because no one metric establishes general agency.
 | Layer | Question | Example |
 |---|---|---|
 | Unit | Does one mechanism behave correctly? | tool parser, mask, state reset |
-| Skill | Can the policy perform a bounded capability? | select API, recover from error |
+| Skill | Can the policy perform a bounded capability? | select an Application Programming Interface (API), recover from error |
 | Task | Does the agent complete an end-to-end goal? | fix issue, book valid itinerary |
 | Distribution | Does success generalize within a domain? | unseen repositories/sites/users |
-| Transfer | Does learning survive new tools/schemas/horizons? | renamed functions, new UI layout |
+| Transfer | Does learning survive new tools/schemas/horizons? | renamed functions, new User Interface (UI) layout |
 | Robustness | Does behavior survive faults and attacks? | tool timeout, prompt injection |
 | Safety | Does it respect permissions and avoid unacceptable states? | exfiltration or destructive action |
 | Operations | Is utility worth cost/latency/reliability? | success per dollar and p95 time |

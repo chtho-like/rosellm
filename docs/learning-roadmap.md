@@ -1,6 +1,7 @@
-# LLM Learning Roadmap
+# Large Language Model Learning Roadmap
 
-This roadmap turns “learn everything about LLMs” into a dependency graph. It is
+This roadmap turns “learn everything about **Large Language Models (LLMs)**”
+into a dependency graph. It is
 not a list of buzzwords. Each level states what you should be able to derive,
 implement, measure, and explain before moving on.
 
@@ -24,14 +25,17 @@ failure, instrument it, and explain the trace from input bytes to hardware work.
 
 ### Mathematics
 
-- Linear algebra: bases, matrix products, eigendecomposition, SVD, norms,
+- Linear algebra: bases, matrix products, eigendecomposition, **Singular Value
+  Decomposition (SVD)**, norms,
   projections, and tensor contractions.
 - Calculus: partial derivatives, Jacobian-vector products, chain rule, and
   constrained optimization.
 - Probability: random variables, expectation, variance, conditional
-  probability, maximum likelihood, KL divergence, entropy, and Monte Carlo
+  probability, maximum likelihood, **Kullback–Leibler (KL) divergence**,
+  entropy, and Monte Carlo
   estimators.
-- Optimization: SGD, momentum, Adam/AdamW, learning-rate schedules, clipping,
+- Optimization: **Stochastic Gradient Descent (SGD)**, momentum, Adam/AdamW,
+  learning-rate schedules, clipping,
   conditioning, and mixed-precision loss scaling.
 - Information theory: cross-entropy, coding length, mutual information, and why
   next-token likelihood is measured in nats or bits.
@@ -39,7 +43,8 @@ failure, instrument it, and explain the trace from input bytes to hardware work.
 ### Systems
 
 - Python and PyTorch execution, autograd graphs, tensor layouts, and profiling.
-- GPU execution: warps, memory hierarchy, arithmetic intensity, kernels, and
+- **Graphics Processing Unit (GPU)** execution: warps, memory hierarchy,
+  arithmetic intensity, kernels, and
   synchronization.
 - Distributed computing: latency versus bandwidth, collectives, consistency,
   failures, and deterministic replay.
@@ -55,9 +60,11 @@ and compare the implementation with a fused kernel.
   synthetic data.
 - Filtering, language identification, quality models, safety filtering,
   personally identifiable information, copyright, and governance.
-- Exact and fuzzy deduplication, MinHash/LSH, contamination analysis, and split
+- Exact and fuzzy deduplication, **Minimum Hashing (MinHash)** and
+  **Locality-Sensitive Hashing (LSH)**, contamination analysis, and split
   integrity.
-- BPE, byte-level BPE, Unigram, byte fallback, vocabulary allocation, and the
+- **Byte Pair Encoding (BPE)**, byte-level BPE, Unigram, byte fallback,
+  vocabulary allocation, and the
   interaction between tokenization and multilingual/code efficiency.
 - Mixture design, temperature sampling, curricula, epoch accounting, and data
   provenance.
@@ -69,10 +76,14 @@ below an explicit threshold.
 ## Level 2 — Transformer foundations
 
 - Embeddings and tied output heads.
-- Scaled dot-product attention, causal masks, multi-head attention, MQA, GQA,
-  and latent-attention variants.
-- Absolute, relative, rotary, ALiBi, and extrapolated position representations.
-- Pre-norm/post-norm, LayerNorm/RMSNorm, residual paths, MLPs, GLU/SwiGLU, and
+- Scaled dot-product attention, causal masks, multi-head attention,
+  **Multi-Query Attention (MQA)**, **Grouped-Query Attention (GQA)**, and
+  latent-attention variants.
+- Absolute, relative, rotary, **Attention with Linear Biases (ALiBi)**, and
+  extrapolated position representations.
+- Pre-norm/post-norm, LayerNorm, **Root Mean Square Layer Normalization
+  (RMSNorm)**, residual paths, **Multilayer Perceptrons (MLPs)**,
+  **Gated Linear Units (GLUs)**, **Swish-Gated Linear Units (SwiGLUs)**, and
   initialization.
 - Dense versus mixture-of-experts models: routing, load balancing, expert
   parallelism, capacity, auxiliary losses, and expert specialization.
@@ -90,11 +101,14 @@ within a stated numerical tolerance.
   constraints; and inference-aware model design.
 - Batch size, sequence packing, optimizer states, warmup, decay, gradient noise,
   clipping, weight decay, and stability diagnostics.
-- FP32, TF32, FP16, BF16, FP8, quantized training, master weights, and stochastic
+- 32-bit floating point (FP32), TensorFloat-32 (TF32), 16-bit floating point
+  (FP16), Brain Floating Point 16 (BF16), 8-bit floating point (FP8),
+  quantized training, master weights, and stochastic
   rounding.
 - Checkpointing, evaluation during training, data ablations, and loss-to-capability
   correlations.
-- Dense and MoE distributed training with data, tensor, pipeline, sequence,
+- Dense and **Mixture-of-Experts (MoE)** distributed training with data, tensor,
+  pipeline, sequence,
   context, and expert parallelism.
 
 **Mastery check:** write a compute and memory budget, predict tokens/second,
@@ -113,7 +127,8 @@ model/data/checkpoint card.
   model merging.
 - Evaluation of helpfulness, style, knowledge, reasoning, tool use, and safety.
 
-**Mastery check:** construct a traceable SFT dataset, inspect masked labels token
+**Mastery check:** construct a traceable **Supervised Fine-Tuning (SFT)**
+dataset, inspect masked labels token
 by token, fine-tune a small model, and attribute an observed regression to data
 or optimization rather than intuition.
 
@@ -123,9 +138,11 @@ or optimization rather than intuition.
   and active sampling.
 - Bradley–Terry models, reward models, pairwise and listwise ranking, and reward
   uncertainty.
-- RLHF with PPO, KL control, value learning, generalized advantage estimation,
-  and reward normalization.
-- DPO-family offline preference objectives and their assumptions.
+- **Reinforcement Learning from Human Feedback (RLHF)** with **Proximal Policy
+  Optimization (PPO)**, KL control, value learning, **Generalized Advantage
+  Estimation (GAE)**, and reward normalization.
+- **Direct Preference Optimization (DPO)**-family offline preference objectives
+  and their assumptions.
 - AI feedback, constitutional methods, critique/revision, process supervision,
   and scalable oversight.
 - Reward hacking, overoptimization, Goodhart's law, sycophancy, and alignment
@@ -146,7 +163,8 @@ high variance.
 - Distillation versus online discovery; when RL improves search and when it
   merely changes sampling behavior.
 
-**Mastery check:** implement REINFORCE, RLOO, PPO, and GRPO on the same small
+**Mastery check:** implement REINFORCE, **REINFORCE Leave-One-Out (RLOO)**, PPO,
+and **Group Relative Policy Optimization (GRPO)** on the same small
 task; control sample count and compute; and compare estimator variance,
 effective sample size, entropy, and held-out success.
 
@@ -156,7 +174,8 @@ An agentic episode includes state-changing environment interaction rather than
 only one prompt and one response. Study the complete
 [Agentic RL curriculum](agentic-rl/index.md):
 
-- POMDP formulation and multiple time scales;
+- **Partially Observable Markov Decision Process (POMDP)** formulation and
+  multiple time scales;
 - planning, memory, tool use, perception, reflection, and self-improvement;
 - environment and task generation;
 - multi-turn rollout collection and trajectory storage;
@@ -172,7 +191,7 @@ environment leakage.
 
 ## Level 8 — Inference systems
 
-- Prefill/decode asymmetry, KV-cache layout, paged attention, prefix caching,
+- Prefill/decode asymmetry, **Key-Value (KV) cache** layout, paged attention,
   speculative decoding, and disaggregated serving.
 - Continuous and dynamic batching, scheduling, fairness, admission control,
   preemption, and tail latency.
@@ -191,7 +210,8 @@ trace rather than aggregate throughput alone.
 
 - Static benchmarks, dynamic benchmarks, capability elicitation, contamination,
   and statistical uncertainty.
-- LLM judges, pairwise evaluation, position/verbosity/self-preference bias, and
+- Large Language Model judges, pairwise evaluation,
+  position/verbosity/self-preference bias, and
   human validation.
 - Red teaming, misuse, prompt injection, tool authorization, sandboxing,
   monitoring, incident response, and rollback.

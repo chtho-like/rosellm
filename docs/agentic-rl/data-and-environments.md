@@ -1,6 +1,6 @@
 # Data and Environments
 
-In Agentic RL, the dataset is no longer only a table of prompts and answers. It
+In **Agentic Reinforcement Learning (Agentic RL)**, the dataset is no longer only a table of prompts and answers. It
 is a distribution over initial world states plus a versioned program that turns
 actions into future observations. The environment is therefore part of the
 training data, reward function, security boundary, and scientific claim.

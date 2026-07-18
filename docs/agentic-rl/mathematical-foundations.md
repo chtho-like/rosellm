@@ -1,12 +1,13 @@
 # Mathematical Foundations
 
-This chapter derives the objects that an Agentic RL implementation manipulates.
+This chapter derives the objects that an **Agentic Reinforcement Learning
+(Agentic RL)** implementation manipulates.
 The goal is to make every tensor in a training batch traceable to a probability,
 estimator, or explicit approximation.
 
 ## 1. Notation and the two nested policies
 
-An LLM agent has a semantic policy over environment actions and an
+A **Large Language Model (LLM)** agent has a semantic policy over environment actions and an
 autoregressive policy over tokens.
 
 - \(s_t\): latent environment state at decision step \(t\)

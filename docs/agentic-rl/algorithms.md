@@ -1,6 +1,7 @@
-# Algorithms for LLM and Agentic RL
+# Algorithms for Large Language Models and Agentic Reinforcement Learning
 
-An algorithm name is not a training recipe. The update depends on sampling,
+This chapter studies **Large Language Model (LLM) Agentic Reinforcement Learning
+(Agentic RL)**. An algorithm name is not a training recipe. The update depends on sampling,
 reward, credit unit, baseline, importance ratio, clipping, KL, loss reduction,
 data reuse, and policy lag. This chapter decomposes those choices and shows when
 the major algorithm families are appropriate.
@@ -30,9 +31,10 @@ m_{i,t,j}\,w_{i,t,j}(\theta)\,
 To compare two methods, fill in these six blanks rather than comparing their
 names.
 
-## 2. Behavioral cloning and SFT
+## 2. Behavioral cloning and Supervised Fine-Tuning
 
-SFT minimizes negative log-likelihood of demonstrated policy tokens:
+**Supervised Fine-Tuning (SFT)** is behavioral cloning for model outputs. It
+minimizes negative log-likelihood of demonstrated policy tokens:
 
 \[
 L_{\text{SFT}}=-\frac{1}{Z}\sum_{i,t,j}
@@ -59,7 +61,7 @@ SFT remains part of almost every practical Agentic RL pipeline, but it is not RL
 For sampled trajectory \(\tau_i\),
 
 \[
-\widehat g=rac{1}{B}\sum_i\sum_t
+\widehat g=\frac{1}{B}\sum_i\sum_t
 (G_{i,t}-b(h_{i,t}))\nabla\log\pi_\theta(a_{i,t}\mid h_{i,t}).
 \]
 
@@ -92,7 +94,10 @@ old-policy samples are reused. See Hu,
 [*REINFORCE++*](https://arxiv.org/abs/2501.03262) (2025) and the implementation
 used by the selected framework.
 
-## 4. RLOO
+## 4. REINFORCE Leave-One-Out
+
+**REINFORCE Leave-One-Out (RLOO)** uses other samples for the same task as a
+baseline for the current sample.
 
 For \(G\) independent outputs on the same task,
 
@@ -114,9 +119,9 @@ As \(G\) grows, rollout cost rises. Ahmadian et al. found simple REINFORCE-style
 methods competitive for RLHF when carefully tuned
 ([*Back to Basics*](https://arxiv.org/abs/2402.14740), 2024).
 
-## 5. Actor–critic and PPO
+## 5. Actor–critic and Proximal Policy Optimization
 
-PPO normally combines:
+**Proximal Policy Optimization (PPO)** normally combines:
 
 1. on/near-policy rollouts under \(\pi_{\text{old}}\);
 2. a critic \(V_\phi(h_t)\);
@@ -163,9 +168,9 @@ L^{\text{CLIP}}=
 - Is reference KL a reward, loss, or both?
 - What is the global loss denominator?
 
-## 6. GRPO
+## 6. Group Relative Policy Optimization
 
-DeepSeekMath introduced Group Relative Policy Optimization to eliminate the
+DeepSeekMath introduced **Group Relative Policy Optimization (GRPO)** to eliminate the
 learned critic. For each question/task, sample \(G\) outputs, compute rewards,
 and estimate relative advantages, commonly
 
@@ -220,9 +225,10 @@ Use controlled experiments. Removing normalization can increase raw gradient
 scale and require learning-rate/clipping changes; an ablation that changes both
 does not isolate estimator bias.
 
-## 8. DAPO
+## 8. Decoupled Clip and Dynamic sAmpling Policy Optimization
 
-DAPO reports an open large-scale reasoning-RL recipe built around four changes
+**Decoupled Clip and Dynamic sAmpling Policy Optimization (DAPO)** reports an
+open large-scale reasoning-RL recipe built around four changes
 ([Yu et al., 2025](https://arxiv.org/abs/2503.14476)):
 
 1. **clip-higher:** separate lower/upper ratio bounds to preserve exploration;
@@ -243,11 +249,11 @@ Operational implications:
 
 DAPO is a recipe, not simply a replacement equation.
 
-## 9. GSPO and sequence-level ratios
+## 9. Group Sequence Policy Optimization and sequence-level ratios
 
 Token-level PPO clipping treats each token ratio separately even though reward
-often belongs to the complete response. Group Sequence Policy Optimization
-defines an importance ratio from sequence likelihood and applies sequence-level
+often belongs to the complete response. **Group Sequence Policy Optimization
+(GSPO)** defines an importance ratio from sequence likelihood and applies sequence-level
 clipping/optimization
 ([Zheng et al., *GSPO*](https://arxiv.org/abs/2507.18071), 2025).
 
@@ -364,7 +370,46 @@ AReaL studies asynchronous language-model RL and staleness-aware training
 versions and actual divergence; ten tiny updates can be closer than one large
 update.
 
-## 14. Offline preference objectives
+## 14. Single-Rollout Asynchronous Optimization
+
+**Single-Rollout Asynchronous Optimization (SAO)** addresses a structural
+mismatch between long asynchronous agent episodes and prompt-group methods
+([Hou et al., 2026](https://arxiv.org/abs/2607.07508)). It combines:
+
+1. one rollout per prompt, consumed as soon as it finishes;
+2. a learned critic because group size one has no group-relative baseline;
+3. two critic updates per actor update in the paper experiments;
+4. frozen critic-attention parameters with trainable Mixture-of-Experts
+   projections;
+5. skip-observation token-level Generalized Advantage Estimation; and
+6. **Direct Double-Sided Importance Sampling (DIS)** from stored rollout
+   log-probabilities to current-policy log-probabilities.
+
+DIS keeps a token only when
+
+\[
+1-\epsilon_l<
+\exp(\log\pi_\theta-\log\pi_{\text{rollout}})
+<1+\epsilon_h.
+\]
+
+Outside the interval its policy contribution is zero. Unlike PPO clipping,
+this masks both tails for either advantage sign. SAO is attractive when:
+
+- trajectory lengths have a severe long tail;
+- each environment state naturally yields one attempt;
+- the learner and rollout service run concurrently;
+- a critic can learn state-dependent baselines; and
+- exact behavior tokens and log-probabilities are preserved.
+
+Its costs are a second large model, critic cold start, additional value updates,
+off-policy bias, and discarded tail tokens. The authors state that SAO was
+deployed in GLM-5.2's agentic-RL pipeline, but publish controlled hyperparameters
+only for Qwen3-30B-A3B. See the
+[full derivation](derivations-and-code.md#18-single-rollout-asynchronous-optimization-derived)
+and [GLM evidence analysis](case-studies/glm.md#113-sao-the-missing-algorithmic-link-du).
+
+## 15. Offline preference objectives
 
 Offline preference optimization is useful for bootstrap and alignment but is not
 an online agent algorithm by itself.
@@ -394,7 +439,7 @@ automatically cover states induced by the updated policy.
 Refresh data online or evaluate distribution shift if the trained policy moves
 beyond the comparison dataset.
 
-## 15. Model-based, search, and self-play extensions
+## 16. Model-based, search, and self-play extensions
 
 ### Search plus policy learning
 
@@ -424,7 +469,7 @@ self-play can prevent overfitting to one opponent. Anchor progress to external
 tasks so agents do not learn private protocols that score well only against one
 another.
 
-## 16. Algorithm selection matrix
+## 17. Algorithm selection matrix
 
 | Situation | Useful starting point | Why | Main warning |
 |---|---|---|---|
@@ -435,6 +480,7 @@ another.
 | Concern about GRPO normalization bias | Dr. GRPO-style ablation | exposes denominator effects | retune scale fairly |
 | Need open reasoning-RL recipe | DAPO-style recipe | exploration/dynamic sampling details | selection and length effects |
 | Long stale asynchronous rollouts | bounded lag + off-policy correction | improves utilization | bias/variance and version integrity |
+| Long-tail agent rollouts, one sample per changing state | SAO-style actor–critic | no prompt-group barrier; state baseline | critic cost and DIS bias |
 | Sparse long-horizon reward | value/process/branching/hierarchy | denser credit | learned proxy exploitation |
 | Subjective or safety preference | reward model + PPO or DPO | human/AI preference signal | judge/reward overoptimization |
 | Expensive unsafe environment | SFT/offline data + sandboxed conservative RL | limits exploration risk | weak coverage of novel states |
@@ -442,7 +488,7 @@ another.
 Start with the simplest estimator that can represent the credit structure, then
 add complexity only after a controlled diagnostic demonstrates the need.
 
-## 17. Fair algorithm comparison
+## 18. Fair algorithm comparison
 
 Hold constant or account for:
 
@@ -462,7 +508,7 @@ If GRPO samples eight outputs per prompt and PPO samples one, equal optimizer
 steps do not mean equal data or compute. If dynamic sampling discards easy/hard
 groups, report all attempted samples.
 
-## 18. Ablation order
+## 19. Ablation order
 
 When a run fails, change one axis at a time:
 
@@ -499,3 +545,6 @@ Algorithmic novelty cannot rescue a corrupted trajectory contract.
 7. Sergey Levine et al.,
    [“Offline Reinforcement Learning: Tutorial, Review, and Perspectives on Open Problems”](https://arxiv.org/abs/2005.01643),
    2020.
+8. Zhenyu Hou, Yujiang Li, Jie Tang, and Yuxiao Dong,
+   [“Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning”](https://arxiv.org/abs/2607.07508),
+   2026.

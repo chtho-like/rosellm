@@ -1,7 +1,8 @@
 # Systems and Infrastructure
 
-Agentic RL is often generation-bound and environment-bound rather than purely
-optimizer-bound. A fast trainer is useless when rollout GPUs wait on browsers,
+**Agentic Reinforcement Learning (Agentic RL)** is often generation-bound and
+environment-bound rather than purely optimizer-bound. A fast trainer is
+useless when rollout **Graphics Processing Units (GPUs)** wait on browsers,
 sandboxes, users, reward models, or straggling episodes. The systems objective
 is to maximize **valid, appropriately on-policy, reward-bearing training tokens
 per unit time and cost** without corrupting the statistical objective.
@@ -12,10 +13,10 @@ per unit time and cost** without corrupting the statistical objective.
 |---|---|---|
 | Task registry/curriculum | choose task, seed, group, and priority | task attempts and difficulty |
 | Rollout controller | create/cancel episodes and enforce budgets | trajectory lifecycle |
-| Policy inference server | sample exact token IDs/log-probabilities | KV cache and policy version |
+| Policy inference server | sample exact token identifiers (IDs) and log-probabilities | Key-Value (KV) cache and policy version |
 | Agent loop | render history, parse actions, manage memory | transcript/scaffold state |
 | Environment worker | reset, step, snapshot, validate | world state |
-| Tool/sandbox pool | execute code, APIs, GUI, retrieval | process/tool state |
+| Tool/sandbox pool | execute code, Application Programming Interfaces (APIs), Graphical User Interfaces (GUIs), and retrieval | process/tool state |
 | Reward/verifier service | compute versioned feedback | evaluator models/rubrics |
 | Trajectory store | immutable event and artifact lineage | tokens, observations, rewards |
 | Advantage/data worker | group, filter, estimate, and pack | returns and tensors |

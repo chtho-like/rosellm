@@ -39,6 +39,23 @@ support algorithmic and quantitative claims. A leaderboard is not a substitute
 for a benchmark protocol. A model's generated explanation of its own training
 is not evidence about that training.
 
+## Terminology and abbreviation rule
+
+Every uncommon abbreviation is expanded and explained at its first meaningful
+use in each chapter. Expansion alone is insufficient: the same sentence or the
+next one must state what the concept does in that context. For example:
+
+> A **Partially Observable Markov Decision Process (POMDP)** models an
+> environment whose complete state is hidden; the agent chooses actions from
+> its observation history instead.
+
+Common prose should prefer the full idea over dense abbreviation chains. A
+later use may use only the abbreviation. Hardware product names and units do
+not need invented expansions. When authors themselves do not define a paper
+label as an acronym, this repository says so rather than reverse-engineering a
+plausible phrase. The repository-wide [glossary](glossary.md) provides a second
+lookup path, but does not replace first-use explanations.
+
 ## Required citation precision
 
 A useful citation lets a reader verify the exact claim without searching an

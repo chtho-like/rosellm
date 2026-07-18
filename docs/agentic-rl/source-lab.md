@@ -1,10 +1,15 @@
 # Source-Level Agentic RL Lab
 
-This lab turns the equations into code small enough to audit. It intentionally
-starts below an LLM framework: one semantic action is one token, the environment
+This **Agentic Reinforcement Learning (Agentic RL)** lab turns the equations
+into code small enough to audit. It intentionally starts below a **Large
+Language Model (LLM)** framework: one semantic action is one token, the environment
 has three turns, and an exact terminal verifier supplies reward. Once every
 tensor is understood, the same contracts extend to transformer tokens, tool
 observations, packed trajectories, and distributed rollout.
+
+The code implements **Generalized Advantage Estimation (GAE)** for temporal
+credit, **Proximal Policy Optimization (PPO)** clipping for policy updates, and
+**REINFORCE Leave-One-Out (RLOO)** for critic-free within-task baselines.
 
 ## 1. Repository map
 

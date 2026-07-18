@@ -4,6 +4,9 @@ This bibliography is a reading map, not a popularity ranking. Primary sources
 are grouped by the question they answer. Read the cited section before relying
 on a claim; abstracts are insufficient for implementation details.
 
+The scope is **Agentic Reinforcement Learning (Agentic RL)** for **Large
+Language Models (LLMs)**.
+
 ## Foundations
 
 1. **Sutton and Barto — *Reinforcement Learning: An Introduction*, 2nd ed.
@@ -72,6 +75,12 @@ on a claim; abstracts are insufficient for implementation details.
 7. **Liu et al. — “Understanding R1-Zero-Like Training” (2025).** Analysis of
    GRPO biases, response-length effects, and the Dr. GRPO correction.
    [arXiv](https://arxiv.org/abs/2503.20783)
+8. **Hou et al. — “Single-Rollout Asynchronous Optimization for Agentic
+   Reinforcement Learning” (2026).** Single-rollout asynchronous actor–critic,
+   direct double-sided importance masking, faster/frozen-attention critic
+   updates, and skip-observation GAE. The authors report deployment in
+   GLM-5.2, while controlled experiments use Qwen3-30B-A3B.
+   [arXiv](https://arxiv.org/abs/2607.07508)
 
 ## Agents, tools, memory, and environment interaction
 

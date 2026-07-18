@@ -1,8 +1,32 @@
-# Moonshot AI / Kimi: Long Context, Muon, Tool RL, and Agent Swarms
+# Moonshot AI / Kimi: Long Context, Muon, Tool Reinforcement Learning, and Agent Swarms
 
 **Verified through:** 2026-07-19. Sources are Moonshot papers, repositories,
 model cards, and official product/research posts. Vendor benchmark claims are
 not independent reproductions.
+
+## Reader's terminology key
+
+- **Chain of Thought (CoT):** intermediate reasoning before an answer;
+  long-CoT deliberately allows extended traces.
+- **Mixture of Experts (MoE):** sparse routing that activates only a subset of
+  feed-forward experts for each token.
+- **Key-Value (KV) cache:** stored attention keys/values reused during decoding;
+  Mooncake manages this cache across memory tiers and machines.
+- **Remote Direct Memory Access (RDMA):** network transfer directly between
+  registered memory regions with little central-processing-unit involvement.
+- **Mixture of Block Attention (MoBA):** Moonshot's sparse routing of a query to
+  selected context blocks.
+- **Kimi Delta Attention (KDA):** Moonshot's gated delta-rule linear attention.
+- **Multi-head Latent Attention (MLA):** a compressed latent key/value attention
+  representation used in Kimi's hybrid architectures.
+- **Attention Residuals (AttnRes):** learned attention over earlier residual
+  streams instead of an unweighted cumulative residual sum.
+- **Parallel-Agent Reinforcement Learning (PARL):** K2.5 training for a learned
+  orchestrator that launches and coordinates parallel sub-agents.
+- **On-Policy Distillation (OPD):** teacher supervision on the student's own
+  sampled state distribution.
+- **Muon:** an optimizer name, not an acronym; it orthogonalizes matrix-shaped
+  updates, and MuonClip adds Moonshot's stability control for K2.
 
 ## 1. Executive synthesis
 

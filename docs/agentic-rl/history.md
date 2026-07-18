@@ -1,6 +1,6 @@
 # Historical Development of Agentic Reinforcement Learning
 
-Agentic RL did not appear in one paper. It is the convergence of sequential
+**Agentic Reinforcement Learning (Agentic RL)** did not appear in one paper. It is the convergence of sequential
 decision making, policy gradients, language-model post-training, tool-using
 agents, verifiable reasoning, and distributed generation systems. This chapter
 tracks those strands separately so that later terminology is not projected
@@ -16,7 +16,7 @@ because of both its immediate reward and the future state distribution it
 induces. This is exactly what one-response preference optimization abstracts
 away and agentic RL restores.
 
-By the late 1980s, temporal-difference methods combined bootstrapping with
+By the late 1980s, **Temporal-Difference (TD)** methods combined bootstrapping with
 experience. Sutton's 1988 paper introduced a family of TD methods and connected
 them to prediction over temporally extended trajectories
 ([Sutton, 1988](https://doi.org/10.1007/BF00115009)).
@@ -31,7 +31,10 @@ without differentiating through environment dynamics:
 =\mathbb{E}\left[G_t\nabla_\theta\log\pi_\theta(a_t\mid s_t)\right].
 \]
 
-This identity remains the core of modern LLM RL. PPO, RLOO, GRPO, and many
+This identity remains the core of modern **Large Language Model (LLM)
+Reinforcement Learning (RL)**. **Proximal Policy Optimization (PPO)**,
+**REINFORCE Leave-One-Out (RLOO)**, **Group Relative Policy Optimization
+(GRPO)**, and many
 agent-training objectives primarily differ in their advantage estimator,
 regularization, sampling structure, and update constraints—not in the basic
 score-function identity
@@ -66,7 +69,7 @@ optimized a policy against it
 ([*Deep Reinforcement Learning from Human Preferences*](https://arxiv.org/abs/1706.03741)).
 The paper used control tasks rather than LLMs, but the data loop—sample behavior,
 ask humans to compare clips, fit reward, optimize policy—became the conceptual
-template for RLHF.
+template for **Reinforcement Learning from Human Feedback (RLHF)**.
 
 ### 2017–2020: Transformers and language-model preference optimization
 
@@ -251,6 +254,21 @@ This formalization is valuable because it prevents “agentic” from becoming a
 marketing synonym for any strong model. An actual agentic-RL claim should expose
 the environment, transitions, horizon, feedback, trajectory collection, and
 credit assignment.
+
+### July 2026: single-rollout asynchronous optimization
+
+Hou et al. introduced **Single-Rollout Asynchronous Optimization (SAO)** for
+long-tail asynchronous agent trajectories
+([paper](https://arxiv.org/abs/2607.07508)). Group Relative Policy Optimization
+(GRPO) must wait for all responses to one prompt before computing a group
+baseline. SAO instead consumes one rollout as soon as it finishes, restores a
+learned critic, uses skip-observation Generalized Advantage Estimation, and
+masks tokens with excessive rollout/current-policy ratios on either side.
+
+The authors explicitly state that SAO was deployed in the GLM-5.2 agentic-RL
+pipeline. Their controlled experiments use Qwen3-30B-A3B, so the paper is
+strong evidence of deployment and algorithm design but not a public GLM-5.2
+hyperparameter recipe.
 
 ## 7. The current frontier
 

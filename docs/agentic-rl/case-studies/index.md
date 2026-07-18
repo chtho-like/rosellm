@@ -29,7 +29,7 @@ independent reproductions.
 | Lab | Latest public generation | Disclosed architecture | Context | Agentic post-training disclosure | Critical unknown |
 |---|---|---|---:|---|---|
 | DeepSeek | V4 Preview (2026-04-24) | Flash 284B/13B; Pro 1.6T/49B MoE | 1M | >10 GRPO specialists merged by full-vocabulary multi-teacher on-policy distillation; million-token fault-tolerant rollouts and DSec sandbox described | GPU count, duration, cost, exact task/reward volumes |
-| Zhipu AI | GLM-5.2 (2026-06-16) | 744B/40B MoE family; public config has unresolved layer/count conventions | 1M | critic-based PPO for variable compacted sub-traces; token-level advantages/loss; >10 experts merged with parallel on-policy distillation; online anti-hack guard | critic/GAE/PPO hyperparameters, task volume, hardware and cost |
+| Zhipu AI | GLM-5.2 (2026-06-16) | 753B hosted checkpoint; SAO paper rounds to 750B/40B active; earlier family convention 744B/40B | 1M | SAO is explicitly reported as deployed; critic PPO for variable compacted sub-traces; token-level advantages/loss; >10 experts merged with parallel on-policy distillation; online anti-hack guard | GLM-specific SAO/PPO hyperparameters and stage scope, task volume, hardware and cost |
 | Moonshot AI | K3 (2026-07-17) | 2.8T; 896 experts, 16 selected; KDA + AttnRes + LatentMoE | 1M | product demonstrations disclose long agent runs, but K3 training/RL report was still pending | active params, data/tokens, RL algorithm, environments, hardware and cost |
 
 K3 full weights were announced for 2026-07-27, after this verification cutoff.

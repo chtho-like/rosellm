@@ -1,8 +1,38 @@
-# Zhipu AI / GLM: From Blank Infilling to Compaction-Aware Agentic PPO
+# Zhipu AI / GLM: From Blank Infilling to Compaction-Aware Agentic Reinforcement Learning
 
 **Verified through:** 2026-07-19. Sources are official papers, repositories,
 configs, model cards, and Zhipu/Z.ai releases. Vendor benchmarks are labeled as
 such.
+
+## Reader's terminology key
+
+- **General Language Model (GLM):** the original research name for the
+  autoregressive blank-infilling foundation; later it became a product-family
+  name rather than one unchanged architecture.
+- **Supervised Fine-Tuning (SFT):** imitation learning on curated answers or
+  tool trajectories.
+- **Reinforcement Learning from Human Feedback (RLHF):** policy optimization
+  from human preferences, usually mediated by a learned reward model.
+- **Proximal Policy Optimization (PPO):** actor–critic policy optimization with
+  bounded/clipped probability-ratio movement.
+- **Generalized Advantage Estimation (GAE):** a weighted mixture of
+  temporal-difference residuals for lower-variance credit assignment.
+- **Group Relative Policy Optimization (GRPO):** critic-free optimization from
+  within-prompt response-group comparisons.
+- **Single-Rollout Asynchronous Optimization (SAO):** one-rollout-per-prompt
+  actor–critic training with direct double-sided importance masking; its authors
+  report deployment in GLM-5.2.
+- **Token-In, Token-Out (TITO):** GLM-5's exact-token/log-probability transport
+  between rollout and training services.
+- **Mixture of Experts (MoE):** sparse activation of a few feed-forward experts
+  per token.
+- **Multi-head Latent Attention (MLA), Multi-Token Prediction (MTP), and
+  DeepSeek Sparse Attention (DSA):** respectively compressed attention state,
+  prediction of multiple future tokens, and selected-token sparse attention.
+- **On-Policy Distillation (OPD):** teacher supervision evaluated on states
+  sampled by the student.
+- **Key-Value (KV) cache:** stored attention keys and values reused during
+  decoding.
 
 ## 1. Three related lineages
 
@@ -521,13 +551,17 @@ environments, algorithm changes, reward, and compute are **[U]**.
 Sources: [official release](https://z.ai/blog/glm-5.2) (2026-06-16),
 [config](https://huggingface.co/zai-org/GLM-5.2/blob/main/config.json),
 [IndexCache paper](https://arxiv.org/abs/2603.12201),
+[SAO paper](https://arxiv.org/abs/2607.07508),
 [GLM-5 repository](https://github.com/zai-org/GLM-5).
 
 No official GLM-5.3 source was found by the cutoff.
 
 ### 11.1 Architecture and 1M context [D/C]
 
-- same official 744B/40B family;
+- the public checkpoint is counted as 753B by Hugging Face; the SAO paper
+  rounds the model to 750B total/40B active (`750B-A40B`); earlier Z.ai
+  material describes the family as 744B/40B, so parameter-count convention is
+  material and should always be named;
 - context 1,048,576; public config still 78 hidden layers;
 - RoPE theta 8M; DSA top-k 2,048.
 
@@ -564,7 +598,144 @@ GLM-5.2 moved to:
 coefficients, batch, optimizer. “Uses PPO” is not enough to reconstruct the
 update.
 
-### 11.3 Parallel on-policy expert distillation [D]
+### 11.3 SAO: the missing algorithmic link [D/U]
+
+The user-visible GLM-5.2 release predates a more precise primary source. Hou,
+Li, Tang, and Dong's 2026 paper
+[Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning](https://arxiv.org/abs/2607.07508)
+introduces **Single-Rollout Asynchronous Optimization (SAO)** and states in the
+abstract that SAO was deployed in the agentic-RL pipeline used to train the
+open GLM-5.2 model. Two authors performed the work while interning at Z.AI.
+This is direct author disclosure **[D]**, not proof that every GLM-5.2 RL stage
+used SAO.
+
+#### Why group optimization becomes a systems problem
+
+**Group Relative Policy Optimization (GRPO)** samples \(G\) answers for one
+prompt and needs the group before it can compute relative advantages. If
+rollout durations are \(T_1,\ldots,T_G\), a synchronous group becomes ready at
+
+\[
+T_{\text{ready}}=\max_i T_i,
+\]
+
+so finished workers wait for the longest member. Long coding episodes make the
+tail large. Meanwhile the learner may update, so a late group can contain
+tokens produced by stale rollout-policy versions. SAO sets \(G=1\): each
+trajectory enters training as soon as it finishes. That removes the
+within-prompt group barrier but also removes GRPO's group-mean baseline.
+
+#### Direct Double-Sided Importance Sampling
+
+SAO uses **Direct Double-Sided Importance Sampling (DIS)**. For an action token
+recorded with rollout-engine log-probability
+\(\log\pi_{\text{rollout}}(a_t\mid s_t)\), it recomputes
+
+\[
+r_t(\theta)=\exp\!\left[
+\log\pi_\theta(a_t\mid s_t)-
+\log\pi_{\text{rollout}}(a_t\mid s_t)
+\right].
+\]
+
+It drops a separate \(\pi_{\text{old}}\) and gates the token with
+
+\[
+f(r;\epsilon_l,\epsilon_h)=
+\begin{cases}
+r,&1-\epsilon_l<r<1+\epsilon_h,\\
+0,&\text{otherwise}.
+\end{cases}
+\]
+
+The paper prints
+
+\[
+L(\theta)=\widehat{\mathbb E}_t\!left[
+f(r_t;\epsilon_l,\epsilon_h)\widehat A_t
+\log\pi_\theta(a_t\mid s_t)
+\right].
+\]
+
+This is strict **two-sided masking**, not ordinary Proximal Policy Optimization
+(PPO) clipping. PPO saturates only the direction in which the objective would
+improve too far; DIS gives *zero* gradient contribution outside the interval
+regardless of advantage sign. The paper does not mark whether \(f(r_t)\) is
+stop-gradient. A literal autodifferentiation through both \(r_t\) and
+\(\log\pi_\theta\) adds an extra derivative term, so a source-level
+reproduction must resolve this implementation detail rather than silently
+assuming one interpretation **[U]**.
+
+#### Restoring a critic at group size one
+
+With no same-prompt comparison group, SAO learns a value model
+\(V_\phi(s_t)\):
+
+1. run \(K=2\) critic updates for every actor update in the reported
+   experiments;
+2. freeze the critic's full-attention parameters and optimize its
+   Mixture-of-Experts (MoE) projections, because full attention updates had
+   much larger gradient norms;
+3. scale value-model pretraining to reduce cold-start error, although the paper
+   does not disclose the corpus size; and
+4. estimate token advantages with a length-adaptive form of Generalized
+   Advantage Estimation (GAE).
+
+For an agent trace \([a_0,o_0,a_1,o_1,\ldots]\), where \(a_i\) is a model action
+and \(o_i\) is an environment observation, skip-observation GAE bridges from
+the last token \(a_{i,N}\) directly to the first token of the next model action:
+
+\[
+\begin{aligned}
+\delta_i
+  &=r_i+\gamma V_\phi(a_{i+1,0})-V_\phi(a_{i,N}),\\
+\widehat A(a_{i,N})
+  &=\delta_i+\gamma\lambda\widehat A(a_{i+1,0}).
+\end{aligned}
+\]
+
+Observation tokens are not sampled by the policy and therefore receive no
+policy loss or artificial token-to-token value transition. The *next action's
+state still includes the observation in its context*; “skip observation” must
+not be misread as hiding tool feedback from the model.
+
+#### What the experiments establish—and what they do not
+
+The controlled experiments use **Qwen3-30B-A3B**, not GLM-5.2:
+
+| Setting | Published experimental value |
+|---|---|
+| math/tool initialization | three-epoch SFT of Qwen3-30B-A3B-Thinking-2507 on GPT-OSS-120B-generated tool traces |
+| asynchronous batch/group | 128 trajectories / one rollout per prompt |
+| maximum length | 128K tokens |
+| actor learning rate | \(10^{-6}\) |
+| reasoning DIS interval | \((1-0.3,1+5.0)=(0.7,6.0)\) |
+| coding DIS interval | \((1-0.8,1+3.0)=(0.2,4.0)\) |
+| critic | learning rate \(5\times10^{-6}\), 10-step warmup, two updates per actor update |
+| coding scaffold | OpenHands, at most 300 turns, 128K context |
+
+Vendor-author-reported outcomes are 97.3 versus 84.2 on AIME 2025, 74.8
+versus 54.8 on BeyondAIME, 88.3 versus 76.0 on HMMT November 2025, and 74.0
+versus 55.8 on IMOAnswerBench for SAO versus the reported GRPO baseline.
+SWE-bench Verified is 29.8 for SAO, 27.0 for GRPO+DIS, and 23.0 for the base
+checkpoint. The paper reports vanilla GRPO collapse around 160 steps, while
+SAO remains stable for roughly 1,000; these are one paper's controlled results,
+not independent evidence of GLM-5.2's gain.
+
+The correct production statement is narrow:
+
+- **[D]** SAO was deployed somewhere in GLM-5.2's agentic-RL pipeline.
+- **[I]** Its single-rollout/critic design naturally explains the official
+  release's move to individual-rollout learning for irregular compacted traces.
+- **[U]** which GLM-5.2 stages, domains, rewards, task counts, rollout counts,
+  coefficients, batch sizes, compute, and ablation deltas used SAO.
+- **[U]** whether SAO was the only actor optimizer or the final consolidation
+  optimizer; the release separately discloses parallel OPD for expert merging.
+
+Transferring the Qwen experiment's \(K=2\), learning rates, or very wide DIS
+intervals to a 753B checkpoint would turn disclosed evidence into fiction.
+
+### 11.4 Parallel on-policy expert distillation [D]
 
 - Slime supports white-box/black-box rollout, compact traces, and sub-agent
   workflows.
@@ -573,7 +744,7 @@ update.
 - KV-cache FP8 and flexible rollout/training resource organization.
 - Hardware count/type **[U]**.
 
-### 11.4 Online anti-hacking [D]
+### 11.5 Online anti-hacking [D]
 
 Coding rewards can be exploited by reading evaluation artifacts, copying
 answers, recovering upstream commits, downloading target source, or chained tool
@@ -588,7 +759,7 @@ every suspicion into terminal zero, preserves later correction data, and reduces
 collapse risk. The hard external block—not a negative reward alone—prevents the
 prohibited action.
 
-### 11.5 Vendor-reported results
+### 11.6 Vendor-reported results
 
 Terminal-Bench 2.1 81.0, SWE-bench Pro 62.1, NL2Repo 48.9, HLE 40.5 / 54.7 with
 tools, GPQA-Diamond 91.2, MCP-Atlas public 76.8, Tool-Decathlon 48.2. The release
