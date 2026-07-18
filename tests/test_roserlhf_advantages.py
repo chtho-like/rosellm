@@ -7,6 +7,7 @@ from rosellm.roserlhf.advantages import (
     generalized_advantage_estimation,
     group_standardized_advantages,
     leave_one_out_advantages,
+    skip_observation_generalized_advantage_estimation,
 )
 
 
@@ -92,3 +93,62 @@ def test_broadcast_turn_advantages_rejects_invalid_unmasked_id() -> None:
             torch.tensor([[2]]),
             torch.tensor([[True]]),
         )
+
+
+def test_skip_observation_gae_bridges_semantic_action_boundaries() -> None:
+    advantages, targets = skip_observation_generalized_advantage_estimation(
+        rewards=torch.tensor([[0.0, 1.0]]),
+        action_end_values=torch.tensor([[0.2, 0.4]]),
+        next_action_values=torch.tensor([[0.4, 0.0]]),
+        terminated=torch.tensor([[False, True]]),
+        gamma=1.0,
+        gae_lambda=1.0,
+    )
+    torch.testing.assert_close(advantages, torch.tensor([[0.8, 0.6]]))
+    torch.testing.assert_close(targets, torch.tensor([[1.0, 1.0]]))
+
+
+def test_skip_observation_gae_true_terminal_ignores_next_value() -> None:
+    advantages, targets = skip_observation_generalized_advantage_estimation(
+        rewards=torch.tensor([[1.0]]),
+        action_end_values=torch.tensor([[0.25]]),
+        next_action_values=torch.tensor([[999.0]]),
+        terminated=torch.tensor([[True]]),
+    )
+    torch.testing.assert_close(advantages, torch.tensor([[0.75]]))
+    torch.testing.assert_close(targets, torch.tensor([[1.0]]))
+
+
+def test_skip_observation_gae_bootstraps_a_time_limit() -> None:
+    advantages, targets = skip_observation_generalized_advantage_estimation(
+        rewards=torch.tensor([[2.0]]),
+        action_end_values=torch.tensor([[1.0]]),
+        next_action_values=torch.tensor([[5.0]]),
+        terminated=torch.tensor([[False]]),
+        gamma=0.5,
+    )
+    torch.testing.assert_close(advantages, torch.tensor([[3.5]]))
+    torch.testing.assert_close(targets, torch.tensor([[4.5]]))
+
+
+def test_skip_observation_gae_skips_padding_without_cutting_the_trace() -> None:
+    advantages, targets = skip_observation_generalized_advantage_estimation(
+        rewards=torch.tensor([[1.0, 999.0, 2.0]]),
+        action_end_values=torch.zeros(1, 3),
+        next_action_values=torch.zeros(1, 3),
+        terminated=torch.tensor([[False, False, True]]),
+        valid_mask=torch.tensor([[True, False, True]]),
+    )
+    torch.testing.assert_close(advantages, torch.tensor([[3.0, 0.0, 2.0]]))
+    torch.testing.assert_close(targets, torch.tensor([[3.0, 0.0, 2.0]]))
+
+
+def test_skip_observation_lambda_zero_is_one_step_temporal_difference() -> None:
+    advantages, _ = skip_observation_generalized_advantage_estimation(
+        rewards=torch.tensor([[0.0, 1.0]]),
+        action_end_values=torch.tensor([[0.2, 0.4]]),
+        next_action_values=torch.tensor([[0.4, 0.0]]),
+        terminated=torch.tensor([[False, True]]),
+        gae_lambda=0.0,
+    )
+    torch.testing.assert_close(advantages, torch.tensor([[0.2, 0.6]]))

@@ -1,9 +1,13 @@
+import math
+
 import pytest
 import torch
 
 from rosellm.roserlhf.losses import (
     clipped_policy_loss,
+    direct_double_sided_mask,
     gather_token_logprobs,
+    sao_policy_loss,
     sequence_log_ratio,
 )
 
@@ -85,3 +89,102 @@ def test_clipped_loss_rejects_empty_mask() -> None:
     values = torch.zeros(1, 2)
     with pytest.raises(ValueError, match="empty mask"):
         clipped_policy_loss(values, values, values, torch.zeros_like(values, dtype=torch.bool))
+
+
+def test_direct_double_sided_mask_uses_strict_boundaries() -> None:
+    ratios = torch.tensor(
+        [0.8, 0.800001, 1.0, 1.199999, 1.2], dtype=torch.float64
+    )
+    trusted = direct_double_sided_mask(
+        ratios,
+        clip_low=0.2,
+        clip_high=0.2,
+    )
+    assert torch.equal(
+        trusted,
+        torch.tensor([False, True, True, True, False]),
+    )
+
+
+def test_sao_rejects_both_tails_but_keeps_all_action_tokens_in_denominator() -> None:
+    current = torch.tensor(
+        [[math.log(0.5), 0.0, math.log(2.0)]],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    output = sao_policy_loss(
+        current,
+        torch.zeros_like(current),
+        torch.ones_like(current),
+        torch.ones_like(current, dtype=torch.bool),
+        clip_low=0.2,
+        clip_high=0.2,
+    )
+
+    assert torch.equal(
+        output.trusted_mask,
+        torch.tensor([[False, True, False]]),
+    )
+    assert output.rejected_fraction.item() == pytest.approx(2.0 / 3.0)
+    output.loss.backward()
+    assert current.grad is not None
+    torch.testing.assert_close(
+        current.grad,
+        torch.tensor([[0.0, -1.0 / 3.0, 0.0]], dtype=torch.float64),
+    )
+
+
+def test_sao_ratio_stop_gradient_choice_exposes_published_ambiguity() -> None:
+    rollout = torch.tensor([[-0.6]], dtype=torch.float64, requires_grad=True)
+    ratio = math.exp(0.1)
+
+    detached_current = torch.tensor([[-0.5]], dtype=torch.float64, requires_grad=True)
+    detached = sao_policy_loss(
+        detached_current,
+        rollout,
+        torch.tensor([[2.0]], dtype=torch.float64),
+        torch.tensor([[True]]),
+        clip_low=0.2,
+        clip_high=0.2,
+        detach_ratio=True,
+    )
+    detached.loss.backward()
+    assert detached_current.grad is not None
+    assert detached_current.grad.item() == pytest.approx(-2.0 * ratio)
+    assert rollout.grad is None
+
+    attached_current = torch.tensor([[-0.5]], dtype=torch.float64, requires_grad=True)
+    attached = sao_policy_loss(
+        attached_current,
+        rollout,
+        torch.tensor([[2.0]], dtype=torch.float64),
+        torch.tensor([[True]]),
+        clip_low=0.2,
+        clip_high=0.2,
+        detach_ratio=False,
+    )
+    attached.loss.backward()
+    assert attached_current.grad is not None
+    assert attached_current.grad.item() == pytest.approx(-2.0 * ratio * (1.0 - 0.5))
+    assert rollout.grad is None
+
+
+def test_sao_masks_environment_observations_from_loss_and_diagnostics() -> None:
+    current = torch.zeros(1, 3, requires_grad=True)
+    rollout = torch.tensor([[0.0, -10.0, 0.0]])
+    advantages = torch.tensor([[1.0, 1000.0, -1.0]])
+    action_mask = torch.tensor([[True, False, True]])
+
+    output = sao_policy_loss(
+        current,
+        rollout,
+        advantages,
+        action_mask,
+        clip_low=0.2,
+        clip_high=0.2,
+    )
+    output.loss.backward()
+    assert current.grad is not None
+    assert current.grad[0, 1].item() == 0.0
+    assert output.rejected_fraction.item() == pytest.approx(0.0)
+    assert torch.equal(output.trusted_mask, action_mask)

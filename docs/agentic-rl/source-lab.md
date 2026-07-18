@@ -8,19 +8,21 @@ tensor is understood, the same contracts extend to transformer tokens, tool
 observations, packed trajectories, and distributed rollout.
 
 The code implements **Generalized Advantage Estimation (GAE)** for temporal
-credit, **Proximal Policy Optimization (PPO)** clipping for policy updates, and
-**REINFORCE Leave-One-Out (RLOO)** for critic-free within-task baselines.
+credit, **Proximal Policy Optimization (PPO)** clipping for policy updates,
+**REINFORCE Leave-One-Out (RLOO)** for critic-free within-task baselines, and
+the policy-loss and skip-observation GAE core of **Single-Rollout Asynchronous
+Optimization (SAO)**.
 
 ## 1. Repository map
 
 | File | Purpose |
 |---|---|
-| `rosellm/roserlhf/advantages.py` | returns, GAE, leave-one-out/group advantages, turn-to-token mapping |
-| `rosellm/roserlhf/losses.py` | token log-probabilities, masked reductions, clipped policy loss, sequence ratios |
+| `rosellm/roserlhf/advantages.py` | returns, standard and SAO skip-observation GAE, group advantages, turn-to-token mapping |
+| `rosellm/roserlhf/losses.py` | token log-probabilities, PPO clipping, SAO direct double-sided masking, sequence ratios |
 | `rosellm/roserlhf/trajectory.py` | exact sampled-token and policy-version trajectory contract |
 | `examples/agentic_rl_toy.py` | complete collect → verify → advantage → update loop |
-| `tests/test_roserlhf_advantages.py` | terminal/truncation, GAE, group, masking invariants |
-| `tests/test_roserlhf_losses.py` | target alignment, PPO clipping, padding, gradient-mask invariants |
+| `tests/test_roserlhf_advantages.py` | terminal/truncation, standard and skip-observation GAE, group, masking invariants |
+| `tests/test_roserlhf_losses.py` | target alignment, PPO and SAO boundaries, padding, autograd and mask invariants |
 | `tests/test_roserlhf_trajectory.py` | event ordering, exact log-probability, mixed-policy audit |
 
 Run the focused suite:
@@ -236,7 +238,7 @@ For each step in reverse:
 \]
 
 \[
-\hat A_t=\delta_t+gamma\lambda(1-d_t)\hat A_{t+1}.
+\hat A_t=\delta_t+\gamma\lambda(1-d_t)\hat A_{t+1}.
 \]
 
 The code preserves `next_value` and `next_advantage` while crossing padding.
@@ -250,7 +252,88 @@ With \(\lambda=1\) and a true final terminal, tests prove
 Before optimizing a large critic, reproduce this equality on a hand-created
 batch and test time-limit behavior.
 
-## 10. Leave-one-out versus standardized group baselines
+## 10. SAO as a source-level experiment
+
+SAO removes the rollout-group synchronization barrier: one prompt produces one
+trajectory, and that trajectory may enter training immediately. The stored
+behavior log-probability and the recomputed current log-probability define
+
+\[
+r_t=\exp\!\left(
+\log\pi_\theta(a_t\mid s_t)-
+\log\pi_{\text{rollout}}(a_t\mid s_t)
+\right).
+\]
+
+**Direct Double-Sided Importance Sampling (DIS)** retains a sampled action only
+inside a strict open interval:
+
+\[
+f(r_t)=
+\begin{cases}
+r_t,&1-\epsilon_l<r_t<1+\epsilon_h,\\
+0,&\text{otherwise}.
+\end{cases}
+\]
+
+`direct_double_sided_mask` tests those exact inequalities. A ratio exactly on
+either boundary is rejected. This is categorically different from PPO's clipped
+surrogate: PPO saturates a ratio at a boundary in one advantage direction,
+whereas DIS makes either stale tail contribute zero.
+
+`sao_policy_loss` implements the paper's printed token objective
+
+\[
+J(\theta)=\frac{1}{\sum_t m_t}
+\sum_t m_t f(r_t)\hat A_t\log\pi_\theta(a_t\mid s_t).
+\]
+
+Three details are intentionally visible:
+
+1. Rejected action tokens stay in the denominator and contribute literal zero.
+   Renormalizing only over accepted tokens silently changes update scale as
+   staleness changes.
+2. Rollout log-probabilities are detached immutable evidence. Gradients never
+   flow into the behavior policy record.
+3. The SAO paper does not state whether \(f(r_t)\) is stop-gradient. With the
+   repository default, `detach_ratio=True`, a trusted token's derivative with
+   respect to its current log-probability \(\ell_t\) is proportional to
+   \(r_t\hat A_t\). A literal autograd reading instead gives
+
+   \[
+   \frac{\partial}{\partial\ell_t}
+   [r_t\hat A_t\ell_t]
+   =r_t\hat A_t(1+\ell_t),
+   \]
+
+   which can even reverse sign because log-probabilities are negative. The
+   `detach_ratio=False` research switch and its gradient test expose this
+   ambiguity; neither setting should be attributed to the production GLM-5.2
+   implementation without source evidence.
+
+SAO restores a critic because a single rollout has no within-prompt group
+baseline. For an agent transcript, observations are not policy actions and
+must not become GAE loss positions. Let \(a_{i,N}\) be the last token of action
+\(i\), and let \(a_{i+1,0}\) be the first policy token after the next tool or
+environment observation. The paper bridges those two policy boundaries:
+
+\[
+\delta_i=r_i+\gamma(1-d_i)V(a_{i+1,0})-V(a_{i,N}),
+\]
+
+\[
+\hat A_i=\delta_i+
+\gamma\lambda(1-d_i)\hat A_{i+1}.
+\]
+
+`skip_observation_generalized_advantage_estimation` takes one entry per
+semantic action. Tests prove that a true terminal removes the bootstrap, a
+time-limit truncation preserves it, padding is absent time rather than a false
+terminal, and \(\lambda=0\) reduces to one-step temporal-difference error.
+The observation still affects the next value through the model prefix; only its
+tokens are skipped as policy-loss positions.
+
+## 11. Leave-one-out versus standardized group baselines
 
 For RLOO:
 
@@ -273,7 +356,7 @@ Exercise: log gradient variance over 1,000 independently sampled groups for:
 
 Hold samples and loss normalization fixed.
 
-## 11. Sequence ratios
+## 12. Sequence ratios
 
 `sequence_log_ratio` exposes two choices:
 
@@ -293,7 +376,7 @@ can explode/vanish with length. Exponentiating the mean gives a geometric-mean
 token ratio and changes length weighting. The API forces this choice to be
 named; there is no neutral default in research interpretation.
 
-## 12. Exact trajectory records
+## 13. Exact trajectory records
 
 `PolicyAction` requires:
 
@@ -313,7 +396,7 @@ this rather than pretending the complete episode came from v2.
 This small class is not a distributed storage format. It defines invariants a
 Parquet/Arrow/event-log implementation must preserve.
 
-## 13. Progressive exercises
+## 14. Progressive exercises
 
 ### Level 0 — Hand calculation
 
@@ -374,7 +457,7 @@ Parquet/Arrow/event-log implementation must preserve.
 - Record task/env/tokenizer/policy/reward hashes.
 - Reproduce synchronous single-GPU learning before adding distributed engines.
 
-## 14. Debugging order
+## 15. Debugging order
 
 1. Freeze one trajectory and print every token, role, mask, turn, reward.
 2. Verify behavior/current ratio is one before the first update.
@@ -386,7 +469,7 @@ Parquet/Arrow/event-log implementation must preserve.
 8. Establish single/multi-GPU global-denominator parity.
 9. Only then add asynchronous rollout and policy lag.
 
-## 15. Reading production source
+## 16. Reading production source
 
 After the local lab, trace the same concepts in pinned revisions:
 
@@ -431,3 +514,6 @@ the discrepancy should be recorded.
    [“DeepSeekMath”](https://arxiv.org/abs/2402.03300), 2024.
 4. Guangming Sheng et al.,
    [“HybridFlow”](https://arxiv.org/abs/2409.19256), 2024/2025.
+5. Zhenyu Hou et al.,
+   [“Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning”](https://arxiv.org/abs/2607.07508),
+   2026.

@@ -146,6 +146,88 @@ def generalized_advantage_estimation(
     return advantages, value_targets
 
 
+def skip_observation_generalized_advantage_estimation(
+    rewards: Tensor,
+    action_end_values: Tensor,
+    next_action_values: Tensor,
+    *,
+    gamma: float = 1.0,
+    gae_lambda: float = 1.0,
+    terminated: Optional[Tensor] = None,
+    valid_mask: Optional[Tensor] = None,
+) -> Tuple[Tensor, Tensor]:
+    """Compute SAO's action-to-action GAE across environment observations.
+
+    Inputs have one position per *semantic model action*, not per transcript
+    token.  ``action_end_values[..., i]`` is the value at the final policy token
+    of action ``i``.  ``next_action_values[..., i]`` is the value at the first
+    policy token of action ``i + 1`` after the environment observation has been
+    appended.  For a nonterminal time-limit truncation, its final entry is an
+    explicit bootstrap value.  True terminals ignore the corresponding next
+    value.
+
+    Observation tokens are skipped as loss positions, but their information is
+    not discarded: it is part of the prefix used to compute the next action
+    value.  The returned value targets align with ``action_end_values``.
+    """
+
+    if not (
+        rewards.shape == action_end_values.shape == next_action_values.shape
+    ):
+        raise ValueError("rewards and action-value tensors must have the same shape")
+    if rewards.ndim < 1:
+        raise ValueError("inputs must have an action-time dimension")
+    if not (
+        rewards.is_floating_point()
+        and action_end_values.is_floating_point()
+        and next_action_values.is_floating_point()
+    ):
+        raise TypeError("rewards and values must be floating point")
+    if not 0.0 <= gamma <= 1.0:
+        raise ValueError("gamma must be in [0, 1]")
+    if not 0.0 <= gae_lambda <= 1.0:
+        raise ValueError("gae_lambda must be in [0, 1]")
+
+    valid = _as_bool_mask(valid_mask, rewards)
+    terminal = (
+        torch.zeros_like(rewards, dtype=torch.bool)
+        if terminated is None
+        else _as_bool_mask(terminated, rewards)
+    )
+    next_advantage = torch.zeros(
+        rewards.shape[:-1], dtype=rewards.dtype, device=rewards.device
+    )
+    advantages = torch.zeros_like(rewards)
+
+    for action_index in range(rewards.shape[-1] - 1, -1, -1):
+        continuation = (~terminal[..., action_index]).to(rewards.dtype)
+        delta = (
+            rewards[..., action_index]
+            + gamma
+            * continuation
+            * next_action_values[..., action_index]
+            - action_end_values[..., action_index]
+        )
+        candidate = (
+            delta
+            + gamma * gae_lambda * continuation * next_advantage
+        )
+        advantage = torch.where(
+            valid[..., action_index], candidate, torch.zeros_like(candidate)
+        )
+        advantages[..., action_index] = advantage
+        next_advantage = torch.where(
+            valid[..., action_index], advantage, next_advantage
+        )
+
+    value_targets = torch.where(
+        valid,
+        advantages + action_end_values,
+        torch.zeros_like(action_end_values),
+    )
+    return advantages, value_targets
+
+
 def leave_one_out_advantages(rewards: Tensor, *, dim: int = -1) -> Tensor:
     """Subtract the mean reward of every *other* member in a group.
 

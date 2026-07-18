@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -56,6 +57,131 @@ class PolicyLossOutput:
     approximate_kl: Tensor
     clip_fraction: Tensor
     mean_ratio: Tensor
+
+
+@dataclass(frozen=True)
+class SaoPolicyLossOutput:
+    """SAO policy loss plus trust-mask diagnostics.
+
+    ``rejected_fraction`` is the fraction of policy action tokens discarded by
+    Direct Double-Sided Importance Sampling.  ``trusted_mask`` is already
+    intersected with ``action_mask`` and is useful for boundary-level tests.
+    """
+
+    loss: Tensor
+    objective: Tensor
+    approximate_kl: Tensor
+    rejected_fraction: Tensor
+    mean_ratio: Tensor
+    trusted_mask: Tensor
+
+
+def direct_double_sided_mask(
+    ratios: Tensor,
+    *,
+    clip_low: float,
+    clip_high: float,
+) -> Tensor:
+    """Return SAO's strict two-sided importance-ratio trust mask.
+
+    A ratio is retained only when
+    ``1 - clip_low < ratio < 1 + clip_high``.  Values exactly at either
+    boundary are rejected, matching Equation 3 in Hou et al. (2026).  This is
+    masking, not PPO's boundary saturation.
+    """
+
+    if not ratios.is_floating_point():
+        raise TypeError("ratios must be floating point")
+    if not 0.0 <= clip_low < 1.0:
+        raise ValueError("clip_low must be in [0, 1)")
+    if clip_high < 0.0:
+        raise ValueError("clip_high must be non-negative")
+    return (ratios > 1.0 - clip_low) & (ratios < 1.0 + clip_high)
+
+
+def sao_policy_loss(
+    current_logprobs: Tensor,
+    rollout_logprobs: Tensor,
+    advantages: Tensor,
+    action_mask: Tensor,
+    *,
+    clip_low: float,
+    clip_high: float,
+    detach_ratio: bool = True,
+    max_log_ratio: float = 20.0,
+) -> SaoPolicyLossOutput:
+    """Compute the published SAO/DIS token objective.
+
+    Single-Rollout Asynchronous Optimization (SAO) directly compares current
+    token probabilities with log-probabilities stored by the rollout engine.
+    Direct Double-Sided Importance Sampling (DIS) assigns zero policy
+    contribution to either ratio tail.  The denominator remains all policy
+    action tokens, so rejection contributes a literal zero rather than silently
+    changing the effective batch normalization.
+
+    The SAO paper prints ``f(ratio) * advantage * current_logprob`` but does not
+    mark whether ``f(ratio)`` is stop-gradient.  ``detach_ratio=True`` selects
+    the conventional importance-weight interpretation.  Setting it to false is
+    intentionally supported for experiments that demonstrate the additional
+    derivative term; callers must record the choice.
+    """
+
+    if not (
+        current_logprobs.shape
+        == rollout_logprobs.shape
+        == advantages.shape
+        == action_mask.shape
+    ):
+        raise ValueError("all tensors must have the same shape")
+    if max_log_ratio <= 0.0:
+        raise ValueError("max_log_ratio must be positive")
+    if not 0.0 <= clip_low < 1.0:
+        raise ValueError("clip_low must be in [0, 1)")
+    if clip_high < 0.0:
+        raise ValueError("clip_high must be non-negative")
+
+    # Clamping is solely an overflow guard.  It must not move a ratio boundary
+    # into the trusted interval, so require enough dynamic range to represent
+    # both thresholds before applying the guard.
+    required_range = max(-math.log1p(-clip_low), math.log1p(clip_high))
+    if max_log_ratio <= required_range:
+        raise ValueError("max_log_ratio must exceed both trust-boundary log ratios")
+
+    # Rollout log-probabilities are immutable behavior-policy evidence.  Even
+    # the non-detached-ratio research variant must never optimize through the
+    # rollout side of the ratio.
+    log_ratio = current_logprobs - rollout_logprobs.detach()
+    safe_log_ratio = log_ratio.clamp(-max_log_ratio, max_log_ratio)
+    ratio = safe_log_ratio.exp()
+    trusted = direct_double_sided_mask(
+        ratio, clip_low=clip_low, clip_high=clip_high
+    )
+    policy_mask = action_mask.to(device=ratio.device, dtype=torch.bool)
+    trusted_action = trusted & policy_mask
+
+    importance_weight = ratio.detach() if detach_ratio else ratio
+    weighted_logprob = torch.where(
+        trusted,
+        importance_weight * advantages.detach() * current_logprobs,
+        torch.zeros_like(current_logprobs),
+    )
+    objective = masked_mean(weighted_logprob, policy_mask)
+    approximate_kl = masked_mean(
+        ratio - 1.0 - safe_log_ratio, policy_mask
+    )
+    rejected_fraction = masked_mean(
+        (~trusted).to(ratio.dtype), policy_mask
+    )
+    mean_ratio = masked_mean(ratio, policy_mask)
+
+    return SaoPolicyLossOutput(
+        loss=-objective,
+        objective=objective,
+        approximate_kl=approximate_kl,
+        rejected_fraction=rejected_fraction,
+        mean_ratio=mean_ratio,
+        trusted_mask=trusted_action,
+    )
 
 
 def clipped_policy_loss(
