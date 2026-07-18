@@ -77,6 +77,7 @@ visible.
 | **Dr. GRPO** | A named correction in *Understanding R1-Zero-Like Training* | Removes response-length and group-standard-deviation normalizations identified as bias sources. The label has no standard expanded phrase. |
 | **DAPO** | Decoupled Clip and Dynamic sAmpling Policy Optimization | A GRPO-family recipe with asymmetric clipping, dynamic sampling, token-level loss, and overlong-reward shaping. |
 | **GSPO** | Group Sequence Policy Optimization | Uses a sequence-level importance ratio rather than independently clipping token ratios. |
+| **SAPO** | Soft Adaptive Policy Optimization | Replaces hard ratio clipping with a sigmoid-shaped token gate whose gradient decays smoothly away from the behavior policy; it uses separate positive/negative-advantage temperatures. |
 | **SAO** | Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning | Consumes each long trajectory when it finishes, uses direct double-sided importance masking, and restores a critic for group-size-one training. The 2026 authors report deployment in GLM-5.2. |
 | **DIS** | Direct Double-Sided Importance Sampling | SAO's direct rollout-to-current-policy importance ratio with strict two-sided rejection outside a permitted interval. It is masking, not PPO's saturated clipping. |
 | **DPO** | Direct Preference Optimization | Turns preference pairs into a classification-style policy objective without an online RL loop or separate scalar reward model. |

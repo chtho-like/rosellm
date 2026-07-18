@@ -66,7 +66,9 @@ def test_leave_one_out_rejects_singleton() -> None:
 
 def test_group_standardized_advantages_zero_for_uniform_group() -> None:
     rewards = torch.ones(2, 4)
-    assert torch.equal(group_standardized_advantages(rewards), torch.zeros_like(rewards))
+    assert torch.equal(
+        group_standardized_advantages(rewards), torch.zeros_like(rewards)
+    )
 
 
 def test_group_standardized_advantages_have_zero_mean_unit_population_std() -> None:

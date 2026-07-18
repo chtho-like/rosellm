@@ -11,18 +11,19 @@ The code implements **Generalized Advantage Estimation (GAE)** for temporal
 credit, **Proximal Policy Optimization (PPO)** clipping for policy updates,
 **REINFORCE Leave-One-Out (RLOO)** for critic-free within-task baselines, and
 the policy-loss and skip-observation GAE core of **Single-Rollout Asynchronous
-Optimization (SAO)**.
+Optimization (SAO)**, **Group Sequence Policy Optimization (GSPO)**, and
+**Soft Adaptive Policy Optimization (SAPO)**.
 
 ## 1. Repository map
 
 | File | Purpose |
 |---|---|
 | `rosellm/roserlhf/advantages.py` | returns, standard and SAO skip-observation GAE, group advantages, turn-to-token mapping |
-| `rosellm/roserlhf/losses.py` | token log-probabilities, PPO clipping, SAO direct double-sided masking, sequence ratios |
+| `rosellm/roserlhf/losses.py` | token log-probabilities; PPO, GSPO, GSPO-token, SAPO, and SAO objectives; sequence ratios |
 | `rosellm/roserlhf/trajectory.py` | exact sampled-token and policy-version trajectory contract |
 | `examples/agentic_rl_toy.py` | complete collect → verify → advantage → update loop |
 | `tests/test_roserlhf_advantages.py` | terminal/truncation, standard and skip-observation GAE, group, masking invariants |
-| `tests/test_roserlhf_losses.py` | target alignment, PPO and SAO boundaries, padding, autograd and mask invariants |
+| `tests/test_roserlhf_losses.py` | target alignment, modern trust-region objectives, stop-gradient, padding, autograd and mask invariants |
 | `tests/test_roserlhf_trajectory.py` | event ordering, exact log-probability, mixed-policy audit |
 
 Run the focused suite:
@@ -333,7 +334,64 @@ terminal, and \(\lambda=0\) reduces to one-step temporal-difference error.
 The observation still affects the next value through the model prefix; only its
 tokens are skipped as policy-loss positions.
 
-## 11. Leave-one-out versus standardized group baselines
+## 11. GSPO and SAPO: equal-looking formulas, different gradients
+
+`gspo_policy_loss` first reduces each response to one geometric-mean ratio:
+
+```python
+sequence_log_ratio = (
+    (current_logprobs - rollout_logprobs.detach()) * action_mask
+).sum(-1) / action_mask.sum(-1)
+sequence_ratio = sequence_log_ratio.exp()
+```
+
+Clipping, advantage multiplication, and the outer mean then operate once per
+response. This gives every response equal outer weight. A two-token response
+with token ratios `[4, 1]` has sequence ratio two, not (4+1), (4\), or
+(4\times1). A one-token response with ratio one receives the same outer weight
+as that two-token response.
+
+`gspo_token_policy_loss` reproduces the paper's stop-gradient carrier:
+
+```python
+carrier = (current_logprobs - current_logprobs.detach()).exp()
+token_ratio = sequence_ratio.detach().unsqueeze(-1) * carrier
+```
+
+`carrier` is numerically one. Its derivative with respect to the corresponding
+current log-probability is one. Tests prove that uniform token advantages make
+GSPO and GSPO-token numerically and gradient-wise equal. A separate hand test
+uses `[+1, -2]` token advantages and obtains loss gradients `[-1/2, +1]`,
+showing that GSPO-token preserves localized multi-turn credit.
+
+`sapo_policy_loss` follows a different computation graph:
+
+```python
+temperature = where(advantage > 0, tau_positive, tau_negative)
+p = sigmoid(temperature * (token_ratio - 1))
+soft_surrogate = (4 / temperature) * p * advantage.detach()
+gradient_gate = 4 * p * (1 - p)
+```
+
+The gate—not the surrogate value—is the cleanest diagnostic. It is exactly one
+at ratio one for both positive and negative temperatures. A unit test sets
+
+```text
+advantages = [+2, -3]
+tau         = [ 1,  5]
+ratio       = [ 1,  1]
+```
+
+and obtains minimized-loss gradients `[-1, +1.5]` after dividing by two action
+tokens. A second test moves both ratios to 1.5 and proves that the larger
+negative temperature attenuates the negative update faster.
+
+All three implementations detach rollout log-probabilities and advantages.
+Those tensors are recorded behavior/estimator evidence, not parameters to
+optimize. Tests deliberately give both `requires_grad=True` and require their
+gradients to remain absent.
+
+## 12. Leave-one-out versus standardized group baselines
 
 For RLOO:
 
@@ -356,7 +414,7 @@ Exercise: log gradient variance over 1,000 independently sampled groups for:
 
 Hold samples and loss normalization fixed.
 
-## 12. Sequence ratios
+## 13. Sequence ratios
 
 `sequence_log_ratio` exposes two choices:
 
@@ -376,7 +434,7 @@ can explode/vanish with length. Exponentiating the mean gives a geometric-mean
 token ratio and changes length weighting. The API forces this choice to be
 named; there is no neutral default in research interpretation.
 
-## 13. Exact trajectory records
+## 14. Exact trajectory records
 
 `PolicyAction` requires:
 
@@ -396,7 +454,7 @@ this rather than pretending the complete episode came from v2.
 This small class is not a distributed storage format. It defines invariants a
 Parquet/Arrow/event-log implementation must preserve.
 
-## 14. Progressive exercises
+## 15. Progressive exercises
 
 ### Level 0 — Hand calculation
 
@@ -457,7 +515,7 @@ Parquet/Arrow/event-log implementation must preserve.
 - Record task/env/tokenizer/policy/reward hashes.
 - Reproduce synchronous single-GPU learning before adding distributed engines.
 
-## 15. Debugging order
+## 16. Debugging order
 
 1. Freeze one trajectory and print every token, role, mask, turn, reward.
 2. Verify behavior/current ratio is one before the first update.
@@ -469,7 +527,7 @@ Parquet/Arrow/event-log implementation must preserve.
 8. Establish single/multi-GPU global-denominator parity.
 9. Only then add asynchronous rollout and policy lag.
 
-## 16. Reading production source
+## 17. Reading production source
 
 After the local lab, trace the same concepts in pinned revisions:
 
@@ -517,3 +575,9 @@ the discrepancy should be recorded.
 5. Zhenyu Hou et al.,
    [“Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning”](https://arxiv.org/abs/2607.07508),
    2026.
+6. Chujie Zheng et al.,
+   [“Group Sequence Policy Optimization”](https://arxiv.org/abs/2507.18071),
+   2025.
+7. Chang Gao et al.,
+   [“Soft Adaptive Policy Optimization”](https://arxiv.org/abs/2511.20347),
+   2025.

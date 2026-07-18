@@ -76,9 +76,7 @@ def discounted_returns(
         continuation = (~terminal[..., t]).to(rewards.dtype)
         candidate = rewards[..., t] + gamma * continuation * running
         running = torch.where(valid[..., t], candidate, running)
-        returns[..., t] = torch.where(
-            valid[..., t], running, torch.zeros_like(running)
-        )
+        returns[..., t] = torch.where(valid[..., t], running, torch.zeros_like(running))
     return returns
 
 
@@ -117,9 +115,7 @@ def generalized_advantage_estimation(
     )
     batch_shape = rewards.shape[:-1]
     if bootstrap_value is None:
-        next_value = torch.zeros(
-            batch_shape, dtype=values.dtype, device=values.device
-        )
+        next_value = torch.zeros(batch_shape, dtype=values.dtype, device=values.device)
     else:
         if bootstrap_value.shape != batch_shape:
             raise ValueError(
@@ -171,9 +167,7 @@ def skip_observation_generalized_advantage_estimation(
     value.  The returned value targets align with ``action_end_values``.
     """
 
-    if not (
-        rewards.shape == action_end_values.shape == next_action_values.shape
-    ):
+    if not (rewards.shape == action_end_values.shape == next_action_values.shape):
         raise ValueError("rewards and action-value tensors must have the same shape")
     if rewards.ndim < 1:
         raise ValueError("inputs must have an action-time dimension")
@@ -203,15 +197,10 @@ def skip_observation_generalized_advantage_estimation(
         continuation = (~terminal[..., action_index]).to(rewards.dtype)
         delta = (
             rewards[..., action_index]
-            + gamma
-            * continuation
-            * next_action_values[..., action_index]
+            + gamma * continuation * next_action_values[..., action_index]
             - action_end_values[..., action_index]
         )
-        candidate = (
-            delta
-            + gamma * gae_lambda * continuation * next_advantage
-        )
+        candidate = delta + gamma * gae_lambda * continuation * next_advantage
         advantage = torch.where(
             valid[..., action_index], candidate, torch.zeros_like(candidate)
         )

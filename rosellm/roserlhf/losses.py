@@ -31,9 +31,11 @@ def gather_token_logprobs(logits: Tensor, target_ids: Tensor) -> Tensor:
         )
     if target_ids.dtype not in (torch.int32, torch.int64):
         raise TypeError("target_ids must be an integer tensor")
-    return F.log_softmax(logits, dim=-1).gather(
-        dim=-1, index=target_ids.unsqueeze(-1)
-    ).squeeze(-1)
+    return (
+        F.log_softmax(logits, dim=-1)
+        .gather(dim=-1, index=target_ids.unsqueeze(-1))
+        .squeeze(-1)
+    )
 
 
 def masked_mean(values: Tensor, mask: Tensor) -> Tensor:
@@ -74,6 +76,29 @@ class SaoPolicyLossOutput:
     rejected_fraction: Tensor
     mean_ratio: Tensor
     trusted_mask: Tensor
+
+
+@dataclass(frozen=True)
+class GspoPolicyLossOutput:
+    """GSPO loss and sequence-level trust-region diagnostics."""
+
+    loss: Tensor
+    objective: Tensor
+    sequence_ratio_divergence: Tensor
+    sequence_clip_fraction: Tensor
+    mean_sequence_ratio: Tensor
+    sequence_ratios: Tensor
+
+
+@dataclass(frozen=True)
+class SapoPolicyLossOutput:
+    """SAPO loss and smooth-gate diagnostics."""
+
+    loss: Tensor
+    objective: Tensor
+    approximate_kl: Tensor
+    mean_ratio: Tensor
+    mean_gradient_gate: Tensor
 
 
 def direct_double_sided_mask(
@@ -153,9 +178,7 @@ def sao_policy_loss(
     log_ratio = current_logprobs - rollout_logprobs.detach()
     safe_log_ratio = log_ratio.clamp(-max_log_ratio, max_log_ratio)
     ratio = safe_log_ratio.exp()
-    trusted = direct_double_sided_mask(
-        ratio, clip_low=clip_low, clip_high=clip_high
-    )
+    trusted = direct_double_sided_mask(ratio, clip_low=clip_low, clip_high=clip_high)
     policy_mask = action_mask.to(device=ratio.device, dtype=torch.bool)
     trusted_action = trusted & policy_mask
 
@@ -166,12 +189,8 @@ def sao_policy_loss(
         torch.zeros_like(current_logprobs),
     )
     objective = masked_mean(weighted_logprob, policy_mask)
-    approximate_kl = masked_mean(
-        ratio - 1.0 - safe_log_ratio, policy_mask
-    )
-    rejected_fraction = masked_mean(
-        (~trusted).to(ratio.dtype), policy_mask
-    )
+    approximate_kl = masked_mean(ratio - 1.0 - safe_log_ratio, policy_mask)
+    rejected_fraction = masked_mean((~trusted).to(ratio.dtype), policy_mask)
     mean_ratio = masked_mean(ratio, policy_mask)
 
     return SaoPolicyLossOutput(
@@ -181,6 +200,226 @@ def sao_policy_loss(
         rejected_fraction=rejected_fraction,
         mean_ratio=mean_ratio,
         trusted_mask=trusted_action,
+    )
+
+
+def gspo_policy_loss(
+    current_logprobs: Tensor,
+    rollout_logprobs: Tensor,
+    sequence_advantages: Tensor,
+    action_mask: Tensor,
+    *,
+    clip_low: float,
+    clip_high: float,
+    max_log_ratio: float = 20.0,
+) -> GspoPolicyLossOutput:
+    """Compute Group Sequence Policy Optimization's sequence objective.
+
+    Each rank-2 row is one sampled response.  Its importance ratio is the
+    geometric mean of action-token ratios, then clipping and optimization are
+    performed once for the whole response.  Rows are averaged equally, as in
+    Equation 5 of Zheng et al. (2025); a long response does not receive extra
+    weight merely because it contains more tokens.
+    """
+
+    if current_logprobs.ndim != 2:
+        raise ValueError("GSPO expects rank-2 [sequence, token] tensors")
+    if not (current_logprobs.shape == rollout_logprobs.shape == action_mask.shape):
+        raise ValueError("log-probability tensors and action_mask must match")
+    if sequence_advantages.shape != current_logprobs.shape[:-1]:
+        raise ValueError("sequence_advantages must have shape [sequence]")
+    if not (
+        current_logprobs.is_floating_point()
+        and rollout_logprobs.is_floating_point()
+        and sequence_advantages.is_floating_point()
+    ):
+        raise TypeError("log-probabilities and advantages must be floating point")
+    if not 0.0 <= clip_low < 1.0:
+        raise ValueError("clip_low must be in [0, 1)")
+    if clip_high < 0.0:
+        raise ValueError("clip_high must be non-negative")
+    if max_log_ratio <= 0.0:
+        raise ValueError("max_log_ratio must be positive")
+
+    required_range = max(-math.log1p(-clip_low), math.log1p(clip_high))
+    if max_log_ratio <= required_range:
+        raise ValueError("max_log_ratio must exceed both clip-boundary log ratios")
+
+    mask = action_mask.to(device=current_logprobs.device, dtype=torch.bool)
+    counts = mask.sum(dim=-1)
+    if (counts == 0).any():
+        raise ValueError("every sequence needs at least one action token")
+    weights = mask.to(current_logprobs.dtype)
+    token_log_ratios = current_logprobs - rollout_logprobs.detach()
+    sequence_log_ratios = (token_log_ratios * weights).sum(dim=-1) / counts
+    safe_log_ratios = sequence_log_ratios.clamp(-max_log_ratio, max_log_ratio)
+    sequence_ratios = safe_log_ratios.exp()
+    clipped_ratios = sequence_ratios.clamp(1.0 - clip_low, 1.0 + clip_high)
+    advantages = sequence_advantages.detach()
+    surrogate = torch.minimum(
+        sequence_ratios * advantages,
+        clipped_ratios * advantages,
+    )
+    objective = surrogate.mean()
+    clipped = (sequence_ratios < 1.0 - clip_low) | (sequence_ratios > 1.0 + clip_high)
+
+    return GspoPolicyLossOutput(
+        loss=-objective,
+        objective=objective,
+        sequence_ratio_divergence=(sequence_ratios - 1.0 - safe_log_ratios).mean(),
+        sequence_clip_fraction=clipped.to(sequence_ratios.dtype).mean(),
+        mean_sequence_ratio=sequence_ratios.mean(),
+        sequence_ratios=sequence_ratios,
+    )
+
+
+def gspo_token_policy_loss(
+    current_logprobs: Tensor,
+    rollout_logprobs: Tensor,
+    token_advantages: Tensor,
+    action_mask: Tensor,
+    *,
+    clip_low: float,
+    clip_high: float,
+    max_log_ratio: float = 20.0,
+) -> GspoPolicyLossOutput:
+    """Compute the GSPO-token objective with its published detach trick.
+
+    The numerical ratio at every action token equals the response's geometric-
+    mean sequence ratio.  Its gradient, however, flows only through that
+    token's current log-probability.  Uniform token advantages therefore match
+    sequence GSPO in both objective and gradient, while multi-turn callers may
+    supply distinct token or turn advantages.
+    """
+
+    if current_logprobs.ndim != 2:
+        raise ValueError("GSPO-token expects rank-2 [sequence, token] tensors")
+    if not (
+        current_logprobs.shape
+        == rollout_logprobs.shape
+        == token_advantages.shape
+        == action_mask.shape
+    ):
+        raise ValueError("all tensors must have the same shape")
+    if not (
+        current_logprobs.is_floating_point()
+        and rollout_logprobs.is_floating_point()
+        and token_advantages.is_floating_point()
+    ):
+        raise TypeError("log-probabilities and advantages must be floating point")
+    if not 0.0 <= clip_low < 1.0:
+        raise ValueError("clip_low must be in [0, 1)")
+    if clip_high < 0.0:
+        raise ValueError("clip_high must be non-negative")
+    if max_log_ratio <= 0.0:
+        raise ValueError("max_log_ratio must be positive")
+
+    required_range = max(-math.log1p(-clip_low), math.log1p(clip_high))
+    if max_log_ratio <= required_range:
+        raise ValueError("max_log_ratio must exceed both clip-boundary log ratios")
+
+    mask = action_mask.to(device=current_logprobs.device, dtype=torch.bool)
+    counts = mask.sum(dim=-1)
+    if (counts == 0).any():
+        raise ValueError("every sequence needs at least one action token")
+    weights = mask.to(current_logprobs.dtype)
+    token_log_ratios = current_logprobs - rollout_logprobs.detach()
+    sequence_log_ratios = (token_log_ratios * weights).sum(dim=-1) / counts
+    safe_log_ratios = sequence_log_ratios.clamp(-max_log_ratio, max_log_ratio)
+    sequence_ratios = safe_log_ratios.exp()
+
+    # Equation 14: sg[s_i] * pi_theta(token) / sg[pi_theta(token)].
+    # exp(logp - sg[logp]) is numerically one and has d/dlogp = one.
+    gradient_carrier = (current_logprobs - current_logprobs.detach()).exp()
+    token_ratios = sequence_ratios.detach().unsqueeze(-1) * gradient_carrier
+    clipped_ratios = token_ratios.clamp(1.0 - clip_low, 1.0 + clip_high)
+    advantages = token_advantages.detach()
+    surrogate = torch.minimum(
+        token_ratios * advantages,
+        clipped_ratios * advantages,
+    )
+    per_sequence_objective = (surrogate * weights).sum(dim=-1) / counts
+    objective = per_sequence_objective.mean()
+    clipped = (sequence_ratios < 1.0 - clip_low) | (sequence_ratios > 1.0 + clip_high)
+
+    return GspoPolicyLossOutput(
+        loss=-objective,
+        objective=objective,
+        sequence_ratio_divergence=(sequence_ratios - 1.0 - safe_log_ratios).mean(),
+        sequence_clip_fraction=clipped.to(sequence_ratios.dtype).mean(),
+        mean_sequence_ratio=sequence_ratios.mean(),
+        sequence_ratios=sequence_ratios,
+    )
+
+
+def sapo_policy_loss(
+    current_logprobs: Tensor,
+    rollout_logprobs: Tensor,
+    token_advantages: Tensor,
+    action_mask: Tensor,
+    *,
+    tau_positive: float = 1.0,
+    tau_negative: float = 1.05,
+    max_log_ratio: float = 20.0,
+) -> SapoPolicyLossOutput:
+    """Compute Soft Adaptive Policy Optimization's smooth surrogate.
+
+    SAPO applies ``(4 / tau) * sigmoid(tau * (ratio - 1))`` directly to
+    each token ratio.  Differentiation produces the gradient gate
+    ``4 * p * (1 - p)``, which equals one on-policy and decays continuously
+    away from ratio one.  The paper averages tokens within each response and
+    then averages responses, so padding cannot change a response's weight.
+    """
+
+    if current_logprobs.ndim != 2:
+        raise ValueError("SAPO expects rank-2 [sequence, token] tensors")
+    if not (
+        current_logprobs.shape
+        == rollout_logprobs.shape
+        == token_advantages.shape
+        == action_mask.shape
+    ):
+        raise ValueError("all tensors must have the same shape")
+    if not (
+        current_logprobs.is_floating_point()
+        and rollout_logprobs.is_floating_point()
+        and token_advantages.is_floating_point()
+    ):
+        raise TypeError("log-probabilities and advantages must be floating point")
+    if tau_positive <= 0.0 or tau_negative <= 0.0:
+        raise ValueError("SAPO temperatures must be positive")
+    if max_log_ratio <= 0.0:
+        raise ValueError("max_log_ratio must be positive")
+
+    mask = action_mask.to(device=current_logprobs.device, dtype=torch.bool)
+    counts = mask.sum(dim=-1)
+    if (counts == 0).any():
+        raise ValueError("every sequence needs at least one action token")
+    weights = mask.to(current_logprobs.dtype)
+    log_ratio = current_logprobs - rollout_logprobs.detach()
+    safe_log_ratio = log_ratio.clamp(-max_log_ratio, max_log_ratio)
+    ratio = safe_log_ratio.exp()
+    advantages = token_advantages.detach()
+    temperature = torch.where(
+        advantages > 0.0,
+        torch.full_like(advantages, tau_positive),
+        torch.full_like(advantages, tau_negative),
+    )
+    probability = torch.sigmoid(temperature * (ratio - 1.0))
+    soft_surrogate = (4.0 / temperature) * probability * advantages
+    per_sequence_objective = (soft_surrogate * weights).sum(dim=-1) / counts
+    objective = per_sequence_objective.mean()
+    gradient_gate = 4.0 * probability * (1.0 - probability)
+
+    per_sequence_kl = ((ratio - 1.0 - safe_log_ratio) * weights).sum(dim=-1) / counts
+    per_sequence_ratio = (ratio * weights).sum(dim=-1) / counts
+    per_sequence_gate = (gradient_gate * weights).sum(dim=-1) / counts
+    return SapoPolicyLossOutput(
+        loss=-objective,
+        objective=objective,
+        approximate_kl=per_sequence_kl.mean(),
+        mean_ratio=per_sequence_ratio.mean(),
+        mean_gradient_gate=per_sequence_gate.mean(),
     )
 
 
@@ -220,21 +459,20 @@ def clipped_policy_loss(
     if max_log_ratio <= 0:
         raise ValueError("max_log_ratio must be positive")
 
-    log_ratio = current_logprobs - old_logprobs
+    log_ratio = current_logprobs - old_logprobs.detach()
     safe_log_ratio = log_ratio.clamp(-max_log_ratio, max_log_ratio)
     ratio = safe_log_ratio.exp()
     clipped_ratio = ratio.clamp(1.0 - clip_low, 1.0 + clip_high)
 
-    unclipped = ratio * advantages
-    clipped = clipped_ratio * advantages
+    detached_advantages = advantages.detach()
+    unclipped = ratio * detached_advantages
+    clipped = clipped_ratio * detached_advantages
     surrogate = torch.minimum(unclipped, clipped)
     objective = masked_mean(surrogate, action_mask)
 
     # exp(log_ratio) - 1 - log_ratio is a non-negative second-order
     # approximation/Monte Carlo diagnostic used by many PPO implementations.
-    approximate_kl = masked_mean(
-        ratio - 1.0 - safe_log_ratio, action_mask
-    )
+    approximate_kl = masked_mean(ratio - 1.0 - safe_log_ratio, action_mask)
     clipped_tokens = (ratio < 1.0 - clip_low) | (ratio > 1.0 + clip_high)
     clip_fraction = masked_mean(clipped_tokens.to(ratio.dtype), action_mask)
     mean_ratio = masked_mean(ratio, action_mask)
@@ -264,13 +502,11 @@ def sequence_log_ratio(
 
     if current_logprobs.ndim != 2:
         raise ValueError("sequence_log_ratio expects rank-2 tensors")
-    if not (
-        current_logprobs.shape == old_logprobs.shape == action_mask.shape
-    ):
+    if not (current_logprobs.shape == old_logprobs.shape == action_mask.shape):
         raise ValueError("all tensors must have the same shape")
     weights = action_mask.to(dtype=current_logprobs.dtype)
     counts = weights.sum(dim=-1)
     if (counts == 0).any():
         raise ValueError("every sequence needs at least one action token")
-    total = ((current_logprobs - old_logprobs) * weights).sum(dim=-1)
+    total = ((current_logprobs - old_logprobs.detach()) * weights).sum(dim=-1)
     return total / counts if length_normalize else total

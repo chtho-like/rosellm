@@ -272,7 +272,129 @@ sequence reward; it supplies less localized control over individual token
 changes. For multi-turn agents, decide whether the “sequence” is a turn or a
 complete trajectory.
 
-## 10. ReMax
+For (G) responses to one query, the published objective is
+
+\[
+J_{\mathrm{GSPO}}(\theta)
+=\frac1G\sum_{i=1}^{G}
+\min\left(
+\rho_i^{\mathrm{seq}}\widehat A_i,
+\operatorname{clip}(\rho_i^{\mathrm{seq}},1-\epsilon_l,1+\epsilon_h)
+\widehat A_i
+\right).
+\]
+
+The average is over responses, not over all response tokens. Consequently,
+each response has equal outer weight. Differentiating an unclipped response
+shows why its action tokens are weighted equally:
+
+\[
+\nabla_\theta \rho_i^{\mathrm{seq}}
+=\rho_i^{\mathrm{seq}}\frac1{L_i}
+\sum_{t=1}^{L_i}\nabla_\theta
+\log\pi_\theta(y_{i,t}\mid x,y_{i,<t}).
+\]
+
+This is a different estimator from multiplying every token by its own token
+ratio. It also means one outlier token can move the sequence ratio outside the
+trust band and suppress the complete sequence.
+
+### GSPO-token for multi-turn credit
+
+The paper defines a token-customizable variant for settings such as multi-turn
+RL. Let `sg` denote stop-gradient and
+
+\[
+\rho_{i,t}^{\mathrm{GSPO-token}}
+=\operatorname{sg}(\rho_i^{\mathrm{seq}})
+\frac{\pi_\theta(y_{i,t}\mid x,y_{i,<t})}
+{\operatorname{sg}[\pi_\theta(y_{i,t}\mid x,y_{i,<t})]}.
+\]
+
+Numerically, the fraction is one, so every token sees the same sequence ratio.
+Its derivative flows only through token (t). If all token advantages equal
+
+\[
+\widehat A_{i,t}=\widehat A_i,
+\]
+
+GSPO and GSPO-token have the same objective value and theoretical gradient. If
+turn/token advantages differ, GSPO-token preserves those differences while
+keeping a sequence-level clipping condition. The repository tests both the
+value and gradient equivalence rather than assuming the stop-gradient trick is
+cosmetic.
+
+Do not transfer the paper's tiny GSPO clip bounds mechanically. Its controlled
+Qwen3-30B-A3B run used left/right bounds (3\times10^{-4}) and
+(4\times10^{-4}), while its GRPO baseline used (0.2/0.27), precisely
+because sequence and token ratios have different scales.
+
+## 10. Soft Adaptive Policy Optimization
+
+**Soft Adaptive Policy Optimization (SAPO)** replaces the binary hard-clipping
+gate with a differentiable token gate
+([Gao et al., 2025](https://arxiv.org/abs/2511.20347)). For token ratio
+
+\[
+r_{i,t}=\exp(log\pi_\theta-log\pi_{\mathrm{old}}),
+\]
+
+choose a temperature by advantage sign,
+
+\[
+\tau_{i,t}=\begin{cases}
+\tau_{\mathrm{pos}},&\widehat A_{i,t}>0,\\
+\tau_{\mathrm{neg}},&\widehat A_{i,t}\le0,
+\end{cases}
+\]
+
+and define
+
+\[
+f_{i,t}(r)=\frac{4}{\tau_{i,t}}
+\sigma[\tau_{i,t}(r-1)].
+\]
+
+The sequence-normalized objective is
+
+\[
+J_{\mathrm{SAPO}}(\theta)
+=\frac1G\sum_{i=1}^{G}\frac1{L_i}
+\sum_{t=1}^{L_i}f_{i,t}(r_{i,t})\widehat A_{i,t}.
+\]
+
+This formula applies the smooth surrogate to the ratio itself; it is not
+`ratio × advantage × log-probability`. With
+
+\[
+p_{i,t}=\sigma[\tau_{i,t}(r_{i,t}-1)],
+\]
+
+differentiation gives
+
+\[
+\nabla_\theta J_{\mathrm{SAPO}}
+=\frac1G\sum_i\frac1{L_i}\sum_t
+\underbrace{4p_{i,t}(1-p_{i,t})}_{\text{smooth gradient gate}}
+r_{i,t}\widehat A_{i,t}
+\nabla_\theta\log\pi_\theta(y_{i,t}\mid x,y_{i,<t}).
+\]
+
+At (r=1), the gate is exactly one for any positive temperature, so the
+on-policy gradient matches the unclipped ratio objective. Farther away, it
+decays continuously instead of switching to zero at a hard boundary. The paper
+uses (	au_{\mathrm{neg}}>\tau_{\mathrm{pos}}): a negative sampled-token
+update raises logits for a very large set of unsampled vocabulary items, so its
+off-policy gradient is damped faster.
+
+SAPO is token-adaptive, yet the paper derives a GSPO-like smooth sequence gate
+when steps are near on-policy and within-sequence log-ratio dispersion is low.
+That connection is conditional, not identity. A heterogeneous sequence retains
+useful near-on-policy tokens that hard sequence clipping might discard. The
+paper reports SAPO use for Qwen3-VL; it is not evidence that every later Qwen
+text model used the same objective.
+
+## 11. ReMax
 
 ReMax uses a deterministic greedy rollout as a baseline for the stochastic
 sample, avoiding a critic
@@ -287,7 +409,7 @@ training and reward is sequence-level. In stochastic agent environments, both
 rollouts should share a controlled initial state/seed when interpreting the
 difference; otherwise environment randomness contaminates the baseline.
 
-## 11. Process-reward and value-free methods
+## 12. Process-reward and value-free methods
 
 ### PRIME
 
@@ -314,7 +436,7 @@ optimize the sum of step rewards or use them to estimate advantages. Specify:
 Adding \(\gamma\Phi(s')-\Phi(s)\) preserves optimal policies under standard
 conditions. Learned “progress” scores generally do not have this guarantee.
 
-## 12. Turn-level and hierarchical agent methods
+## 13. Turn-level and hierarchical agent methods
 
 Trajectory-level GRPO can treat a twenty-turn episode as one response, but this
 does not solve temporal credit. Agent-specific methods add structure.
@@ -349,7 +471,7 @@ and compare downstream outcomes. This supplies state-conditional relative
 credit, but state cloning and extra rollouts are expensive. Shared randomness
 can reduce variance when transitions are stochastic.
 
-## 13. Off-policy and asynchronous correction
+## 14. Off-policy and asynchronous correction
 
 Agent rollouts are slow, so collectors frequently lag behind the trainer.
 Possible controls:
@@ -370,7 +492,7 @@ AReaL studies asynchronous language-model RL and staleness-aware training
 versions and actual divergence; ten tiny updates can be closer than one large
 update.
 
-## 14. Single-Rollout Asynchronous Optimization
+## 15. Single-Rollout Asynchronous Optimization
 
 **Single-Rollout Asynchronous Optimization (SAO)** addresses a structural
 mismatch between long asynchronous agent episodes and prompt-group methods
@@ -406,10 +528,10 @@ Its costs are a second large model, critic cold start, additional value updates,
 off-policy bias, and discarded tail tokens. The authors state that SAO was
 deployed in GLM-5.2's agentic-RL pipeline, but publish controlled hyperparameters
 only for Qwen3-30B-A3B. See the
-[full derivation](derivations-and-code.md#18-single-rollout-asynchronous-optimization-derived)
+[full derivation](derivations-and-code.md#20-single-rollout-asynchronous-optimization-derived)
 and [GLM evidence analysis](case-studies/glm.md#113-sao-the-missing-algorithmic-link-du).
 
-## 15. Offline preference objectives
+## 16. Offline preference objectives
 
 Offline preference optimization is useful for bootstrap and alignment but is not
 an online agent algorithm by itself.
@@ -439,7 +561,7 @@ automatically cover states induced by the updated policy.
 Refresh data online or evaluate distribution shift if the trained policy moves
 beyond the comparison dataset.
 
-## 16. Model-based, search, and self-play extensions
+## 17. Model-based, search, and self-play extensions
 
 ### Search plus policy learning
 
@@ -469,7 +591,7 @@ self-play can prevent overfitting to one opponent. Anchor progress to external
 tasks so agents do not learn private protocols that score well only against one
 another.
 
-## 17. Algorithm selection matrix
+## 18. Algorithm selection matrix
 
 | Situation | Useful starting point | Why | Main warning |
 |---|---|---|---|
@@ -479,6 +601,8 @@ another.
 | Fully on-policy simple baseline | REINFORCE + valid baseline | transparent estimator | high variance |
 | Concern about GRPO normalization bias | Dr. GRPO-style ablation | exposes denominator effects | retune scale fairly |
 | Need open reasoning-RL recipe | DAPO-style recipe | exploration/dynamic sampling details | selection and length effects |
+| Sequence reward and unstable token ratios | GSPO | aligns clipping and optimization with response reward | one outlier can suppress a full sequence |
+| Need smooth token-adaptive off-policy attenuation | SAPO | continuous trust gate; keeps useful tokens | temperatures and ratio dispersion require measurement |
 | Long stale asynchronous rollouts | bounded lag + off-policy correction | improves utilization | bias/variance and version integrity |
 | Long-tail agent rollouts, one sample per changing state | SAO-style actor–critic | no prompt-group barrier; state baseline | critic cost and DIS bias |
 | Sparse long-horizon reward | value/process/branching/hierarchy | denser credit | learned proxy exploitation |
@@ -488,7 +612,7 @@ another.
 Start with the simplest estimator that can represent the credit structure, then
 add complexity only after a controlled diagnostic demonstrates the need.
 
-## 18. Fair algorithm comparison
+## 19. Fair algorithm comparison
 
 Hold constant or account for:
 
@@ -508,7 +632,7 @@ If GRPO samples eight outputs per prompt and PPO samples one, equal optimizer
 steps do not mean equal data or compute. If dynamic sampling discards easy/hard
 groups, report all attempted samples.
 
-## 19. Ablation order
+## 20. Ablation order
 
 When a run fails, change one axis at a time:
 
@@ -548,3 +672,9 @@ Algorithmic novelty cannot rescue a corrupted trajectory contract.
 8. Zhenyu Hou, Yujiang Li, Jie Tang, and Yuxiao Dong,
    [“Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning”](https://arxiv.org/abs/2607.07508),
    2026.
+9. Chujie Zheng et al.,
+   [“Group Sequence Policy Optimization”](https://arxiv.org/abs/2507.18071),
+   2025.
+10. Chang Gao et al.,
+    [“Soft Adaptive Policy Optimization”](https://arxiv.org/abs/2511.20347),
+    2025.

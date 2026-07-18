@@ -81,6 +81,16 @@ Language Models (LLMs)**.
    updates, and skip-observation GAE. The authors report deployment in
    GLM-5.2, while controlled experiments use Qwen3-30B-A3B.
    [arXiv](https://arxiv.org/abs/2607.07508)
+9. **Zheng et al. — “Group Sequence Policy Optimization” (2025).** Replaces
+   token importance ratios with a length-normalized sequence ratio, clips at
+   response level, derives equal token-gradient weighting, and introduces the
+   GSPO-token stop-gradient construction for customized token credit.
+   [arXiv](https://arxiv.org/abs/2507.18071)
+10. **Gao et al. — “Soft Adaptive Policy Optimization” (2025).** Derives a
+    sigmoid ratio surrogate with a smooth gradient gate and asymmetric
+    positive/negative-advantage temperatures; reports controlled Qwen3
+    experiments and use in Qwen3-VL training.
+    [arXiv](https://arxiv.org/abs/2511.20347)
 
 ## Agents, tools, memory, and environment interaction
 

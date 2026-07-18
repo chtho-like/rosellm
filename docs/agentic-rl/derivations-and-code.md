@@ -621,7 +621,222 @@ Kimi k1.5 publicly describes continuation with only newly generated segment
 trained. Restarting every incomplete trajectory would waste compute and select
 against naturally long solutions.
 
-## 17. Compaction-aware sub-traces and critic PPO
+## 17. Derive GSPO and the GSPO-token gradient carrier
+
+For response (y_i=(y_{i,1},\ldots,y_{i,L_i})), the exact full-sequence
+importance ratio is
+
+\[
+\frac{\pi_\theta(y_i\mid x)}{\pi_{\mathrm{old}}(y_i\mid x)}
+=\exp\left[
+\sum_{t=1}^{L_i}
+\log\frac{\pi_\theta(y_{i,t}\mid x,y_{i,<t})}
+{\pi_{\mathrm{old}}(y_{i,t}\mid x,y_{i,<t})}
+\right].
+\]
+
+This is the Radon–Nikodym density ratio for sampled complete responses, but its
+variance and magnitude scale dramatically with length. **Group Sequence Policy
+Optimization (GSPO)** uses the (L_i)-th root instead:
+
+\[
+s_i(\theta)
+=\left[
+\frac{\pi_\theta(y_i\mid x)}{\pi_{\mathrm{old}}(y_i\mid x)}
+\right]^{1/L_i}
+=\exp\left[
+\frac1{L_i}\sum_t
+(\ell_{i,t}^{\theta}-\ell_{i,t}^{\mathrm{old}})
+\right].
+\]
+
+The root is a geometric-mean token ratio. It controls numerical scale and lets
+one clip range serve variable lengths, but it is **not** the exact unnormalized
+full-sequence density ratio. Calling both quantities “the sequence importance
+ratio” hides this design choice.
+
+For group-standardized response advantage (widehat A_i), GSPO maximizes
+
+\[
+J_{\mathrm{GSPO}}
+=\frac1G\sum_i
+\min\left[
+s_i\widehat A_i,
+\operatorname{clip}(s_i,1-\epsilon_l,1+\epsilon_h)widehat A_i
+\right].
+\]
+
+Away from clipping,
+
+\[
+\begin{aligned}
+\nabla_\theta s_i
+&=s_i\nabla_\theta\log s_i\\
+&=\frac{s_i}{L_i}\sum_t
+\nabla_\theta\ell_{i,t}^{\theta},
+\end{aligned}
+\]
+
+and therefore
+
+\[
+\nabla_\theta J_i
+=\frac{s_i\widehat A_i}{L_i}
+\sum_t\nabla_\theta\ell_{i,t}^{\theta}.
+\]
+
+Every action token in a response receives the same scalar weight. In token-ratio
+GRPO, by contrast, token (t) is additionally weighted by its own ratio. GSPO
+aligns optimization granularity with response reward but loses localized
+off-policy control.
+
+For multi-turn credit, GSPO-token defines
+
+\[
+s_{i,t}(\theta)
+=\operatorname{sg}[s_i(\theta)]
+\frac{\pi_\theta(y_{i,t}\mid x,y_{i,<t})}
+{\operatorname{sg}[\pi_\theta(y_{i,t}\mid x,y_{i,<t})]},
+\]
+
+where (operatorname{sg}) is stop-gradient. Numerically,
+
+\[
+s_{i,t}=s_i,
+\]
+
+but
+
+\[
+\nabla_\theta s_{i,t}
+=s_i\nabla_\theta\ell_{i,t}^{\theta}.
+\]
+
+The GSPO-token objective averages these token surrogates within each response.
+When (widehat A_{i,t}=\widehat A_i), its gradient is
+
+\[
+\frac1{L_i}\sum_t
+s_i\widehat A_i\nabla_\theta\ell_{i,t}^{\theta},
+\]
+
+exactly the GSPO gradient above. With distinct turn/token advantages it instead
+weights each log-probability gradient locally. The executable implementation
+uses
+
+```python
+carrier = exp(current_logp - current_logp.detach())
+token_ratio = sequence_ratio.detach() * carrier
+```
+
+and a unit test proves both objective and gradient equality for uniform
+advantages. This is a case where matching forward values is insufficient: an
+incorrect detach changes the estimator while every printed ratio looks right.
+
+## 18. Derive SAPO's smooth trust gate
+
+**Soft Adaptive Policy Optimization (SAPO)** begins with token ratio
+
+\[
+r_{i,t}=\exp(\ell_{i,t}^{\theta}-\ell_{i,t}^{\mathrm{old}})
+\]
+
+and sign-dependent temperature
+
+\[
+\tau_{i,t}=\begin{cases}
+\tau_{\mathrm{pos}},&\widehat A_{i,t}>0,\\
+\tau_{\mathrm{neg}},&\widehat A_{i,t}\le0.
+\end{cases}
+\]
+
+Its surrogate function is
+
+\[
+f_{i,t}(r)=\frac4{\tau_{i,t}}
+\sigma[\tau_{i,t}(r-1)].
+\]
+
+The objective averages action tokens inside each response and then responses:
+
+\[
+J_{\mathrm{SAPO}}
+=\frac1G\sum_i\frac1{L_i}\sum_t
+f_{i,t}(r_{i,t})\widehat A_{i,t}.
+\]
+
+Let (p=\sigma[\tau(r-1)]). Because
+
+\[
+\frac{d}{dr}\sigma[\tau(r-1)]=\tau p(1-p),
+\]
+
+the prefactor cancels temperature in the first derivative:
+
+\[
+f'(r)=4p(1-p).
+\]
+
+Also
+
+\[
+\nabla_\theta r
+=r\nabla_\theta\ell^\theta.
+\]
+
+Thus one token contributes
+
+\[
+4p(1-p)r\widehat A
+\nabla_\theta\ell^\theta.
+\]
+
+At (r=1), (p=1/2) and the gradient gate (4p(1-p)=1) regardless of
+temperature. As (|r-1|) grows, the gate approaches zero continuously. Larger
+temperature makes that decay faster. SAPO sets
+(	au_{\mathrm{neg}}>\tau_{\mathrm{pos}}) because a negative advantage lowers
+the sampled logit but raises relative probability across the many unsampled
+vocabulary items; the paper treats that diffuse update as less stable.
+
+Do not detach (r) in this objective. Unlike a likelihood-ratio loss, there is
+no explicit (log\pi_\theta) factor: detaching (r) would make the SAPO policy
+gradient exactly zero. Conversely, advantages and rollout log-probabilities
+must be detached evidence.
+
+The raw surrogate value at (r=1) is (2\widehat A/\tau), which depends on
+temperature even though the on-policy gradient does not. Therefore the printed
+SAPO objective is an optimization surrogate, not a calibrated return estimate;
+compare gradients and held-out reward, not raw loss values across temperatures.
+
+The paper's sequence-coherence argument uses two assumptions. Let
+
+\[
+z_{i,t}=\log r_{i,t},\qquad
+\mu_i=\frac1{L_i}\sum_t z_{i,t}=\log s_i.
+\]
+
+If steps are small, (r-1\approx\log r). If within-sequence variance of (z)
+is low, the average token gradient gate is close to
+
+\[
+g_\tau(\log s_i)
+=\operatorname{sech}^2\left(\frac{\tau}{2}\log s_i\right),
+\]
+
+with the paper's bound
+
+\[
+\left|
+\frac1{L_i}\sum_t g_\tau(z_{i,t})-g_\tau(\mu_i)
+\right|
+\le\frac{\tau^2}{4}\operatorname{Var}_t(z_{i,t}).
+\]
+
+This makes SAPO approximately sequence-coherent in a measured regime, not
+identical to GSPO. When a few tokens are outliers, SAPO intentionally falls
+back to token-adaptive attenuation instead of suppressing the whole response.
+
+## 19. Compaction-aware sub-traces and critic PPO
 
 Long-running agents may compact old transcript into summaries and emit multiple
 trainable sub-traces. Let episode \(i\) produce \(K_i\) segments of length
@@ -643,7 +858,7 @@ A_{i,k,j}\approx Q(h_{i,k,j},x_{i,k,j})-V(h_{i,k,j}).
 The disclosure does not specify critic architecture, GAE, or coefficients; the
 mathematical motivation should not be mistaken for a reproducible recipe.
 
-## 18. Single-Rollout Asynchronous Optimization, derived
+## 20. Single-Rollout Asynchronous Optimization, derived
 
 Hou et al.'s
 [Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning](https://arxiv.org/abs/2607.07508)
@@ -653,7 +868,7 @@ agentic-RL pipeline. The controlled paper experiments, however, use
 Qwen3-30B-A3B; this derivation describes the published method rather than an
 undisclosed GLM-5.2 configuration.
 
-### 18.1 Why asynchronous group sampling increases lag
+### 20.1 Why asynchronous group sampling increases lag
 
 Let a prompt have \(G\) rollouts with durations \(T_1,\ldots,T_G\). A grouped
 method cannot construct its group-relative advantage until
@@ -674,7 +889,7 @@ waits, early trajectories become more off-policy. SAO uses one rollout per
 prompt and admits it when ready, removing \(W\) and the group barrier. It also
 removes the same-prompt group baseline, so a critic must control variance.
 
-### 18.2 Direct Double-Sided Importance Sampling
+### 20.2 Direct Double-Sided Importance Sampling
 
 **Direct Double-Sided Importance Sampling (DIS)** compares the current policy
 directly with the rollout engine's stored probability:
@@ -755,7 +970,7 @@ def sao_policy_loss(current_logp, rollout_logp, advantage,
 The strict inequalities match the paper. Unit tests should include values
 exactly at both boundaries because `>=` versus `>` changes their gradients.
 
-### 18.3 The critic and two-timescale updates
+### 20.3 The critic and two-timescale updates
 
 SAO trains an actor \(\pi_\theta\) and critic \(V_\phi\). In the paper's
 controlled experiments, each actor update is preceded or accompanied by
@@ -788,7 +1003,7 @@ than a constant mean, and a negative value is worse. When
 \(\operatorname{Var}(R)\approx0\), the statistic is ill-conditioned and must be
 guarded.
 
-### 18.4 Skip-observation Generalized Advantage Estimation
+### 20.4 Skip-observation Generalized Advantage Estimation
 
 **Generalized Advantage Estimation (GAE)** normally recurses through adjacent
 decision states. An agent transcript interleaves model-generated actions and
@@ -838,7 +1053,7 @@ The paper also tests step-average and last-token step values in its appendix;
 both underperform token-wise value training in that experiment. This does not
 prove token-wise values dominate in every scaffold.
 
-### 18.5 Evidence boundary for GLM-5.2
+### 20.5 Evidence boundary for GLM-5.2
 
 The paper's Qwen3-30B-A3B experiment discloses group size one, batch 128, 128K
 maximum length, actor learning rate \(10^{-6}\), critic learning rate
@@ -852,7 +1067,7 @@ pipeline. The GLM-5.2-specific stages, data, rewards, coefficients, compute,
 and gains are not published. The correct lesson is the algorithm and its
 systems motivation—not a fabricated 753B recipe.
 
-## 19. Potential-based reward shaping
+## 21. Potential-based reward shaping
 
 Add shaping
 
@@ -875,7 +1090,7 @@ preserved. Arbitrary process scores do not have this guarantee. A judge reward
 for “looks like progress” can change the optimum to perform judge-visible
 rituals.
 
-## 20. Constrained objectives
+## 22. Constrained objectives
 
 Suppose task return \(J_R(\theta)\) and expected safety/cost constraint
 
@@ -901,7 +1116,7 @@ lambda_cost = max(0.0, lambda_cost + dual_lr * (mean_cost - budget))
 This controls an expectation, not worst-case catastrophe. Tool authorization,
 sandbox, and irreversible-action confirmation remain hard external constraints.
 
-## 21. A complete one-batch tensor calculation
+## 23. A complete one-batch tensor calculation
 
 Consider two trajectories, two action tokens each:
 
@@ -940,7 +1155,7 @@ neither numerator nor denominator.
 
 Use this style of hand calculation before trusting a fused/distributed kernel.
 
-## 21. Numerical and statistical checks
+## 24. Numerical and statistical checks
 
 For any implementation:
 
@@ -976,3 +1191,12 @@ For any implementation:
 6. Zichen Liu et al.,
    [“Understanding R1-Zero-Like Training”](https://arxiv.org/abs/2503.20783),
    2025.
+7. Chujie Zheng et al.,
+   [“Group Sequence Policy Optimization”](https://arxiv.org/abs/2507.18071),
+   2025.
+8. Chang Gao et al.,
+   [“Soft Adaptive Policy Optimization”](https://arxiv.org/abs/2511.20347),
+   2025.
+9. Zhenyu Hou et al.,
+   [“Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning”](https://arxiv.org/abs/2607.07508),
+   2026.
