@@ -112,8 +112,8 @@ within a stated numerical tolerance.
   context, and expert parallelism.
 
 **Mastery check:** write a compute and memory budget, predict tokens/second,
-train a small GPT, explain every divergence event, and produce a reproducible
-model/data/checkpoint card.
+train a small Generative Pre-trained Transformer (GPT), explain every divergence
+event, and produce a reproducible model/data/checkpoint card.
 
 ## Level 4 — Supervised post-training
 
@@ -143,8 +143,8 @@ or optimization rather than intuition.
   Estimation (GAE)**, and reward normalization.
 - **Direct Preference Optimization (DPO)**-family offline preference objectives
   and their assumptions.
-- AI feedback, constitutional methods, critique/revision, process supervision,
-  and scalable oversight.
+- Artificial Intelligence (AI) feedback, constitutional methods,
+  critique/revision, process supervision, and scalable oversight.
 - Reward hacking, overoptimization, Goodhart's law, sycophancy, and alignment
   taxes.
 
@@ -160,8 +160,8 @@ high variance.
   rule-based rewards.
 - Group-relative baselines, rejection sampling, curriculum scheduling, entropy
   dynamics, response-length bias, and pass@k-oriented objectives.
-- Distillation versus online discovery; when RL improves search and when it
-  merely changes sampling behavior.
+- Distillation versus online discovery; when Reinforcement Learning (RL)
+  improves search and when it merely changes sampling behavior.
 
 **Mastery check:** implement REINFORCE, **REINFORCE Leave-One-Out (RLOO)**, PPO,
 and **Group Relative Policy Optimization (GRPO)** on the same small
@@ -182,12 +182,17 @@ only one prompt and one response. Study the complete
 - sparse reward and hierarchical credit assignment;
 - asynchronous rollout/training systems and off-policy correction;
 - evaluation under stochasticity and adversarial conditions; and
-- real model-family training disclosures.
+- real model-family training disclosures across
+  [DeepSeek, Zhipu AI's General Language Model (GLM), Kimi, OpenAI, Anthropic,
+  Google DeepMind, Qwen, Meta, Mistral, ByteDance, NVIDIA, Microsoft, xAI, and
+  open projects](agentic-rl/case-studies/index.md).
 
 **Mastery check:** train a model in a sandboxed multi-step environment, preserve
 the exact sampled tokens and policy version, assign credit at token/turn/episode
 levels, and reproduce an improvement on a hidden task split without reward or
-environment leakage.
+environment leakage. Then audit one frontier claim by separating architecture,
+data, post-training, scaffold, tools, routing, and inference-time compute; mark
+every undisclosed field as unknown instead of completing the recipe by analogy.
 
 ## Level 8 — Inference systems
 

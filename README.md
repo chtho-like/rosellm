@@ -18,6 +18,7 @@ The codebase is organized around three complementary goals:
 
 - [LLM learning roadmap](docs/learning-roadmap.md)
 - [Agentic RL: zero-to-researcher curriculum](docs/agentic-rl/index.md)
+- [Frontier-lab and open-industry evidence matrix](docs/agentic-rl/case-studies/index.md)
 - [Research and citation standard](docs/research-method.md)
 - [Training implementation](rosellm/rosetrainer/)
 - [Inference implementation](rosellm/roseinfer/)

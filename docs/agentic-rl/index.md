@@ -17,10 +17,11 @@ The clean formal boundary is a useful starting point:
 
 This distinction follows the formalization in Zhang et al.,
 [*The Landscape of Agentic Reinforcement Learning for LLMs*](https://arxiv.org/abs/2509.02547)
-(TMLR 2026, Sections 2–3). It is a modeling boundary, not a naming rule: a
-reasoning trace can itself contain actions, and a single API response can drive
-multiple hidden environment transitions. Always identify the actual policy and
-environment boundary.
+(*Transactions on Machine Learning Research*, TMLR 2026, Sections 2–3). It is a
+modeling boundary, not a naming rule: a reasoning trace can itself contain
+actions, and a single Application Programming Interface (API) response can
+drive multiple hidden environment transitions. Always identify the actual
+policy and environment boundary.
 
 ## The whole object in one equation
 
@@ -74,7 +75,7 @@ higher level is often caused by an unchecked assumption lower in the tree.
 
 1. **Probability and statistics**
    - conditional distributions, expectation, variance, covariance;
-   - log-likelihood, entropy, cross-entropy, KL divergence;
+   - log-likelihood, entropy, cross-entropy, Kullback–Leibler (KL) divergence;
    - Monte Carlo estimation, control variates, importance sampling;
    - confidence intervals, hypothesis tests, and multiple comparisons.
 2. **Optimization**
@@ -83,11 +84,13 @@ higher level is often caused by an unchecked assumption lower in the tree.
    - numerical stability, mixed precision, and distributed reductions.
 3. **Deep learning and transformers**
    - autoregressive factorization and teacher forcing;
-   - attention, residual blocks, normalization, MoE routing;
-   - tokenization, chat templates, masking, KV caches, and sampling.
+   - attention, residual blocks, normalization, mixture-of-experts (MoE)
+     routing;
+   - tokenization, chat templates, masking, key-value (KV) caches, and sampling.
 4. **Software and systems**
    - PyTorch autograd and distributed training;
-   - asynchronous programming, queues, RPC, retries, and idempotency;
+   - asynchronous programming, queues, remote procedure calls (RPCs), retries,
+     and idempotency;
    - containers, sandboxes, observability, and reproducible data pipelines.
 
 ### Layer B — Classical sequential decision making
@@ -99,7 +102,7 @@ higher level is often caused by an unchecked assumption lower in the tree.
    eligibility traces.
 5. On-policy versus off-policy learning; exploration versus exploitation.
 6. Policy gradients, actor–critic methods, generalized advantage estimation,
-   trust regions, and PPO.
+   trust regions, and Proximal Policy Optimization (PPO).
 7. Offline RL, imitation learning, inverse RL, hierarchical RL, model-based RL,
    multi-agent RL, and constrained/safe RL.
 
@@ -111,21 +114,23 @@ The canonical foundation is Sutton and Barto,
 
 ### Layer C — LLM post-training before agents
 
-1. **Supervised fine-tuning:** demonstrations, chat schemas, loss masks,
+1. **Supervised Fine-Tuning (SFT):** demonstrations, chat schemas, loss masks,
    rejection sampling, and distillation.
 2. **Preference learning:** comparison collection, Bradley–Terry reward models,
    annotator noise, calibration, and uncertainty.
-3. **RLHF:** policy/value/reference/reward models, KL regularization, PPO, and
-   online sampling. Ouyang et al.,
+3. **Reinforcement Learning from Human Feedback (RLHF):**
+   policy/value/reference/reward models, KL regularization, PPO, and online
+   sampling. Ouyang et al.,
    [*Training language models to follow instructions with human feedback*](https://arxiv.org/abs/2203.02155)
    (2022) is the standard end-to-end reference.
-4. **Offline preference optimization:** DPO and related objectives, including
-   what their fixed-dataset assumptions exclude.
+4. **Offline preference optimization:** Direct Preference Optimization (DPO)
+   and related objectives, including what their fixed-dataset assumptions
+   exclude.
 5. **RL with verifiable rewards (RLVR):** executable or rule-based correctness
    for math, code, formal proof, games, and structured outputs.
 6. **Reasoning RL:** long sampled solutions, group-relative baselines,
    process/outcome rewards, entropy dynamics, and distillation. DeepSeekMath
-   introduced GRPO in its published recipe
+   introduced Group Relative Policy Optimization (GRPO) in its published recipe
    ([Shao et al., 2024, Section 3](https://arxiv.org/abs/2402.03300)); DeepSeek-R1
    demonstrated a large-scale reasoning-RL pipeline
    ([Guo et al., 2025](https://arxiv.org/abs/2501.12948)).
@@ -137,7 +142,8 @@ The canonical foundation is Sutton and Barto,
    - partial observability, truncation, summarization, and stale observations;
    - untrusted content and prompt-injection boundaries.
 2. **Action design**
-   - free text, structured calls, code, GUI actions, physical controls;
+   - free text, structured calls, code, Graphical User Interface (GUI) actions,
+     physical controls;
    - grammar constraints, parameter validation, authorization, and abstention;
    - macro-actions versus primitive actions.
 3. **State and memory**
@@ -213,8 +219,10 @@ sandbox, versioning, train/test split, contamination risk, and failure policy.
 ### Layer I — Optimization and credit assignment
 
 1. sequence-level REINFORCE and control variates;
-2. actor–critic, GAE, PPO, and value-model training;
-3. leave-one-out and group-relative baselines: RLOO, GRPO, and variants;
+2. actor–critic, Generalized Advantage Estimation (GAE), PPO, and value-model
+   training;
+3. leave-one-out and group-relative baselines: REINFORCE Leave-One-Out (RLOO),
+   GRPO, and variants;
 4. KL regularization, reference policies, clipping, and trust regions;
 5. token-, turn-, segment-, subgoal-, and trajectory-level advantages;
 6. sparse delayed reward, eligibility, return decomposition, and value targets;
@@ -273,8 +281,26 @@ For every model family, reconstruct the same stages:
 9. deployment-relevant disclosures; and
 10. unknowns and common unsupported claims.
 
-The case studies begin with [DeepSeek](case-studies/deepseek.md),
-[Zhipu GLM](case-studies/glm.md), and [Moonshot Kimi](case-studies/kimi.md).
+Use the shared [evidence matrix](case-studies/index.md) before comparing scores
+or recipes. The case-study set includes:
+
+- generation-by-generation reconstructions of
+  [DeepSeek](case-studies/deepseek.md),
+  [Zhipu AI's General Language Model (GLM)](case-studies/glm.md), and
+  [Moonshot Kimi](case-studies/kimi.md);
+- preference-to-agent lineages for
+  [OpenAI, Anthropic, and Google DeepMind](case-studies/openai-anthropic-google.md);
+- open-weight and report-backed lineages for
+  [Alibaba Qwen, Meta, and Mistral](case-studies/qwen-meta-mistral.md); and
+- algorithm, system, and reproduction studies for
+  [ByteDance Seed, NVIDIA, Microsoft, xAI, and the open community](case-studies/open-industry-and-community.md).
+
+Read each lineage in time order. For every generation, write a five-column
+ledger: **disclosed fact**, **confirmed artifact**, **reproduction result**,
+**bounded inference**, and **unknown**. Then map every supported training stage
+onto the task, environment, trajectory, reward, optimizer, evaluation, and
+deployment artifacts in the evidence matrix. This prevents a newer benchmark
+table from being mistaken for a newly disclosed training recipe.
 
 ## Recommended learning sequence
 
@@ -284,10 +310,10 @@ The case studies begin with [DeepSeek](case-studies/deepseek.md),
 | 2 | [Mathematics](mathematical-foundations.md) | REINFORCE on a toy sequence task | Derive the estimator and measure its variance. |
 | 3 | [Algorithms](algorithms.md) | PPO, RLOO, and GRPO on identical samples | Explain every normalization, mask, and ratio. |
 | 4 | [Data and environments](data-and-environments.md) | deterministic tool sandbox | Reset/replay a trajectory bit-for-bit and prove split isolation. |
-| 5 | [Training pipeline](training-pipeline.md) | multi-turn rollout collector | Preserve exact tokens, tool boundaries, rewards, and policy IDs. |
-| 6 | [Systems](systems.md) | asynchronous rollout/trainer prototype | Quantify GPU idle time, queue delay, and policy staleness. |
+| 5 | [Training pipeline](training-pipeline.md) | multi-turn rollout collector | Preserve exact tokens, tool boundaries, rewards, and policy-version identifiers. |
+| 6 | [Systems](systems.md) | asynchronous rollout/trainer prototype | Quantify Graphics Processing Unit (GPU) idle time, queue delay, and policy staleness. |
 | 7 | [Evaluation and safety](evaluation-and-safety.md) | hidden stochastic test suite | Report uncertainty, cost, and a failure taxonomy. |
-| 8 | [Case studies](case-studies/index.md) | reproduce one disclosed recipe at small scale | Separate reproduced, inferred, and unknown claims. |
+| 8 | [Case studies](case-studies/index.md) | reconstruct one model generation and reproduce one disclosed mechanism at small scale | Separate disclosed, confirmed-artifact, reproduced, inferred, and unknown claims; preserve the exact benchmark and inference protocol. |
 | 9 | [Source lab](source-lab.md) | extend `roserlhf` | Pass numerical, invariance, and end-to-end tests. |
 
 ## What “source-level understanding” means
@@ -296,7 +322,7 @@ You have reached source-level understanding only if you can trace one sampled
 token through all of these representations:
 
 1. environment observation bytes;
-2. chat template and tokenizer IDs;
+2. chat template and tokenizer identifiers (IDs);
 3. packed rollout tensors and attention masks;
 4. inference policy version and sampled log-probability;
 5. tool/action parser and environment transition;

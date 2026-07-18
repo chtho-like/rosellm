@@ -17,10 +17,14 @@ answers the more important question, “what does this object do here?”
 | **SFT** | Supervised Fine-Tuning | Maximum-likelihood training on supplied target responses or trajectories. It imitates demonstrations rather than directly maximizing a reward. |
 | **RLHF** | Reinforcement Learning from Human Feedback | RL in which human judgments directly or indirectly define reward, often through a learned reward model. |
 | **RLAIF** | Reinforcement Learning from AI Feedback | RL whose labels, critiques, or rewards are produced by another AI system. |
+| **CAI** | Constitutional AI | Uses written principles to generate critiques, revisions, or AI preference labels; the cited Anthropic pipeline combines these stages with SFT and RL. |
 | **RLVR** | Reinforcement Learning with Verifiable Rewards | RL using mechanically checkable rewards such as unit tests, exact answers, or proof verification. “From verifiable rewards” is also used. |
 | **BC / IL** | Behavioral Cloning / Imitation Learning | BC is supervised imitation of demonstrated actions; IL is the broader family. |
 | **KD / OPD** | Knowledge Distillation / On-Policy Distillation | KD trains a student from a teacher. OPD evaluates the teacher on states sampled by the student, reducing state-distribution mismatch. |
+| **MOPD** | Multi-Domain / Multi-teacher On-Policy Distillation | NVIDIA uses “Multi-Domain” in Cascade 2 and “Multi-teacher” in Nemotron 3 Ultra for closely related student-state distillation: the student samples states and a domain teacher supplies token distributions on those states. |
 | **CoT** | Chain of Thought | Intermediate language or latent reasoning before an answer. Long-CoT denotes deliberately extended traces. |
+| **TTRL** | Test-Time Reinforcement Learning | Target-specific policy adaptation performed during evaluation; AlphaProof uses generated variants around a target theorem. It differs from merely sampling more candidates. |
+| **NLL** | Negative Log-Likelihood | For a target sequence, \(-\log p_\theta(y\mid x)=-\sum_t\log p_\theta(y_t\mid x,y_{<t})\); minimizing it performs maximum-likelihood imitation. Adding NLL on successful RL samples directly increases the likelihood of their tokens. |
 
 ## MDP, POMDP, and trajectories
 
@@ -68,6 +72,7 @@ visible.
 |---|---|---|
 | **REINFORCE** | A Monte Carlo policy-gradient estimator; not an acronym in the original paper | Multiplies sampled log-probability gradients by returns or advantages. It is simple and often high variance. |
 | **PG** | Policy Gradient | Direct differentiation of expected return with respect to policy parameters. |
+| **A2C** | Advantage Actor-Critic | A synchronous actor-critic policy-gradient method; an advantage estimate subtracts a learned value baseline. |
 | **TRPO** | Trust Region Policy Optimization | Constrains updates by a Kullback–Leibler divergence trust region. |
 | **PPO** | Proximal Policy Optimization | Reuses rollouts while clipping or penalizing policy-ratio movement. Actor-critic PPO learns a value function. |
 | **GAE** | Generalized Advantage Estimation | A geometrically weighted mixture of temporal-difference residuals, trading bias against variance through \(\lambda\). |
@@ -76,10 +81,17 @@ visible.
 | **GRPO** | Group Relative Policy Optimization | DeepSeek's publicly introduced critic-free PPO-like method; it derives relative advantages from a response group for one prompt. |
 | **Dr. GRPO** | A named correction in *Understanding R1-Zero-Like Training* | Removes response-length and group-standard-deviation normalizations identified as bias sources. The label has no standard expanded phrase. |
 | **DAPO** | Decoupled Clip and Dynamic sAmpling Policy Optimization | A GRPO-family recipe with asymmetric clipping, dynamic sampling, token-level loss, and overlong-reward shaping. |
+| **VAPO** | Value-based Augmented Proximal Policy Optimization | A long-reasoning actor-critic recipe designed around value-model bias, heterogeneous lengths, and sparse rewards. |
+| **ProRL** | Prolonged Reinforcement Learning | NVIDIA's study of continuing verifiable RL for more than two thousand steps with KL control, curriculum changes, and reference/optimizer resets. |
 | **GSPO** | Group Sequence Policy Optimization | Uses a sequence-level importance ratio rather than independently clipping token ratios. |
 | **SAPO** | Soft Adaptive Policy Optimization | Replaces hard ratio clipping with a sigmoid-shaped token gate whose gradient decays smoothly away from the behavior policy; it uses separate positive/negative-advantage temperatures. |
 | **SAO** | Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning | Consumes each long trajectory when it finishes, uses direct double-sided importance masking, and restores a critic for group-size-one training. The 2026 authors report deployment in GLM-5.2. |
 | **DIS** | Direct Double-Sided Importance Sampling | SAO's direct rollout-to-current-policy importance ratio with strict two-sided rejection outside a permitted interval. It is masking, not PPO's saturated clipping. |
+| **PARL** | Parallel-Agent Reinforcement Learning | Moonshot's Kimi K2.5 method for learning an orchestrator that delegates to parallel subagents and aggregates their results. |
+| **RoC / GRPO-RoC** | Resample-on-Correct / GRPO with Resample-on-Correct | rStar2-Agent oversamples a rollout group, preserves a failure subset, and selects cleaner successful tool trajectories before the GRPO update. |
+| **GiGPO** | Group-in-Group Policy Optimization | Adds a second, step-relative comparison group from repeated environment states observed across trajectories, without sampling new counterfactual actions. |
+| **MAGIC** | Multi-stage Adaptive entropy scheduling for GRPO In Convergence | Skywork-OR1's recipe combining staged length budgets, strict policy freshness, token-global loss, data filtering, and active entropy control. |
+| **RPO** | Reward-aware Preference Optimization | NVIDIA's framework for expressing preference objectives and reward information under a shared formulation; record the specific RPO variant because the acronym is not one universal loss. |
 | **DPO** | Direct Preference Optimization | Turns preference pairs into a classification-style policy objective without an online RL loop or separate scalar reward model. |
 | **IPO** | Identity Preference Optimization | A preference objective designed to avoid some overfitting behavior of logistic DPO. |
 | **KTO** | Kahneman–Tversky Optimization | A prospect-theory-inspired objective that can train from unpaired desirable/undesirable labels. |
@@ -93,10 +105,14 @@ visible.
 | Term | Full name | Meaning |
 |---|---|---|
 | **RM / ORM / PRM** | Reward Model / Outcome Reward Model / Process Reward Model | An RM predicts quality; an ORM scores the final outcome; a PRM scores intermediate steps. |
-| **GRM** | Generative Reward Model | Generates a critique or structured judgment instead of only a scalar. |
+| **GenRM / GRM** | Generative Reward Model | Generates a critique or structured judgment instead of only a scalar. Both abbreviations occur in primary sources. |
+| **RBR** | Rule-Based Rewards | OpenAI's system of human-authored propositions graded by a fixed language model and linearly combined into a reward; it is not merely deterministic `if` statements. |
+| **IBT** | Inter-Temporal Bradley-Terry | A preference model over progress at two different prefixes of the same embodied trajectory. |
+| **ESS** | Effective Sample Size | For nonnegative, not-all-zero importance weights, \((\sum_i w_i)^2/\sum_i w_i^2\); it equals the sample count when weights are equal and falls toward 1 as a few samples dominate. |
+| **IPT** | Isomorphic Perturbation Test | A metamorphic reward audit that applies a meaning-preserving renaming or transformation and checks whether a genuinely general solution transforms consistently. |
 | **LLM judge** | Large Language Model judge | A model prompted or trained to evaluate another output; it is fallible and not automatically ground truth. |
 | **KL** | Kullback–Leibler divergence | A directional mismatch, \(D_{KL}(p\Vert q)=\mathbb E_p[\log p-\log q]\), often used to limit policy drift. |
-| **TV** | Total Variation distance | A symmetric distance, \(\tfrac12\sum_x|p(x)-q(x)|\). |
+| **TV** | Total Variation distance | A symmetric distance, \(\tfrac12\sum_x\lvert p(x)-q(x)\rvert\). |
 | **pass@k** | pass at \(k\) | Probability that at least one of \(k\) sampled candidates passes; it requires a sampling protocol. |
 | **IoU / F1** | Intersection over Union / harmonic mean of precision and recall | Overlap metric for regions / class metric \(2PR/(P+R)\). |
 
@@ -132,12 +148,15 @@ visible.
 | **LSH / MinHash** | Locality-Sensitive Hashing / Minimum Hashing | Approximate similarity indexing / Jaccard-similarity estimation, often used in deduplication. |
 | **PII** | Personally Identifiable Information | Data that can identify or link to a person. |
 | **AST** | Abstract Syntax Tree | A tree representation of program syntax. |
+| **QA / STEM** | Question Answering / Science, Technology, Engineering, and Mathematics | A task family / a broad collection of technical subject domains; neither term identifies a reward or evaluation protocol by itself. |
+| **SQL** | Structured Query Language | A language for querying and mutating relational databases; database-agent environments must distinguish read-only queries from state-changing actions. |
 
 ## Distributed training and serving
 
 | Term | Full name | Meaning |
 |---|---|---|
-| **GPU** | Graphics Processing Unit | The dominant parallel accelerator for modern LLM work. |
+| **CPU / GPU** | Central Processing Unit / Graphics Processing Unit | The general-purpose host processor / the dominant parallel accelerator for modern LLM work. |
+| **CUDA** | Compute Unified Device Architecture | NVIDIA's GPU programming platform and execution model; the name now covers compilers, runtimes, libraries, and kernel APIs. |
 | **FLOP / FLOPs** | Floating-Point Operation / Floating-Point Operations | Arithmetic work; “per second” must be stated explicitly when it denotes a rate. |
 | **MFU** | Model FLOPs Utilization | Achieved model arithmetic divided by theoretical accelerator peak under a stated precision convention. |
 | **DP / DDP** | Data Parallelism / Distributed Data Parallel | Replicates parameters, splits examples, and synchronizes gradients. |
@@ -148,6 +167,12 @@ visible.
 | **RDMA** | Remote Direct Memory Access | Moves data between registered memory on machines with little CPU involvement. |
 | **RPC / HTTP / API** | Remote Procedure Call / Hypertext Transfer Protocol / Application Programming Interface | Common ways to invoke a remote component or exposed service. |
 | **TITO** | Token-In, Token-Out | GLM-5's asynchronous design that exchanges exact tokens and behavior log-probabilities to reduce rollout/training mismatch. |
+| **SRS** | Streaming Rollout System | ByteDance Seed's system for continuing incomplete long generations while training only the newly generated segment. |
+| **TAD** | Training-Agent Disaggregation | Agent Lightning's separation of arbitrary agent execution/tracing from the learner and optimization runtime. |
+| **SPMD** | Single Program, Multiple Data | Every worker runs the same program over a different shard; distributed model operations synchronize at declared collectives. |
+| **veRL** | Volcano Engine Reinforcement Learning | A distributed post-training framework originating in HybridFlow; it coordinates rollout generation, reward/reference/value inference, and policy updates under configurable resource placement. |
+| **TRL** | Transformer Reinforcement Learning | Hugging Face's post-training library/project for supervised, preference, and RL workflows; a TRL configuration is an implementation artifact, not an algorithm. |
+| **WSD** | Warmup-Stable-Decay | A learning-rate schedule that warms to a peak, holds a long stable phase, then decays near the end of a planned token budget. |
 | **TTFT / ITL / QPS** | Time to First Token / Inter-Token Latency / Queries per Second | First-token delay / decode spacing / request throughput. |
 | **1F1B** | One Forward, One Backward | A pipeline schedule alternating forward and backward microbatches after warmup. |
 | **WAL** | Write-Ahead Log | A durable record written before mutation for replay and recovery. |
@@ -160,6 +185,7 @@ visible.
 | **BF16 / TF32** | Brain Floating Point 16 / TensorFloat-32 | A 16-bit format with FP32-like exponent range / NVIDIA's reduced-mantissa matrix format. |
 | **E4M3 / E5M2** | 4 exponent + 3 mantissa bits / 5 exponent + 2 mantissa bits | Two FP8 range/precision trade-offs. |
 | **MXFP4 / MXFP8** | Microscaling 4-/8-bit floating point | Low-precision values sharing scale metadata in small blocks. |
+| **NVFP4 / E2M1** | NVIDIA 4-bit floating point / 1 sign bit, 2 exponent bits, and 1 mantissa bit | NVIDIA's block-scaled FP4 training/inference format and its 4-bit element encoding; shared scaling metadata is part of the numerical format. |
 | **A100, A800, H100, H800** | NVIDIA product names, not acronyms | Accelerator variants with distinct compute, memory, and interconnect limits. |
 | **NVLink / NVSwitch** | NVIDIA device interconnect / its switch fabric | High-bandwidth GPU links / an all-to-all fabric connecting them. |
 | **RoCE** | RDMA over Converged Ethernet | Remote Direct Memory Access transported over Ethernet. |
@@ -173,10 +199,12 @@ visible.
 | **GUI / CLI** | Graphical User Interface / Command-Line Interface | Visual point-and-type interaction / textual command interaction. |
 | **sandbox** | — | Isolation limiting filesystem, network, process, or credential access. |
 | **prompt injection** | — | Untrusted content that attempts to redirect an agent away from authorized instructions. |
+| **RAG** | Retrieval-Augmented Generation | Retrieves external passages or records and conditions generation on them; one-shot retrieval is not automatically an interactive agent environment. |
 | **reward hacking** | — | Raising the measured reward through unintended behavior rather than the desired outcome. |
 | **policy lag** | — | Difference between the rollout-generating policy and the newer learner policy. |
 | **JSON / XML** | JavaScript Object Notation / Extensible Markup Language | Two structured text formats. |
 | **UUID / SHA-256** | Universally Unique Identifier / Secure Hash Algorithm 256-bit | Decentralized identifiers / cryptographic artifact digests. |
+| **RNG** | Random Number Generator | Produces pseudorandom values for initialization, shuffling, and sampling; reproducibility needs the algorithm, seed, device, and counter/state, not a seed alone. |
 | **FAIL_TO_PASS / PASS_TO_PASS** | failure-to-passing / passing-to-passing tests | Tests fixed by a patch / already-passing tests that detect regressions. |
 | **SWE** | Software Engineering | The domain named in benchmarks such as SWE-bench. |
 

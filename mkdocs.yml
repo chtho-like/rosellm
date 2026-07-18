@@ -61,4 +61,7 @@ nav:
           - DeepSeek: agentic-rl/case-studies/deepseek.md
           - Zhipu GLM: agentic-rl/case-studies/glm.md
           - Moonshot Kimi: agentic-rl/case-studies/kimi.md
+          - OpenAI, Anthropic, and Google DeepMind: agentic-rl/case-studies/openai-anthropic-google.md
+          - Qwen, Meta, and Mistral: agentic-rl/case-studies/qwen-meta-mistral.md
+          - Open Industry and Community: agentic-rl/case-studies/open-industry-and-community.md
       - Annotated Bibliography: agentic-rl/bibliography.md

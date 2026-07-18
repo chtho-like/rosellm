@@ -157,9 +157,7 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
-    final_accuracy = train(
-        args.steps, args.group_size, args.learning_rate, args.seed
-    )
+    final_accuracy = train(args.steps, args.group_size, args.learning_rate, args.seed)
     if final_accuracy < 1.0:
         raise SystemExit(f"training did not solve all tasks: {final_accuracy:.3f}")
 

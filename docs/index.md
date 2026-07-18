@@ -16,7 +16,8 @@ paper, an equation, and eventually an implementation.
 The first complete specialization is the
 [Agentic Reinforcement Learning curriculum](agentic-rl/index.md). It begins with
 probability and Markov decision processes, then reaches long-horizon agent
-training, distributed rollout systems, and frontier-lab case studies.
+training, distributed rollout systems, and a
+[frontier-lab and open-industry evidence matrix](agentic-rl/case-studies/index.md).
 
 ### Trace concepts into code
 
