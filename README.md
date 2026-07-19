@@ -30,6 +30,14 @@ If you are starting from zero, use this order:
    the [evidence matrix](docs/agentic-rl/case-studies/index.md) to study
    DeepSeek, GLM, Kimi, the western frontier labs, and open industry without
    confusing public evidence with plausible inference.
+4. For the full literature project, open the
+   [six-lab frontier research corpus](docs/frontier-labs/index.md): it tracks
+   3,050 auditable public records across DeepSeek, Kimi, GLM, OpenAI,
+   Anthropic, and Google DeepMind/Gemini. The generated
+   [coverage ledger](research/literature/coverage.json) is the source of truth
+   for current PDF and extracted-text counts and unresolved gaps; the tracked
+   candidate ledgers preserve recovery evidence and explicit version and
+   equivalence relationships.
 
 The implementation entry points are [training](rosellm/rosetrainer/),
 [inference](rosellm/roseinfer/), [Agentic RL](rosellm/roserlhf/), and the
@@ -59,6 +67,46 @@ python -m mkdocs serve
 
 The documentation site is configured with MkDocs Material. Every guide is also
 readable directly on GitHub.
+
+## Literature corpus operations
+
+The [literature corpus guide](research/literature/README.md) documents the
+complete reproducible workflow. Offline validation, documentation coverage,
+and focused unit tests can be run together without contacting external
+services:
+
+```bash
+make research-check
+```
+
+Artifact acquisition and recovery are deliberately explicit network
+operations. The aggregate recovery target runs OpenAlex open-access lookup,
+strict arXiv title recovery for failed or missing non-blog artifacts, and the
+Europe PMC/PMC AWS fallback in that order. Manually verified official routes
+are recorded in the same evidence-first workflow.
+
+```bash
+make research-download
+make research-recover
+make research-promote-recovery  # validates and previews; does not edit inventories
+make research-apply-recovery    # explicit inventory promotion
+make research-extract
+make research-library           # readable copy-on-write view; shared initial blocks
+make research-report
+make research-doc-audit
+```
+
+Canonical artifacts keep their stable inventory-ID paths for recovery and
+audit reproducibility. `make research-library` builds a separate Git-ignored
+`research/literature/library/` tree whose PDF names contain curated common
+names, readable titles, year, document type, and stable record ID. The default
+copy-on-write clones use independent inodes while initially sharing the
+canonical data blocks, so browsing-layer edits cannot write through to the
+authoritative archive.
+
+`make docs` and `make docs-render` perform the read-only corpus documentation
+audit, but never download papers, contact recovery services, or promote
+inventory changes.
 
 ## Package status
 

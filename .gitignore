@@ -198,3 +198,11 @@ profiles*
 outputs
 **/.vscode/
 notebooks/.vscode/
+
+# Reconstructible literature corpus artifacts.  The inventories, provenance
+# notes, and corpus tooling remain tracked; downloaded source files can be
+# regenerated and are too large for Git.
+research/literature/archive/
+research/literature/library/
+!research/literature/coverage.json
+tmp/pdfs/

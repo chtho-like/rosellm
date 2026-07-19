@@ -1,0 +1,4 @@
+# Reproducible local full-text extraction for the literature corpus.
+# pypdf 6 dropped Python 3.8, which RoseLLM still declares as supported.
+pypdf==5.9.0; python_version < "3.9"
+pypdf==6.10.0; python_version >= "3.9"

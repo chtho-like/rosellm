@@ -47,6 +47,16 @@ nav:
   - Glossary: glossary.md
   - Research Standard: research-method.md
   - Documentation Quality: documentation-quality.md
+  - Frontier-Lab Research Corpus:
+      - Scope, Coverage, and Reproduction: frontier-labs/index.md
+      - Cross-Lab Technical Synthesis: frontier-labs/cross-lab.md
+      - DeepSeek and Kimi: frontier-labs/deepseek-kimi.md
+      - Zhipu GLM: frontier-labs/glm.md
+      - OpenAI: frontier-labs/openai.md
+      - Anthropic: frontier-labs/anthropic.md
+      - Google DeepMind and Gemini: frontier-labs/gemini.md
+      - Coverage Ledger: frontier-labs/coverage.md
+      - Complete Bibliography: frontier-labs/bibliography.md
   - Agentic Reinforcement Learning:
       - Curriculum and Knowledge Map: agentic-rl/index.md
       - Terminology and Boundaries: agentic-rl/terminology.md

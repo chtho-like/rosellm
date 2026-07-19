@@ -21,6 +21,14 @@ training, distributed rollout systems, and source-level implementation. Read
 the [research standard](research-method.md) before using the
 [frontier-lab and open-industry evidence matrix](agentic-rl/case-studies/index.md).
 
+The [frontier-lab research corpus](frontier-labs/index.md) is the broad research
+companion: 3,050 auditable public records for DeepSeek, Moonshot/Kimi,
+Zhipu/GLM, OpenAI, Anthropic, and Google DeepMind/Gemini, spanning far more than
+Agentic RL. It includes reproducible inventories and archives, lab-by-lab deep
+syntheses, a [cross-lab comparison](frontier-labs/cross-lab.md), a generated
+[coverage ledger](frontier-labs/coverage.md), and the complete
+[bibliography](frontier-labs/bibliography.md).
+
 ### Where a new reader should begin
 
 Use this dependency order rather than jumping directly to the newest model
@@ -37,6 +45,10 @@ report:
 4. **Research reconstruction:** research standard, evidence matrix, then
    DeepSeek → GLM → Kimi → OpenAI/Anthropic/Google → Qwen/Meta/Mistral → open
    industry and community.
+5. **Full frontier-lab literature:** use the
+   [six-lab corpus entry point](frontier-labs/index.md), then read the
+   organization reports and cross-lab synthesis before consulting the
+   item-level coverage ledger.
 
 Keep the [glossary](glossary.md) open while reading. It is a lookup tool, not a
 final chapter.
@@ -74,7 +86,7 @@ prove the training recipe; and benchmark scores do not disclose a production
 agent pipeline. See the [research standard](research-method.md) for the full
 protocol.
 
-## Current focus
+## Current research focus
 
 The active focus is **Agentic Reinforcement Learning (Agentic RL)**:
 reinforcement learning in which a **Large Language Model (LLM)** policy
@@ -94,6 +106,11 @@ both the scientific object and the engineering system:
 7. evaluation against contamination, judge bias, reward hacking, and
    non-deterministic environments; and
 8. disclosed practices from DeepSeek, Zhipu GLM, Moonshot Kimi, and other labs.
+
+That specialization is no longer the boundary of the research archive. The
+frontier-lab corpus separately covers pretraining, architecture, optimization,
+multimodality, systems, code and mathematics, science, robotics,
+interpretability, evaluation, safety, governance, and social impact.
 
 ## Contribution standard
 

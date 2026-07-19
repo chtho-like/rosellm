@@ -1,0 +1,161 @@
+{"org":"Anthropic","id":"anthropic-arxiv-2204.05862","short_name":"Helpful and Harmless RLHF","notes":"Common short name for Anthropic's helpful-and-harmless assistant paper."}
+{"org":"Anthropic","id":"anthropic-arxiv-2212.08073","short_name":"Constitutional AI","notes":"Established name of the Constitutional AI paper."}
+{"org":"Anthropic","id":"anthropic-arxiv-2310.13798","short_name":"Constitutional AI Principles","notes":"Descriptive established name retained from the paper title."}
+{"org":"Anthropic","id":"anthropic-arxiv-2401.05566","short_name":"Sleeper Agents","notes":"Established paper name."}
+{"org":"Anthropic","id":"anthropic-arxiv-2406.07814","short_name":"Collective Constitutional AI","notes":"Established paper name."}
+{"org":"Anthropic","id":"anthropic-arxiv-2412.14093","short_name":"Alignment Faking","notes":"Established paper name."}
+{"org":"Anthropic","id":"anthropic-arxiv-2501.18837","short_name":"Constitutional Classifiers","notes":"Established system and paper name."}
+{"org":"Anthropic","id":"anthropic-arxiv-2507.21509","short_name":"Persona Vectors","notes":"Established method and paper name."}
+{"org":"Anthropic","id":"anthropic-arxiv-2601.04603","short_name":"Constitutional Classifiers++","notes":"Established system and paper name."}
+{"org":"Anthropic","id":"anthropic-url-447d214bafd4","short_name":"Claude 3.7 Sonnet System Card","notes":"Official system card name normalized to model-first order."}
+{"org":"Anthropic","id":"anthropic-url-4ed7ea770710","short_name":"Claude 3.5 Sonnet System Card","notes":"Official system card name normalized to model-first order."}
+{"org":"Anthropic","id":"anthropic-url-4fb00a2baa2f","short_name":"Claude 3.5 Haiku and Sonnet System Card","notes":"Official combined system card name."}
+{"org":"Anthropic","id":"anthropic-url-5e7c6ce96706","short_name":"Claude 4.5 Opus System Card","notes":"Official system card name normalized to model-first order."}
+{"org":"Anthropic","id":"anthropic-url-70ffca87647f","short_name":"Claude 2 Model Card","notes":"Official model card name."}
+{"org":"Anthropic","id":"anthropic-url-c341b5deaa35","short_name":"Claude 4 Sonnet and Opus System Card","notes":"Official combined system card name."}
+{"org":"Anthropic","id":"anthropic-url-e0b2e65d5728","short_name":"Claude 3 System Card","notes":"Official system card name."}
+{"org":"Anthropic","id":"anthropic-url-e22ae832bf3a","short_name":"Claude 4.5 Haiku System Card","notes":"Official system card name normalized to model-first order."}
+{"org":"Anthropic","id":"anthropic-url-f13cab9eecdf","short_name":"Claude 4.1 Opus System Card","notes":"Official system card name normalized to model-first order."}
+{"org":"Anthropic","id":"anthropic-url-f7f49cbdb85d","short_name":"Claude 4.5 Sonnet System Card","notes":"Official system card name normalized to model-first order."}
+{"org":"Anthropic","id":"anthropic-url-f84e8282e503","short_name":"Many-Shot Jailbreaking","notes":"Established name of the report."}
+{"org":"Anthropic","id":"anthropic-web-0aef3d8808f5","short_name":"Claude Fable 5 and Mythos 5 System Card","notes":"Official combined system card name."}
+{"org":"Anthropic","id":"anthropic-web-13483c3f1963","short_name":"Claude 4.6 Opus System Card","notes":"Official system card name normalized to model-first order."}
+{"org":"Anthropic","id":"anthropic-web-46cc1db1097b","short_name":"Claude Mythos Preview System Card","notes":"Official system card name."}
+{"org":"Anthropic","id":"anthropic-web-603274f2dd95","short_name":"Claude 4.7 Opus System Card","notes":"Official system card name normalized to model-first order."}
+{"org":"Anthropic","id":"anthropic-web-bfab55af8c5d","short_name":"Claude Sonnet 5 System Card","notes":"Official system card name."}
+{"org":"Anthropic","id":"anthropic-web-ce69e5e8b59a","short_name":"Claude 4.8 Opus System Card","notes":"Official system card name normalized to model-first order."}
+{"org":"Anthropic","id":"anthropic-web-ed127a271561","short_name":"Claude 4.6 Sonnet System Card","notes":"Official system card name normalized to model-first order."}
+{"org":"DeepSeek","id":"deepseek-2401.02954","short_name":"DeepSeek LLM","notes":"Official model-family name."}
+{"org":"DeepSeek","id":"deepseek-2401.06066","short_name":"DeepSeekMoE","notes":"Official model and architecture name."}
+{"org":"DeepSeek","id":"deepseek-2401.14196","short_name":"DeepSeek-Coder","notes":"Official model-family name."}
+{"org":"DeepSeek","id":"deepseek-2402.03300","short_name":"DeepSeekMath","notes":"Official model-family name."}
+{"org":"DeepSeek","id":"deepseek-2403.05525","short_name":"DeepSeek-VL","notes":"Official model-family name."}
+{"org":"DeepSeek","id":"deepseek-2405.04434","short_name":"DeepSeek-V2","notes":"Official model-generation name."}
+{"org":"DeepSeek","id":"deepseek-2405.14333","short_name":"DeepSeek-Prover","notes":"Official model-family name."}
+{"org":"DeepSeek","id":"deepseek-2406.11931","short_name":"DeepSeek-Coder-V2","notes":"Official model-generation name."}
+{"org":"DeepSeek","id":"deepseek-2408.08152","short_name":"DeepSeek-Prover-V1.5","notes":"Official model-generation name."}
+{"org":"DeepSeek","id":"deepseek-2410.13848","short_name":"Janus","notes":"Official multimodal model name."}
+{"org":"DeepSeek","id":"deepseek-2411.07975","short_name":"JanusFlow","notes":"Official multimodal model name."}
+{"org":"DeepSeek","id":"deepseek-2412.10302","short_name":"DeepSeek-VL2","notes":"Official model-generation name."}
+{"org":"DeepSeek","id":"deepseek-2412.19437","short_name":"DeepSeek-V3 Technical Report","notes":"Official model-generation report name."}
+{"org":"DeepSeek","id":"deepseek-2501.12948","short_name":"DeepSeek-R1","notes":"Official reasoning-model name."}
+{"org":"DeepSeek","id":"deepseek-2501.17811","short_name":"Janus-Pro","notes":"Official multimodal model name."}
+{"org":"DeepSeek","id":"deepseek-2502.11089","short_name":"Native Sparse Attention","notes":"Established architecture name, also known as NSA."}
+{"org":"DeepSeek","id":"deepseek-2504.21801","short_name":"DeepSeek-Prover-V2","notes":"Official model-generation name."}
+{"org":"DeepSeek","id":"deepseek-2510.18234","short_name":"DeepSeek-OCR","notes":"Official model name."}
+{"org":"DeepSeek","id":"deepseek-2511.22570","short_name":"DeepSeekMath-V2","notes":"Official model-generation name."}
+{"org":"DeepSeek","id":"deepseek-2512.02556","short_name":"DeepSeek-V3.2","notes":"Official model-generation name."}
+{"org":"DeepSeek","id":"deepseek-2601.20552","short_name":"DeepSeek-OCR 2","notes":"Official model-generation name."}
+{"org":"DeepSeek","id":"deepseek-2606.19348","short_name":"DeepSeek-V4","notes":"Official model-generation name."}
+{"org":"DeepSeek","id":"deepseek-v3.2-exp-report","short_name":"DeepSeek-V3.2-Exp","notes":"Official experimental model-generation name."}
+{"org":"Google DeepMind","id":"gdm-arxiv-1911.08265","short_name":"MuZero","notes":"Canonical MuZero paper."}
+{"org":"Google DeepMind","id":"gdm-arxiv-2203.07814","short_name":"AlphaCode","notes":"Canonical AlphaCode paper."}
+{"org":"Google DeepMind","id":"gdm-arxiv-2306.11706","short_name":"RoboCat","notes":"Canonical RoboCat paper."}
+{"org":"Google DeepMind","id":"gdm-arxiv-2402.15391","short_name":"Genie","notes":"Canonical Genie paper."}
+{"org":"Google DeepMind","id":"gdm-arxiv-2406.11409","short_name":"CodeGemma","notes":"Official model-family name."}
+{"org":"Google DeepMind","id":"gdm-arxiv-2412.03555","short_name":"PaliGemma 2","notes":"Official model-generation name."}
+{"org":"Google DeepMind","id":"gdm-arxiv-2503.19786","short_name":"Gemma 3 Technical Report","notes":"Official model-generation report name."}
+{"org":"Google DeepMind","id":"gdm-arxiv-2503.20020","short_name":"Gemini Robotics","notes":"Official model-family name."}
+{"org":"Google DeepMind","id":"gdm-arxiv-2509.20354","short_name":"EmbeddingGemma","notes":"Official model name."}
+{"org":"Google DeepMind","id":"gdm-doi-10.1038-s41586-021-03819-2","short_name":"AlphaFold 2","notes":"Canonical AlphaFold 2 structure-prediction paper."}
+{"org":"Google DeepMind","id":"gdm-doi-10.1038-s41586-023-06004-9","short_name":"AlphaDev","notes":"Canonical AlphaDev sorting-algorithms paper."}
+{"org":"Google DeepMind","id":"gdm-doi-10.1038-s41586-023-06924-6","short_name":"FunSearch","notes":"Canonical FunSearch paper."}
+{"org":"Google DeepMind","id":"gdm-doi-10.1038-s41586-024-07487-w","short_name":"AlphaFold 3","notes":"Canonical AlphaFold 3 paper."}
+{"org":"Google DeepMind","id":"gdm-url-00b8c518adaf","short_name":"Gemini 2.5 Flash-Lite Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-url-0453ae158a21","short_name":"Gemini 1.0 Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-url-082786c15ca1","short_name":"Gemini 2.5 Pro Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-url-0e2ab16c7b9c","short_name":"Gemini 2.0 Flash Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-url-119a83ec2a50","short_name":"AlphaEvolve","notes":"Official system name and technical report."}
+{"org":"Google DeepMind","id":"gdm-url-1334f9ac0ca9","short_name":"RecurrentGemma","notes":"Official model-family name."}
+{"org":"Google DeepMind","id":"gdm-url-2604411a6472","short_name":"Gemini 2.0 Flash-Lite Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-url-49ab4305f7af","short_name":"Gemini 1.5 Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-url-78c6fa8eafe5","short_name":"Gemini 3 Flash Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-url-98dcfe57eb6c","short_name":"Gemini 2.5 Computer Use Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-url-d2aed2990254","short_name":"Gemini 3.1 Pro Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-url-d2b992c527cc","short_name":"Gemma","notes":"Official open-model family report."}
+{"org":"Google DeepMind","id":"gdm-url-d94bc4796e34","short_name":"Gemini 3 Pro Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-url-f14dd44296f9","short_name":"Gemini 2.5 Flash and Flash Image Model Card","notes":"Official combined model card name."}
+{"org":"Google DeepMind","id":"gdm-url-f9179a0c9b65","short_name":"Gemini 2.5 Deep Think Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-web-125c1d0964e1","short_name":"Gemini 3.1 Flash-Lite Image Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-web-3e34f88c613d","short_name":"Gemini Omni Flash Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-web-50d0fe5038d4","short_name":"Gemini 3.1 Flash Audio Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-web-5cbf6a0a48be","short_name":"Gemini 3.5 Flash Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-web-7420e4780dde","short_name":"Gemini 3.5 Audio Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-web-7ba25bd90503","short_name":"Gemini 3 Pro Image Model Card","notes":"Official model card name."}
+{"org":"Google DeepMind","id":"gdm-web-c731c29759e8","short_name":"Gemini 3.1 Flash Image Model Card","notes":"Official model card name."}
+{"org":"Moonshot AI / Kimi","id":"kimi-2407.00079","short_name":"Mooncake","notes":"Established Kimi serving-system name."}
+{"org":"Moonshot AI / Kimi","id":"kimi-2501.12599","short_name":"Kimi k1.5","notes":"Official model-generation name."}
+{"org":"Moonshot AI / Kimi","id":"kimi-2502.13189","short_name":"MoBA","notes":"Official Mixture of Block Attention name."}
+{"org":"Moonshot AI / Kimi","id":"kimi-2502.16982","short_name":"Muon","notes":"Established optimizer name."}
+{"org":"Moonshot AI / Kimi","id":"kimi-2504.07491","short_name":"Kimi-VL Technical Report","notes":"Official model-family report name."}
+{"org":"Moonshot AI / Kimi","id":"kimi-2504.11354","short_name":"Kimina-Prover Preview","notes":"Official model preview name."}
+{"org":"Moonshot AI / Kimi","id":"kimi-2504.18425","short_name":"Kimi-Audio Technical Report","notes":"Official model-family report name."}
+{"org":"Moonshot AI / Kimi","id":"kimi-2507.20534","short_name":"Kimi K2","notes":"Official model-generation name."}
+{"org":"Moonshot AI / Kimi","id":"kimi-2509.23045","short_name":"Kimi-Dev","notes":"Official coding-agent model name."}
+{"org":"Moonshot AI / Kimi","id":"kimi-2510.26692","short_name":"Kimi Linear","notes":"Official attention-architecture name."}
+{"org":"Moonshot AI / Kimi","id":"kimi-2602.02276","short_name":"Kimi K2.5","notes":"Official model-generation name."}
+{"org":"Moonshot AI / Kimi","id":"kimi-2603.15031","short_name":"Attention Residuals","notes":"Established architecture and paper name."}
+{"org":"OpenAI","id":"chatgpt-images-2.0-system-card","short_name":"ChatGPT Images 2.0 System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"doi-33e0a55739d5","short_name":"Diffusion Models Beat GANs","notes":"Common short form of the paper title."}
+{"org":"OpenAI","id":"doi-4e082ecb573e","short_name":"DALL·E","notes":"Canonical DALL·E paper."}
+{"org":"OpenAI","id":"doi-98a139038f2b","short_name":"CLIP","notes":"Canonical CLIP paper."}
+{"org":"OpenAI","id":"gpt-4-system-card","short_name":"GPT-4 System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"gpt-5.6-preview-system-card","short_name":"GPT-5.6 Preview System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"gpt-rosalind-5.5-system-card","short_name":"GPT-Rosalind-5.5 System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"o1-preview-o1-mini-system-card","short_name":"o1-preview and o1-mini System Card","notes":"Official combined system card name."}
+{"org":"OpenAI","id":"preparedness-framework-beta","short_name":"Preparedness Framework (Beta)","notes":"Official framework report name."}
+{"org":"OpenAI","id":"system-card-gpt-5-6","short_name":"GPT-5.6 System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"system-card-gpt-live","short_name":"GPT-Live System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-13d4a9bfec63","short_name":"GPT-5.1-Codex-Max System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-159d28217d06","short_name":"Preparedness Framework","notes":"Official updated framework report name."}
+{"org":"OpenAI","id":"web-183d58a311d5","short_name":"Codex System Card","notes":"Official Codex addendum to the o3 and o4-mini system card."}
+{"org":"OpenAI","id":"web-18ba0c6ad33e","short_name":"GPT-5.2 System Card","notes":"Official GPT-5 system-card update."}
+{"org":"OpenAI","id":"web-1c46fdf17c79","short_name":"gpt-oss Model Card","notes":"Official combined gpt-oss-120b and gpt-oss-20b model card."}
+{"org":"OpenAI","id":"web-24bc39ed487b","short_name":"Operator System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-2d6622764daa","short_name":"GPT-5-Codex System Card","notes":"Official GPT-5 system-card addendum."}
+{"org":"OpenAI","id":"web-2f8a38bafb20","short_name":"GPT-4.5 System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-3375c5d27d9b","short_name":"GPT-4 Technical Report","notes":"Canonical GPT-4 report."}
+{"org":"OpenAI","id":"web-386e34a7513e","short_name":"Deep Research System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-3bbc92d9c76e","short_name":"GPT-5.5 Instant System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-408b38efbeaf","short_name":"GPT-5 Sensitive Conversations Addendum","notes":"Official system-card addendum."}
+{"org":"OpenAI","id":"web-5223fe491ee4","short_name":"GPT-4o Image Generation System Card","notes":"Official GPT-4o system-card addendum."}
+{"org":"OpenAI","id":"web-7a7213b68631","short_name":"ChatGPT Agent System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-7fda7ddac79f","short_name":"GPT-5.2-Codex System Card","notes":"Official GPT-5.2 system-card addendum."}
+{"org":"OpenAI","id":"web-8530f5b0e216","short_name":"Sora 2 System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-89bffd91b9ae","short_name":"o3 Operator System Card","notes":"Official o3 and o4-mini system-card addendum."}
+{"org":"OpenAI","id":"web-8fe8674e0195","short_name":"o3-mini System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-9cf289b414fd","short_name":"Deliberative Alignment","notes":"Established paper name."}
+{"org":"OpenAI","id":"web-a07eb39dec04","short_name":"GPT-5.5 System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-a95452783369","short_name":"GPT-4V System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-b4a245738a8f","short_name":"GPT-5.3 Instant System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-ba80e5e27a11","short_name":"DALL·E 3 System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-bd2a7f12ec03","short_name":"Neural Scaling Laws","notes":"Common short name for the neural language-model scaling-laws paper."}
+{"org":"OpenAI","id":"web-c02bd9ed41d6","short_name":"o3 and o4-mini System Card","notes":"Official combined system card name."}
+{"org":"OpenAI","id":"web-c8672ece6975","short_name":"GPT-5.1 Instant and Thinking System Card","notes":"Official system-card addendum."}
+{"org":"OpenAI","id":"web-dcf8ab338d73","short_name":"o1 System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-dd64fe3084a4","short_name":"GPT-5.3-Codex System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-e8cc130e4af6","short_name":"GPT-4o System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-e943411c2e8b","short_name":"gpt-oss-safeguard Technical Report","notes":"Official technical-report name."}
+{"org":"OpenAI","id":"web-eb6095ff0b58","short_name":"GPT-5 System Card","notes":"Official system card name."}
+{"org":"OpenAI","id":"web-f59abf9daf09","short_name":"GPT-5.4 Thinking System Card","notes":"Official system card name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2103.10360","short_name":"GLM","notes":"Canonical General Language Model paper."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2105.13290","short_name":"CogView","notes":"Official model name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2204.14217","short_name":"CogView2","notes":"Official model-generation name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2205.15868","short_name":"CogVideo","notes":"Official model name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2210.02414","short_name":"GLM-130B","notes":"Official model name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2303.17568","short_name":"CodeGeeX","notes":"Official code-model name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2304.05977","short_name":"ImageReward","notes":"Established reward-model name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2306.07906","short_name":"WebGLM","notes":"Official web-augmented model name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2311.03079","short_name":"CogVLM","notes":"Official vision-language model name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2312.08914","short_name":"CogAgent","notes":"Official GUI-agent model name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2403.05121","short_name":"CogView3","notes":"Official model-generation name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2406.12793","short_name":"ChatGLM","notes":"Canonical ChatGLM family report."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2408.06072","short_name":"CogVideoX","notes":"Official model-generation name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2408.16500","short_name":"CogVLM2","notes":"Official model-generation name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2411.00820","short_name":"AutoGLM","notes":"Official GUI-agent model name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2412.02612","short_name":"GLM-4-Voice","notes":"Official spoken-chatbot model name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2507.01006","short_name":"GLM-4.5V and GLM-4.1V-Thinking","notes":"Official multimodal model-family report name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2508.06471","short_name":"GLM-4.5","notes":"Official model-generation name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2512.14291","short_name":"GLM-TTS Technical Report","notes":"Official model-family report name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2602.15763","short_name":"GLM-5","notes":"Official model-generation name."}
+{"org":"Zhipu AI / Z.ai","id":"arxiv-2603.10910","short_name":"GLM-OCR Technical Report","notes":"Official model-family report name."}
