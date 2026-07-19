@@ -43,8 +43,7 @@ studies of frontier model families.
 
 ## Documentation
 
-The repository language is English. Technical claims should cite primary
-sources whenever a primary source exists.
+Technical claims should cite primary sources whenever a primary source exists.
 [Documentation and mathematical rendering rules](docs/documentation-quality.md)
 define the acceptance gate for Markdown, TeX, generated HTML, and browser
 output.

@@ -95,11 +95,11 @@ both the scientific object and the engineering system:
    non-deterministic environments; and
 8. disclosed practices from DeepSeek, Zhipu GLM, Moonshot Kimi, and other labs.
 
-## Language and contribution policy
+## Contribution standard
 
-All repository prose, comments, user-facing strings, commit messages, and new
-identifiers should be English. Citations should point to primary sources when
-available, and quantitative claims should identify the exact table, section,
-model version, and evaluation setting. Follow the
+Contributions should read as self-contained technical writing for their intended
+audience. Citations should point to primary sources when available, and
+quantitative claims should identify the exact table, section, model version, and
+evaluation setting. Follow the
 [documentation and mathematical rendering standard](documentation-quality.md)
 for Markdown, TeX, generated-site, and browser acceptance checks.

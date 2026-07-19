@@ -219,7 +219,7 @@ checks establish scrollability, not visual elegance.
 
 A documentation change is complete only when:
 
-- all prose and code-facing text remain English;
+- prose reads as a self-contained explanation for its intended audience;
 - source validation passes over every tracked or unignored new Markdown file;
 - strict MkDocs build passes;
 - source and generated expression sequences match;
