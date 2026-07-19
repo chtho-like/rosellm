@@ -29,3 +29,12 @@ repos:
       - id: flake8
         additional_dependencies: [flake8-docstrings]
         exclude: ^notebooks/
+
+  - repo: local
+    hooks:
+      - id: docs-math
+        name: docs math source validation
+        entry: python3 scripts/check_docs_math.py
+        language: system
+        pass_filenames: false
+        files: ^(.*\.md|mkdocs\.yml|docs/javascripts/mathjax\.js|scripts/check_docs_math\.py)$

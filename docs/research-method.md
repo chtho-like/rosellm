@@ -14,12 +14,16 @@ of the following.
 | Label | Meaning | Acceptable wording |
 |---|---|---|
 | **D — Disclosed** | A primary source states the claim directly. | “The report states …” |
+| **C — Confirmed artifact** | The claim is directly observable in released weights, configuration, data manifests, or source code, even if accompanying prose does not state it. | “The released configuration contains …” |
 | **R — Reproduced** | We reran the procedure and retained configuration, logs, code revision, and artifacts. | “Our reproduction measured …” |
 | **I — Inferred** | The conclusion follows from listed evidence plus explicit assumptions, but the source does not state it. | “This suggests … under assumptions A and B.” |
 | **U — Unknown** | Public evidence is absent, ambiguous, contradictory, or insufficient. | “The public sources do not disclose …” |
 
 The labels are ordered by kind, not credibility. A carefully qualified inference
 can be useful; it must never be presented as a disclosed production procedure.
+Use **D** for an explicit statement and **C** for direct artifact inspection.
+Do not promote a value inferred from tensor shapes, behavior, or naming to
+either class unless the released artifact makes the value unambiguous.
 
 ## Source hierarchy
 
@@ -153,3 +157,8 @@ branch.
 This standard is intentionally stricter than ordinary tutorial writing. The
 goal is not to maximize citation count; it is to make every important claim
 traceable to the strongest available evidence.
+
+The companion
+[documentation and mathematical rendering standard](documentation-quality.md)
+defines the source, generated-site, and browser checks required to keep those
+claims and their equations readable.

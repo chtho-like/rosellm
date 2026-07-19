@@ -137,14 +137,14 @@ store log-probabilities under the **actual behavior distribution after masks and
 sampling transformations**, or recompute them using an exactly equivalent
 frozen behavior policy.
 
-Temperature changes the behavior logits. If base logits are \(z\), sampling
-uses \(z/T\); the behavior log-probability is derived from the scaled and masked
+Temperature changes the behavior logits. If base logits are $z$, sampling
+uses $z/T$; the behavior log-probability is derived from the scaled and masked
 distribution, not the unscaled training logits.
 
 ## 6. Stage 4 — Select and launch tasks
 
 A curriculum sampler emits `(task_id, environment_version, seed, group_id)`.
-For group-relative algorithms, all \(G\) trajectories in a group normally share
+For group-relative algorithms, all $G$ trajectories in a group normally share
 the task but use independent policy/environment sampling seeds.
 
 The dispatcher should:
@@ -326,7 +326,7 @@ Build:
 - sample/task/group weights;
 - policy and environment metadata outside model tensors.
 
-The last input token predicts the next token, so logits at position \(i\) align
+The last input token predicts the next token, so logits at position $i$ align
 with target `input_ids[i+1]`. Unit-test this shift with a hand-built sequence.
 
 Context overflow is not solved by silently dropping early observations. Define

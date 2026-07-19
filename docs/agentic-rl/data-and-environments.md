@@ -371,8 +371,8 @@ will search for validator weaknesses more aggressively as training succeeds.
 
 ## 14. Curriculum and sampling
 
-Sampling determines the objective actually optimized. Let \(p_{\text{target}}(q)\)
-be the desired task distribution and \(p_{\text{train}}(q)\) the rollout
+Sampling determines the objective actually optimized. Let $p_{\text{target}}(q)$
+be the desired task distribution and $p_{\text{train}}(q)$ the rollout
 distribution. Oversampling hard tasks changes the objective unless corrected.
 
 Useful signals include:

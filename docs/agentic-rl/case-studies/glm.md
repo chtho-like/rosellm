@@ -69,11 +69,11 @@ pp. 2–4.
 GLM removes continuous spans, replaces each with a mask, and autoregressively
 reconstructs spans in random order:
 
-\[
+$$
 p(B\mid A)=
 \prod_{i=1}^{m}\prod_{t=1}^{|B_{\pi_i}|}
 p(b_{\pi_i,t}\mid A,B_{\pi_{<i}},b_{\pi_i,<t}).
-\]
+$$
 
 The attention mask has:
 
@@ -98,7 +98,7 @@ Table 11; [repository](https://github.com/THUDM/GLM-130B).
 - Raw pools: ~1.2T Pile English tokens, ~1.0T WuDao Chinese tokens, plus 250GB
   Chinese web text.
 - 95% self-supervised blank infilling: 30% short `[MASK]`, 70% prefix `[gMASK]`.
-- Short spans use Poisson \(\lambda=3\) and mask 15%.
+- Short spans use Poisson $\lambda=3$ and mask 15%.
 - 5% multitask instruction pretraining from 74 prompted datasets.
 
 ### Training operation [D]
@@ -108,7 +108,7 @@ Table 11; [repository](https://github.com/THUDM/GLM-130B).
 - DP 24 × TP 4 × PP 8.
 - Global batch warmup 192 → 4,224.
 - AdamW .9/.95, decay .1.
-- LR \(10^{-7}\to8\times10^{-5}\), cosine to \(8\times10^{-6}\).
+- LR $10^{-7}\to8\times10^{-5}$, cosine to $8\times10^{-6}$.
 - Dropout .1; gradient clip 1.0.
 - Hardware utilization 43.3%; model FLOP utilization 32.5%.
 - DeepNorm and 0.1 embedding-gradient shrinkage for stability.
@@ -259,7 +259,7 @@ Optimization:
 
 - Muon for most parameters; special handling for embeddings/bias/RMSNorm;
 - 5 Newton–Schulz steps; momentum .95; update RMS .2;
-- LR \(2.5\times10^{-4}\to2.5\times10^{-5}\);
+- LR $2.5\times10^{-4}\to2.5\times10^{-5}$;
 - token batch 16M → 64M over first 500B;
 - weight decay .1; no dropout; RoPE base 10K → 1M;
 - MTP loss .3 first 15T then .1.
@@ -299,11 +299,11 @@ across pages; final-answer reward.
 **Software engineering:** real issues/PRs; executable tests; distributed hardened
 sandbox; test reward; invalid format stops with zero reward.
 
-Sample \(K\) traces per prompt and center outcome rewards:
+Sample $K$ traces per prompt and center outcome rewards:
 
-\[
+$$
 A_i=r(x,y_i)-\frac1K\sum_jr(x,y_j).
-\]
+$$
 
 Only generated tokens are optimized. The operation iterates:
 
@@ -320,17 +320,17 @@ interaction scaling.
 **Critical caveat:** the report's printed objective contains only the sum of
 centered rewards, which is identically zero:
 
-\[
+$$
 \sum_i(r_i-\bar r)=0.
-\]
+$$
 
 It omits the necessary score-function/log-probability term. A plausible intended
 gradient is
 
-\[
+$$
 \mathbb E\left[\frac1K\sum_iA_i\sum_t
 \nabla_\theta\log\pi_\theta(y_{i,t}\mid x,y_{i,<t})\right],
-\]
+$$
 
 possibly with clipping/importance correction, but exact implementation is not
 recoverable from the printed GLM-4.5 equation. Do not reproduce it uncritically.
@@ -424,7 +424,7 @@ diffs, issues, PRs; natural long documents and synthetic long agent trajectories
 DSA conversion after dense mid-training:
 
 1. freeze base; warm indexer 1,000 steps;
-2. 14 × 202,752 tokens/step (~2.84M); max indexer LR \(5\times10^{-3}\);
+2. 14 × 202,752 tokens/step (~2.84M); max indexer LR $5\times10^{-3}$;
 3. joint sparse adaptation 20B tokens;
 4. top-k 2,048;
 5. freeze indexer during RL;
@@ -463,15 +463,15 @@ Reasoning RL:
 
 - GRPO + IcePop-like train/inference mismatch suppression;
 - no KL regularization;
-- mismatch bound \(\beta=2\);
-- PPO clip \(\epsilon_l=.2,\epsilon_h=.28\);
+- mismatch bound $\beta=2$;
+- PPO clip $\epsilon_l=.2,\epsilon_h=.28$;
 - group 32, batch 32, fully on-policy;
 - math, science, code, tool-integrated reasoning;
 - difficulty: rarely solved by 4.7 but solvable by strong teachers;
 - domain binary judges.
 
 IcePop suppresses token gradients when the rollout/training probability ratio
-falls outside \([1/\beta,\beta]\).
+falls outside $[1/\beta,\beta]$.
 
 ### 9.6 Agent environments [D]
 
@@ -502,31 +502,31 @@ reward-hacking discussion.
 - token-in/token-out gateway preserves exact IDs/metadata;
 - rollout log-probabilities define behavior policy.
 
-\[
+$$
 r_t(\theta)=\exp[
 \log\pi_\theta(a_t\mid s_t)-
 \log\pi_{\text{rollout}}(a_t\mid s_t)].
-\]
+$$
 
 Double-sided rejection:
 
-\[
+$$
 f(r_t)=
 \begin{cases}
 r_t,&1-\epsilon_l<r_t<1+\epsilon_h,\\
 0,&\text{otherwise}.
 \end{cases}
-\]
+$$
 
 - record rollout weight versions;
-- drop trajectories older than an undisclosed lag \(\tau\);
+- drop trajectories older than an undisclosed lag $\tau$;
 - exclude environment crashes;
 - after GRPO filtering, if >half a group remains, repeat valid samples to pad;
   otherwise drop group;
 - route all turns in one rollout to same DP rank for KV locality;
 - reset optimizer state after some rollout-weight refreshes.
 
-Exact sync interval, \(\tau\), and hardware are **[U]**.
+Exact sync interval, $\tau$, and hardware are **[U]**.
 
 ### 9.8 On-policy cross-stage distillation [D]
 
@@ -594,7 +594,7 @@ GLM-5.2 moved to:
 - all compacted sub-traces retained;
 - token-level loss to handle length imbalance.
 
-**[U]** critic architecture, GAE \(\gamma/\lambda\), clipping, value/entropy
+**[U]** critic architecture, GAE $\gamma/\lambda$, clipping, value/entropy
 coefficients, batch, optimizer. “Uses PPO” is not enough to reconstruct the
 update.
 
@@ -611,17 +611,17 @@ used SAO.
 
 #### Why group optimization becomes a systems problem
 
-**Group Relative Policy Optimization (GRPO)** samples \(G\) answers for one
+**Group Relative Policy Optimization (GRPO)** samples $G$ answers for one
 prompt and needs the group before it can compute relative advantages. If
-rollout durations are \(T_1,\ldots,T_G\), a synchronous group becomes ready at
+rollout durations are $T_1,\ldots,T_G$, a synchronous group becomes ready at
 
-\[
+$$
 T_{\text{ready}}=\max_i T_i,
-\]
+$$
 
 so finished workers wait for the longest member. Long coding episodes make the
 tail large. Meanwhile the learner may update, so a late group can contain
-tokens produced by stale rollout-policy versions. SAO sets \(G=1\): each
+tokens produced by stale rollout-policy versions. SAO sets $G=1$: each
 trajectory enters training as soon as it finishes. That removes the
 within-prompt group barrier but also removes GRPO's group-mean baseline.
 
@@ -629,49 +629,49 @@ within-prompt group barrier but also removes GRPO's group-mean baseline.
 
 SAO uses **Direct Double-Sided Importance Sampling (DIS)**. For an action token
 recorded with rollout-engine log-probability
-\(\log\pi_{\text{rollout}}(a_t\mid s_t)\), it recomputes
+$\log\pi_{\text{rollout}}(a_t\mid s_t)$, it recomputes
 
-\[
+$$
 r_t(\theta)=\exp\!\left[
 \log\pi_\theta(a_t\mid s_t)-
 \log\pi_{\text{rollout}}(a_t\mid s_t)
 \right].
-\]
+$$
 
-It drops a separate \(\pi_{\text{old}}\) and gates the token with
+It drops a separate $\pi_{\text{old}}$ and gates the token with
 
-\[
+$$
 f(r;\epsilon_l,\epsilon_h)=
 \begin{cases}
 r,&1-\epsilon_l<r<1+\epsilon_h,\\
 0,&\text{otherwise}.
 \end{cases}
-\]
+$$
 
 The paper prints
 
-\[
-L(\theta)=\widehat{\mathbb E}_t\!left[
+$$
+L(\theta)=\widehat{\mathbb E}_t\!\left[
 f(r_t;\epsilon_l,\epsilon_h)\widehat A_t
 \log\pi_\theta(a_t\mid s_t)
 \right].
-\]
+$$
 
 This is strict **two-sided masking**, not ordinary Proximal Policy Optimization
 (PPO) clipping. PPO saturates only the direction in which the objective would
 improve too far; DIS gives *zero* gradient contribution outside the interval
-regardless of advantage sign. The paper does not mark whether \(f(r_t)\) is
-stop-gradient. A literal autodifferentiation through both \(r_t\) and
-\(\log\pi_\theta\) adds an extra derivative term, so a source-level
+regardless of advantage sign. The paper does not mark whether $f(r_t)$ is
+stop-gradient. A literal autodifferentiation through both $r_t$ and
+$\log\pi_\theta$ adds an extra derivative term, so a source-level
 reproduction must resolve this implementation detail rather than silently
 assuming one interpretation **[U]**.
 
 #### Restoring a critic at group size one
 
 With no same-prompt comparison group, SAO learns a value model
-\(V_\phi(s_t)\):
+$V_\phi(s_t)$:
 
-1. run \(K=2\) critic updates for every actor update in the reported
+1. run $K=2$ critic updates for every actor update in the reported
    experiments;
 2. freeze the critic's full-attention parameters and optimize its
    Mixture-of-Experts (MoE) projections, because full attention updates had
@@ -681,18 +681,18 @@ With no same-prompt comparison group, SAO learns a value model
 4. estimate token advantages with a length-adaptive form of Generalized
    Advantage Estimation (GAE).
 
-For an agent trace \([a_0,o_0,a_1,o_1,\ldots]\), where \(a_i\) is a model action
-and \(o_i\) is an environment observation, skip-observation GAE bridges from
-the last token \(a_{i,N}\) directly to the first token of the next model action:
+For an agent trace $[a_0,o_0,a_1,o_1,\ldots]$, where $a_i$ is a model action
+and $o_i$ is an environment observation, skip-observation GAE bridges from
+the last token $a_{i,N}$ directly to the first token of the next model action:
 
-\[
+$$
 \begin{aligned}
 \delta_i
   &=r_i+\gamma V_\phi(a_{i+1,0})-V_\phi(a_{i,N}),\\
 \widehat A(a_{i,N})
   &=\delta_i+\gamma\lambda\widehat A(a_{i+1,0}).
 \end{aligned}
-\]
+$$
 
 Observation tokens are not sampled by the policy and therefore receive no
 policy loss or artificial token-to-token value transition. The *next action's
@@ -708,10 +708,10 @@ The controlled experiments use **Qwen3-30B-A3B**, not GLM-5.2:
 | math/tool initialization | three-epoch SFT of Qwen3-30B-A3B-Thinking-2507 on GPT-OSS-120B-generated tool traces |
 | asynchronous batch/group | 128 trajectories / one rollout per prompt |
 | maximum length | 128K tokens |
-| actor learning rate | \(10^{-6}\) |
-| reasoning DIS interval | \((1-0.3,1+5.0)=(0.7,6.0)\) |
-| coding DIS interval | \((1-0.8,1+3.0)=(0.2,4.0)\) |
-| critic | learning rate \(5\times10^{-6}\), 10-step warmup, two updates per actor update |
+| actor learning rate | $10^{-6}$ |
+| reasoning DIS interval | $(1-0.3,1+5.0)=(0.7,6.0)$ |
+| coding DIS interval | $(1-0.8,1+3.0)=(0.2,4.0)$ |
+| critic | learning rate $5\times10^{-6}$, 10-step warmup, two updates per actor update |
 | coding scaffold | OpenHands, at most 300 turns, 128K context |
 
 Vendor-author-reported outcomes are 97.3 versus 84.2 on AIME 2025, 74.8
@@ -732,7 +732,7 @@ The correct production statement is narrow:
 - **[U]** whether SAO was the only actor optimizer or the final consolidation
   optimizer; the release separately discloses parallel OPD for expert merging.
 
-Transferring the Qwen experiment's \(K=2\), learning rates, or very wide DIS
+Transferring the Qwen experiment's $K=2$, learning rates, or very wide DIS
 intervals to a 753B checkpoint would turn disclosed evidence into fiction.
 
 ### 11.4 Parallel on-policy expert distillation [D]
@@ -780,19 +780,19 @@ this is a general research result, not ChatGLM production evidence.
 ChatGLM3-6B. Humans select tasks and record browser operations; GPT-4 fills
 step intentions; curriculum SFT goes atomic → complex. DPO samples 20 responses
 per prompt and keeps mixed success/failure prompts; ~13K preferences; LR
-\(10^{-6}\), batch 64, \(\beta=.15\), auxiliary SFT weight .8. Rejection
+$10^{-6}$, batch 64, $\beta=.15$, auxiliary SFT weight .8. Rejection
 fine-tuning: ~15K MiniWoB++ trajectories/66K steps and 240 WebArena/2K; LR
-\(10^{-5}\), batch 32.
+$10^{-5}$, batch 32.
 
 ### WebRL
 
 [Paper](https://arxiv.org/abs/2411.02337); GLM-4-9B experiment. Binary environment
 reward; outcome RM emits YES/NO from instruction/action history/final HTML;
-12,200 RM examples from 1,186 source tasks + rollouts; LR \(5\times10^{-6}\),
+12,200 RM examples from 1,186 source tasks + rollouts; LR $5\times10^{-6}$,
 batch 128, four epochs. Eight curriculum phases; each creates 500 GPT-4o-derived
 tasks from current failures. Critic/feasibility filter; KL-constrained
-actor–critic with GAE \(\lambda=.5,\gamma=.9\); replay with tightening
-perplexity; actor/critic LR \(10^{-6}\), batch 128. Reported success 6.1 → 43.0.
+actor–critic with GAE $\lambda=.5,\gamma=.9$; replay with tightening
+perplexity; actor/critic LR $10^{-6}$, batch 128. Reported success 6.1 → 43.0.
 
 ### AutoGLM
 

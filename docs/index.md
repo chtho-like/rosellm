@@ -10,14 +10,36 @@ systems, agents, and safety.
 ### Follow the curriculum
 
 Start with the [LLM learning roadmap](learning-roadmap.md). It orders the topics
-by dependency, attaches concrete mastery checks, and points from each idea to a
-paper, an equation, and eventually an implementation.
+by dependency and attaches concrete mastery checks. It also identifies where
+the repository already provides a derivation, source lab, or primary-source
+reading path and where prerequisite textbook study is still required.
 
 The first complete specialization is the
 [Agentic Reinforcement Learning curriculum](agentic-rl/index.md). It begins with
 probability and Markov decision processes, then reaches long-horizon agent
-training, distributed rollout systems, and a
+training, distributed rollout systems, and source-level implementation. Read
+the [research standard](research-method.md) before using the
 [frontier-lab and open-industry evidence matrix](agentic-rl/case-studies/index.md).
+
+### Where a new reader should begin
+
+Use this dependency order rather than jumping directly to the newest model
+report:
+
+1. **Orientation and prerequisites:** this page, then the roadmap's five-pass
+   loop and Levels 0–6. Use the [annotated bibliography](agentic-rl/bibliography.md)
+   as a reading side rail.
+2. **Agentic RL foundations:** curriculum map, terminology, history,
+   mathematical foundations, step-by-step derivations, and algorithm families.
+3. **The actual training system:** data and environments, end-to-end pipeline,
+   inference prerequisites, rollout/training systems, evaluation and safety,
+   then the source-level lab.
+4. **Research reconstruction:** research standard, evidence matrix, then
+   DeepSeek → GLM → Kimi → OpenAI/Anthropic/Google → Qwen/Meta/Mistral → open
+   industry and community.
+
+Keep the [glossary](glossary.md) open while reading. It is a lookup tool, not a
+final chapter.
 
 ### Trace concepts into code
 
@@ -33,10 +55,13 @@ Use the implementation as a set of progressively more realistic laboratories:
 
 ## The standard of evidence
 
-This knowledge base separates four different kinds of statements:
+This knowledge base separates five different kinds of statements:
 
 - **Disclosed fact:** explicitly stated by a model developer, paper, model card,
   repository, or dataset card.
+- **Confirmed artifact:** directly observable in released weights,
+  configuration, data manifests, or source code even when prose does not state
+  it explicitly.
 - **Reproduced result:** independently produced with a recorded environment,
   command, configuration, and artifact.
 - **Inference:** a conclusion supported by disclosed facts but not itself
@@ -75,4 +100,6 @@ both the scientific object and the engineering system:
 All repository prose, comments, user-facing strings, commit messages, and new
 identifiers should be English. Citations should point to primary sources when
 available, and quantitative claims should identify the exact table, section,
-model version, and evaluation setting.
+model version, and evaluation setting. Follow the
+[documentation and mathematical rendering standard](documentation-quality.md)
+for Markdown, TeX, generated-site, and browser acceptance checks.

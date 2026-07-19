@@ -24,7 +24,7 @@ answers the more important question, “what does this object do here?”
 | **MOPD** | Multi-Domain / Multi-teacher On-Policy Distillation | NVIDIA uses “Multi-Domain” in Cascade 2 and “Multi-teacher” in Nemotron 3 Ultra for closely related student-state distillation: the student samples states and a domain teacher supplies token distributions on those states. |
 | **CoT** | Chain of Thought | Intermediate language or latent reasoning before an answer. Long-CoT denotes deliberately extended traces. |
 | **TTRL** | Test-Time Reinforcement Learning | Target-specific policy adaptation performed during evaluation; AlphaProof uses generated variants around a target theorem. It differs from merely sampling more candidates. |
-| **NLL** | Negative Log-Likelihood | For a target sequence, \(-\log p_\theta(y\mid x)=-\sum_t\log p_\theta(y_t\mid x,y_{<t})\); minimizing it performs maximum-likelihood imitation. Adding NLL on successful RL samples directly increases the likelihood of their tokens. |
+| **NLL** | Negative Log-Likelihood | For a target sequence, $-\log p_\theta(y\mid x)=-\sum_t\log p_\theta(y_t\mid x,y_{<t})$; minimizing it performs maximum-likelihood imitation. Adding NLL on successful RL samples directly increases the likelihood of their tokens. |
 
 ## MDP, POMDP, and trajectories
 
@@ -32,20 +32,20 @@ answers the more important question, “what does this object do here?”
 
 An **MDP** is the mathematical model
 
-\[
+$$
 \mathcal M=(\mathcal S,\mathcal A,P,r,\gamma,\rho_0),
-\]
+$$
 
-where \(\mathcal S\) is the state space, \(\mathcal A\) the action space,
-\(P(s'\mid s,a)\) the transition law, \(r\) the reward, \(\gamma\) the discount
-factor, and \(\rho_0\) the initial-state distribution. “Markov” means the
+where $\mathcal S$ is the state space, $\mathcal A$ the action space,
+$P(s'\mid s,a)$ the transition law, $r$ the reward, $\gamma$ the discount
+factor, and $\rho_0$ the initial-state distribution. “Markov” means the
 current state contains everything needed to predict the next state once the
 action is known.
 
 ### Partially Observable Markov Decision Process (POMDP)
 
 A **POMDP** is an MDP in which the agent cannot directly observe the complete
-state. Instead it receives \(o_t\sim O(\cdot\mid s_t)\) and must infer what
+state. Instead it receives $o_t\sim O(\cdot\mid s_t)$ and must infer what
 matters from its interaction history or learned memory. Tool-using LLM agents
 are normally closer to POMDPs: hidden web state, omitted files, asynchronous
 events, and truncated context make the true environment state only partially
@@ -53,16 +53,16 @@ visible.
 
 | Term | Meaning |
 |---|---|
-| **state** \(s_t\) | All environment information that makes future dynamics independent of the earlier past, conditional on the next action. It may be hidden. |
-| **observation** \(o_t\) | Information exposed to the agent, such as a prompt, terminal output, or screenshot. |
-| **action** \(a_t\) | A decision affecting the environment: a token, message, tool call, or structured command. |
-| **policy** \(\pi_\theta(a\mid h)\) | A parameterized probability distribution over actions given observable history \(h\). |
-| **trajectory** \(\tau\) | One ordered record of observations, actions, rewards, and termination signals. |
+| **state** $s_t$ | All environment information that makes future dynamics independent of the earlier past, conditional on the next action. It may be hidden. |
+| **observation** $o_t$ | Information exposed to the agent, such as a prompt, terminal output, or screenshot. |
+| **action** $a_t$ | A decision affecting the environment: a token, message, tool call, or structured command. |
+| **policy** $\pi_\theta(a\mid h)$ | A parameterized probability distribution over actions given observable history $h$. |
+| **trajectory** $\tau$ | One ordered record of observations, actions, rewards, and termination signals. |
 | **episode / horizon** | One complete or truncated interaction / its maximum or realized number of decision steps. |
-| **return** \(G_t\) | Discounted future reward, \(G_t=\sum_{k\ge0}\gamma^k r_{t+k}\). |
-| **value** \(V^\pi(s)\) | Expected return from a state under policy \(\pi\). |
-| **action value** \(Q^\pi(s,a)\) | Expected return after action \(a\), then following \(\pi\). |
-| **advantage** \(A^\pi(s,a)\) | How much better an action is than the policy average: \(Q^\pi(s,a)-V^\pi(s)\). |
+| **return** $G_t$ | Discounted future reward, $G_t=\sum_{k\ge0}\gamma^k r_{t+k}$. |
+| **value** $V^\pi(s)$ | Expected return from a state under policy $\pi$. |
+| **action value** $Q^\pi(s,a)$ | Expected return after action $a$, then following $\pi$. |
+| **advantage** $A^\pi(s,a)$ | How much better an action is than the policy average: $Q^\pi(s,a)-V^\pi(s)$. |
 | **credit assignment** | Determining which earlier actions deserve responsibility for a delayed outcome. |
 | **on-policy / off-policy** | Data comes from the current policy / from a teacher, replay buffer, older checkpoint, or other behavior policy. |
 
@@ -75,7 +75,7 @@ visible.
 | **A2C** | Advantage Actor-Critic | A synchronous actor-critic policy-gradient method; an advantage estimate subtracts a learned value baseline. |
 | **TRPO** | Trust Region Policy Optimization | Constrains updates by a Kullback–Leibler divergence trust region. |
 | **PPO** | Proximal Policy Optimization | Reuses rollouts while clipping or penalizing policy-ratio movement. Actor-critic PPO learns a value function. |
-| **GAE** | Generalized Advantage Estimation | A geometrically weighted mixture of temporal-difference residuals, trading bias against variance through \(\lambda\). |
+| **GAE** | Generalized Advantage Estimation | A geometrically weighted mixture of temporal-difference residuals, trading bias against variance through $\lambda$. |
 | **TD** | Temporal Difference | Bootstraps from a later value estimate instead of waiting for the complete return. |
 | **RLOO** | REINFORCE Leave-One-Out | Uses the other responses to the same prompt as a reward baseline; no critic is required. |
 | **GRPO** | Group Relative Policy Optimization | DeepSeek's publicly introduced critic-free PPO-like method; it derives relative advantages from a response group for one prompt. |
@@ -108,13 +108,13 @@ visible.
 | **GenRM / GRM** | Generative Reward Model | Generates a critique or structured judgment instead of only a scalar. Both abbreviations occur in primary sources. |
 | **RBR** | Rule-Based Rewards | OpenAI's system of human-authored propositions graded by a fixed language model and linearly combined into a reward; it is not merely deterministic `if` statements. |
 | **IBT** | Inter-Temporal Bradley-Terry | A preference model over progress at two different prefixes of the same embodied trajectory. |
-| **ESS** | Effective Sample Size | For nonnegative, not-all-zero importance weights, \((\sum_i w_i)^2/\sum_i w_i^2\); it equals the sample count when weights are equal and falls toward 1 as a few samples dominate. |
+| **ESS** | Effective Sample Size | For nonnegative, not-all-zero importance weights, $(\sum_i w_i)^2/\sum_i w_i^2$; it equals the sample count when weights are equal and falls toward 1 as a few samples dominate. |
 | **IPT** | Isomorphic Perturbation Test | A metamorphic reward audit that applies a meaning-preserving renaming or transformation and checks whether a genuinely general solution transforms consistently. |
 | **LLM judge** | Large Language Model judge | A model prompted or trained to evaluate another output; it is fallible and not automatically ground truth. |
-| **KL** | Kullback–Leibler divergence | A directional mismatch, \(D_{KL}(p\Vert q)=\mathbb E_p[\log p-\log q]\), often used to limit policy drift. |
-| **TV** | Total Variation distance | A symmetric distance, \(\tfrac12\sum_x\lvert p(x)-q(x)\rvert\). |
-| **pass@k** | pass at \(k\) | Probability that at least one of \(k\) sampled candidates passes; it requires a sampling protocol. |
-| **IoU / F1** | Intersection over Union / harmonic mean of precision and recall | Overlap metric for regions / class metric \(2PR/(P+R)\). |
+| **KL** | Kullback–Leibler divergence | A directional mismatch, $D_{\mathrm{KL}}(p\Vert q)=\mathbb E_p[\log p-\log q]$, often used to limit policy drift. |
+| **TV** | Total Variation distance | A symmetric distance, $\tfrac12\sum_x\lvert p(x)-q(x)\rvert$. |
+| **pass@k** | pass at $k$ | Probability that at least one of $k$ sampled candidates passes; it requires a sampling protocol. |
+| **IoU / F1** | Intersection over Union / harmonic mean of precision and recall | Overlap metric for regions / class metric $2PR/(P+R)$. |
 
 ## Transformer architecture
 

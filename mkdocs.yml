@@ -1,5 +1,6 @@
 site_name: RoseLLM
 site_description: A source-cited LLM learning repository and executable systems lab
+site_url: https://chtho-like.github.io/rosellm/
 repo_url: https://github.com/chtho-like/rosellm
 docs_dir: docs
 
@@ -37,22 +38,24 @@ markdown_extensions:
       custom_checkbox: true
 
 extra_javascript:
-  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js
 
 nav:
   - Home: index.md
   - Learning Roadmap: learning-roadmap.md
   - Glossary: glossary.md
   - Research Standard: research-method.md
+  - Documentation Quality: documentation-quality.md
   - Agentic Reinforcement Learning:
       - Curriculum and Knowledge Map: agentic-rl/index.md
       - Terminology and Boundaries: agentic-rl/terminology.md
       - Historical Development: agentic-rl/history.md
       - Mathematical Foundations: agentic-rl/mathematical-foundations.md
       - Step-by-Step Derivations and Code: agentic-rl/derivations-and-code.md
+      - Algorithms: agentic-rl/algorithms.md
       - Data and Environments: agentic-rl/data-and-environments.md
       - End-to-End Training Pipeline: agentic-rl/training-pipeline.md
-      - Algorithms: agentic-rl/algorithms.md
       - Systems and Infrastructure: agentic-rl/systems.md
       - Evaluation and Safety: agentic-rl/evaluation-and-safety.md
       - Source-Level Lab: agentic-rl/source-lab.md

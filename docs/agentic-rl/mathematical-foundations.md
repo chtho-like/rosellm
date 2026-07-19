@@ -10,39 +10,39 @@ estimator, or explicit approximation.
 A **Large Language Model (LLM)** agent has a semantic policy over environment actions and an
 autoregressive policy over tokens.
 
-- \(s_t\): latent environment state at decision step \(t\)
-- \(o_t\): observation emitted from \(s_t\)
-- \(h_t\): policy-visible information state built from observations, past
+- $s_t$: latent environment state at decision step $t$
+- $o_t$: observation emitted from $s_t$
+- $h_t$: policy-visible information state built from observations, past
   actions, and memory
-- \(a_t\): semantic action at decision step \(t\)
-- \(x_{t,j}\): generated token \(j\) within action \(a_t\)
-- \(L_t\): number of policy-generated tokens in \(a_t\)
-- \(r_t\): reward associated with a transition or action
-- \(T\): number of environment decisions before termination
-- \(\theta\): trainable policy parameters
+- $a_t$: semantic action at decision step $t$
+- $x_{t,j}$: generated token $j$ within action $a_t$
+- $L_t$: number of policy-generated tokens in $a_t$
+- $r_t$: reward associated with a transition or action
+- $T$: number of environment decisions before termination
+- $\theta$: trainable policy parameters
 
 If the environment consumes a generated token sequence directly, then
 
-\[
+$$
 a_t=(x_{t,1},\ldots,x_{t,L_t})
-\]
+$$
 
 and
 
-\[
+$$
 \log \pi_\theta(a_t\mid h_t)
 =\sum_{j=1}^{L_t}
 \log\pi_\theta(x_{t,j}\mid h_t,x_{t,<j}).
-\]
+$$
 
-If a deterministic parser \(g\) converts text to a structured action,
-\(a_t=g(x_{t,1:L_t})\), several token sequences can map to the same action.
+If a deterministic parser $g$ converts text to a structured action,
+$a_t=g(x_{t,1:L_t})$, several token sequences can map to the same action.
 The environment-level probability is then
 
-\[
+$$
 \Pr_\theta(a_t\mid h_t)
 =\sum_{x:g(x)=a_t}\pi_\theta(x\mid h_t).
-\]
+$$
 
 Production trainers almost never compute this sum. They optimize the sampled
 token sequence. This is a valid likelihood-ratio estimator for the behavior
@@ -51,18 +51,18 @@ the environment treats several formats as equivalent.
 
 ## 2. From next-token likelihood to a policy
 
-Pretraining models a token sequence \(x_{1:n}\) as
+Pretraining models a token sequence $x_{1:n}$ as
 
-\[
+$$
 p_\theta(x_{1:n})=\prod_{i=1}^{n}p_\theta(x_i\mid x_{<i}).
-\]
+$$
 
 Maximum likelihood minimizes
 
-\[
+$$
 \mathcal{L}_{\text{NLL}}(\theta)
 =-\sum_i\log p_\theta(x_i\mid x_{<i}).
-\]
+$$
 
 During agent execution, the same conditional distribution becomes a stochastic
 policy. The difference is causal data generation:
@@ -78,31 +78,31 @@ estimate gradients of different objectives under different data distributions.
 
 An MDP satisfies
 
-\[
+$$
 p(s_{t+1},r_t\mid s_0,a_0,\ldots,s_t,a_t)
 =p(s_{t+1},r_t\mid s_t,a_t).
-\]
+$$
 
-An agent rarely observes \(s_t\) completely. In a POMDP it sees
-\(o_t\sim O(\cdot\mid s_t)\). A theoretically sufficient information state is
+An agent rarely observes $s_t$ completely. In a POMDP it sees
+$o_t\sim O(\cdot\mid s_t)$. A theoretically sufficient information state is
 the belief distribution
 
-\[
+$$
 b_t(s)=p(s_t=s\mid o_{0:t},a_{0:t-1}).
-\]
+$$
 
 The Bayesian update is proportional to
 
-\[
+$$
 b_{t+1}(s')\propto
 O(o_{t+1}\mid s')
 \sum_s P(s'\mid s,a_t)b_t(s).
-\]
+$$
 
 LLM agents generally do not maintain this distribution explicitly. They use a
 serialized history, summary, retrieval result, recurrent state, or learned
-memory \(h_t=f(o_{0:t},a_{0:t-1})\). The policy is therefore
-\(\pi_\theta(a_t\mid h_t)\), and the quality of \(f\) is part of the agent.
+memory $h_t=f(o_{0:t},a_{0:t-1})$. The policy is therefore
+$\pi_\theta(a_t\mid h_t)$, and the quality of $f$ is part of the agent.
 
 This matters experimentally. If training supplies hidden state or evaluator
 annotations that inference cannot observe, the policy is trained on a different
@@ -110,44 +110,44 @@ information structure from the deployed agent.
 
 ## 4. Return, value, action value, and advantage
 
-For discount \(\gamma\in[0,1]\), define reward-to-go
+For discount $\gamma\in[0,1]$, define reward-to-go
 
-\[
+$$
 G_t=\sum_{k=t}^{T-1}\gamma^{k-t}r_k.
-\]
+$$
 
-Under policy \(\pi\),
+Under policy $\pi$,
 
-\[
+$$
 V^\pi(h_t)=\mathbb{E}_\pi[G_t\mid h_t],
-\]
+$$
 
-\[
+$$
 Q^\pi(h_t,a_t)=\mathbb{E}_\pi[G_t\mid h_t,a_t],
-\]
+$$
 
 and
 
-\[
+$$
 A^\pi(h_t,a_t)=Q^\pi(h_t,a_t)-V^\pi(h_t).
-\]
+$$
 
-Using history \(h_t\) rather than latent state \(s_t\) is deliberate: the critic
+Using history $h_t$ rather than latent state $s_t$ is deliberate: the critic
 must be clear about whether it is allowed privileged environment state. A
 centralized training critic may use extra state, but that changes the estimator
 and must not leak into the actor at inference.
 
 For an MDP, the Bellman expectation equations are
 
-\[
+$$
 V^\pi(s)=\mathbb{E}_{a\sim\pi,s'\sim P}
 [R(s,a,s')+\gamma V^\pi(s')],
-\]
+$$
 
-\[
+$$
 Q^\pi(s,a)=\mathbb{E}_{s'\sim P}
 [R(s,a,s')+\gamma\mathbb{E}_{a'\sim\pi}Q^\pi(s',a')].
-\]
+$$
 
 These equations explain why a useful critic can propagate sparse terminal
 success backward. They do not guarantee that a learned critic will generalize
@@ -155,39 +155,39 @@ under a changing language policy.
 
 ## 5. Trajectory probability
 
-For a fully observed MDP with initial-state distribution \(\rho_0\),
+For a fully observed MDP with initial-state distribution $\rho_0$,
 
-\[
+$$
 p_\theta(\tau)=
 \rho_0(s_0)
 \prod_{t=0}^{T-1}
 \pi_\theta(a_t\mid h_t)
 P(s_{t+1}\mid s_t,a_t).
-\]
+$$
 
-Only the policy term depends on \(\theta\) when the environment dynamics are
+Only the policy term depends on $\theta$ when the environment dynamics are
 fixed with respect to the policy parameters. Therefore
 
-\[
+$$
 \nabla_\theta\log p_\theta(\tau)
 =\sum_{t=0}^{T-1}\nabla_\theta\log\pi_\theta(a_t\mid h_t).
-\]
+$$
 
 This is the crucial reason model-free policy gradients do not need a
 differentiable browser, compiler, simulator, user, or robot.
 
 ## 6. Deriving REINFORCE
 
-Let \(R(\tau)\) denote total return and
+Let $R(\tau)$ denote total return and
 
-\[
+$$
 J(\theta)=\mathbb{E}_{\tau\sim p_\theta}[R(\tau)]
 =\sum_\tau p_\theta(\tau)R(\tau).
-\]
+$$
 
 Differentiate:
 
-\[
+$$
 \begin{aligned}
 \nabla_\theta J
 &=\sum_\tau \nabla_\theta p_\theta(\tau)R(\tau)\\
@@ -197,58 +197,58 @@ Differentiate:
 \left[R(\tau)\sum_t
 \nabla_\theta\log\pi_\theta(a_t\mid h_t)\right].
 \end{aligned}
-\]
+$$
 
-Rewards before action \(a_t\) cannot be caused by that action. Replacing total
+Rewards before action $a_t$ cannot be caused by that action. Replacing total
 return with reward-to-go preserves expectation and reduces variance:
 
-\[
+$$
 \nabla_\theta J
 =\mathbb{E}\left[
 \sum_t G_t\nabla_\theta\log\pi_\theta(a_t\mid h_t)
 \right].
-\]
+$$
 
 Expanding the semantic action into generated tokens gives
 
-\[
+$$
 \nabla_\theta J
 =\mathbb{E}\left[
 \sum_t\sum_{j=1}^{L_t}
 G_t\nabla_\theta
 \log\pi_\theta(x_{t,j}\mid h_t,x_{t,<j})
 \right].
-\]
+$$
 
 A terminal outcome therefore supplies the same Monte Carlo return to all policy
 tokens in a turn unless a finer estimator or reward decomposition is added.
 
 ## 7. Why a baseline does not bias the gradient
 
-Subtract any baseline \(b(h_t)\) that does not depend on the sampled action:
+Subtract any baseline $b(h_t)$ that does not depend on the sampled action:
 
-\[
+$$
 \mathbb{E}_{a\sim\pi_\theta}
 [b(h)\nabla_\theta\log\pi_\theta(a\mid h)]
 =b(h)\sum_a\pi_\theta(a\mid h)
 \nabla_\theta\log\pi_\theta(a\mid h).
-\]
+$$
 
-Since \(\pi\nabla\log\pi=\nabla\pi\),
+Since $\pi\nabla\log\pi=\nabla\pi$,
 
-\[
+$$
 b(h)\nabla_\theta\sum_a\pi_\theta(a\mid h)
 =b(h)\nabla_\theta 1=0.
-\]
+$$
 
 Thus
 
-\[
+$$
 (G_t-b(h_t))\nabla\log\pi_\theta(a_t\mid h_t)
-\]
+$$
 
 has the same expectation and can have much lower variance. A learned critic
-approximates \(V^\pi(h_t)\). A leave-one-out or group mean uses other samples
+approximates $V^\pi(h_t)$. A leave-one-out or group mean uses other samples
 for the same prompt/task. Baseline validity depends on the estimator details:
 including the current action's reward in a sample mean, normalizing by a
 sample-dependent standard deviation, or coupling trajectories can introduce
@@ -257,58 +257,58 @@ correct.
 
 ## 8. Actor–critic and temporal-difference residuals
 
-For a learned value \(V_\phi\), the one-step TD residual is
+For a learned value $V_\phi$, the one-step TD residual is
 
-\[
+$$
 \delta_t=r_t+\gamma V_\phi(h_{t+1})-V_\phi(h_t).
-\]
+$$
 
-If \(V_\phi=V^\pi\), \(\delta_t\) is an unbiased sample of the one-step
-advantage conditioned on \((h_t,a_t)\). In practice the critic is approximate
+If $V_\phi=V^\pi$, $\delta_t$ is an unbiased sample of the one-step
+advantage conditioned on $(h_t,a_t)$. In practice the critic is approximate
 and trained on a non-stationary distribution.
 
 Generalized Advantage Estimation is
 
-\[
+$$
 \hat A_t^{\text{GAE}(\gamma,\lambda)}
 =\sum_{l=0}^{T-t-1}(\gamma\lambda)^l\delta_{t+l}.
-\]
+$$
 
-- \(\lambda=0\): one-step TD, lower variance and more bootstrapping bias.
-- \(\lambda=1\): Monte Carlo return minus value, less bootstrapping bias and
+- $\lambda=0$: one-step TD, lower variance and more bootstrapping bias.
+- $\lambda=1$: Monte Carlo return minus value, less bootstrapping bias and
   higher variance for finite episodes.
 
 Timeout handling is mathematical, not bookkeeping. A true terminal state has
 no future value. A rollout truncated only because a collector reached a length
-budget may require bootstrapping from \(V(h_T)\). Marking both as `done=True`
+budget may require bootstrapping from $V(h_T)$. Marking both as `done=True`
 changes targets.
 
 ## 9. Importance sampling and policy versions
 
-Suppose data came from behavior policy \(\mu\) but the target is \(\pi_\theta\).
+Suppose data came from behavior policy $\mu$ but the target is $\pi_\theta$.
 For a single action,
 
-\[
+$$
 \mathbb{E}_{a\sim\mu}
 \left[\frac{\pi_\theta(a\mid h)}{\mu(a\mid h)}f(a)\right]
 =\mathbb{E}_{a\sim\pi_\theta}[f(a)]
-\]
+$$
 
 when support is sufficient. The ratio is
 
-\[
+$$
 \rho_t(\theta)=
-\frac{\pi_\theta(a_t\mid h_t)}{mu(a_t\mid h_t)}.
-\]
+\frac{\pi_\theta(a_t\mid h_t)}{\mu(a_t\mid h_t)}.
+$$
 
 For a token sequence, a trajectory/action ratio is a product of token ratios:
 
-\[
+$$
 \rho_t
 =\prod_j
 \frac{\pi_\theta(x_{t,j}\mid h_t,x_{t,<j})}
 {\mu(x_{t,j}\mid h_t,x_{t,<j})}.
-\]
+$$
 
 Equivalently, log-ratios add. Products over long sequences can have enormous
 variance. Practical LLM algorithms therefore use token-level clipping,
@@ -321,17 +321,17 @@ weights, sampling mask, and vocabulary used for generation.
 
 ## 10. PPO's clipped surrogate
 
-Let behavior policy be \(\pi_{\theta_{\text{old}}}\) and define
+Let behavior policy be $\pi_{\theta_{\text{old}}}$ and define
 
-\[
+$$
 r_t(\theta)=
 \frac{\pi_\theta(a_t\mid h_t)}
 {\pi_{\theta_{\text{old}}}(a_t\mid h_t)}.
-\]
+$$
 
 PPO maximizes
 
-\[
+$$
 L^{\text{CLIP}}(\theta)=
 \mathbb{E}_t\left[
 \min\left(
@@ -339,22 +339,22 @@ r_t(\theta)\hat A_t,
 \operatorname{clip}(r_t(\theta),1-\epsilon,1+\epsilon)\hat A_t
 \right)
 \right].
-\]
+$$
 
-The sign of \(\hat A_t\) matters:
+The sign of $\hat A_t$ matters:
 
-- for positive advantage, an increase above \(1+\epsilon\) stops improving the
+- for positive advantage, an increase above $1+\epsilon$ stops improving the
   surrogate;
-- for negative advantage, a decrease below \(1-\epsilon\) stops improving it.
+- for negative advantage, a decrease below $1-\epsilon$ stops improving it.
 
 Clipping is not a hard guarantee on KL divergence. A trainer should still log
 approximate KL, clip fraction, ratio distribution, entropy, and gradient norms.
 
 LLM PPO often adds a value loss and entropy term:
 
-\[
+$$
 L=L_{\text{policy}}-c_vL_{\text{value}}+c_H\mathcal{H}(\pi_\theta),
-\]
+$$
 
 with sign convention depending on whether code minimizes loss or maximizes an
 objective. A single sign error can make the “entropy bonus” reduce entropy.
@@ -363,34 +363,34 @@ objective. A single sign error can make the “entropy bonus” reduce entropy.
 
 To preserve capabilities and limit reward overoptimization, optimize
 
-\[
+$$
 J_{\text{KL}}(\theta)=
 \mathbb{E}_{x,y\sim\pi_\theta}
 \left[r(x,y)-\beta
 \log\frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)}
 \right].
-\]
+$$
 
 The sampled log-ratio
 
-\[
+$$
 k(x,y)=\log\pi_\theta(y\mid x)-\log\pi_{\text{ref}}(y\mid x)
-\]
+$$
 
 is an unbiased Monte Carlo estimate of forward
-\(D_{\mathrm{KL}}(\pi_\theta\Vert\pi_{\text{ref}})\) when \(y\) is sampled from
-\(\pi_\theta\). If samples come from an older behavior policy, this
+$D_{\mathrm{KL}}(\pi_\theta\Vert\pi_{\text{ref}})$ when $y$ is sampled from
+$\pi_\theta$. If samples come from an older behavior policy, this
 interpretation needs correction.
 
 For tokens,
 
-\[
+$$
 k(x,y)=\sum_j
 \left[
 \log\pi_\theta(y_j\mid x,y_{<j})-
 \log\pi_{\text{ref}}(y_j\mid x,y_{<j})
 \right].
-\]
+$$
 
 Applying a per-token KL penalty makes longer responses accumulate more penalty.
 Dividing by length changes the optimized objective. Neither choice is neutral;
@@ -398,11 +398,11 @@ state the normalization explicitly.
 
 The KL-regularized optimum for a fixed context and reward has form
 
-\[
+$$
 \pi^*(y\mid x)=
 \frac{1}{Z(x)}\pi_{\text{ref}}(y\mid x)
 \exp\left(\frac{r(x,y)}{\beta}\right),
-\]
+$$
 
 which is the relationship used to derive DPO-style preference objectives. DPO
 is valuable background, but a fixed pairwise dataset does not directly solve
@@ -410,25 +410,25 @@ multi-turn on-policy credit assignment.
 
 ## 12. Group and leave-one-out baselines
 
-For a task \(q\), sample \(G\) trajectories with returns \(R_1,\ldots,R_G\).
+For a task $q$, sample $G$ trajectories with returns $R_1,\ldots,R_G$.
 A leave-one-out baseline is
 
-\[
+$$
 b_i^{\text{LOO}}=\frac{1}{G-1}\sum_{k\ne i}R_k,
 \qquad
 \hat A_i=R_i-b_i^{\text{LOO}}.
-\]
+$$
 
-Because \(b_i^{\text{LOO}}\) excludes action/trajectory \(i\), it is independent
+Because $b_i^{\text{LOO}}$ excludes action/trajectory $i$, it is independent
 of that sample conditional on the task when rollouts are independent. RLOO uses
 this structure to avoid a learned critic.
 
 A commonly shown GRPO normalization is
 
-\[
+$$
 \hat A_i=
 \frac{R_i-\overline R}{\operatorname{std}(R_1,\ldots,R_G)+\varepsilon}.
-\]
+$$
 
 This makes updates invariant to affine scaling within a group and emphasizes
 relative performance. It also creates important edge cases:
@@ -437,7 +437,7 @@ relative performance. It also creates important edge cases:
 - small groups produce noisy mean and standard deviation estimates;
 - prompt difficulty affects reward variance and therefore gradient scale;
 - standard-deviation normalization can overweight low-variance groups;
-- including \(R_i\) in \(\overline R\) couples the sample with its baseline;
+- including $R_i$ in $\overline R$ couples the sample with its baseline;
 - outcome advantage copied across all tokens interacts with response-length
   normalization.
 
@@ -448,32 +448,32 @@ Dr. GRPO analyzes several normalization biases
 
 ## 13. Loss normalization and length bias
 
-Suppose token loss for response \(i\) is
+Suppose token loss for response $i$ is
 
-\[
+$$
 \ell_i=-\sum_{j=1}^{L_i}m_{i,j}\,s_{i,j},
-\]
+$$
 
-where \(m\) marks policy-generated trainable tokens and \(s\) is a surrogate
+where $m$ marks policy-generated trainable tokens and $s$ is a surrogate
 term. At least three batch reductions are common:
 
 ### Per-token normalization
 
-\[
+$$
 L_{\text{token}}=
 \frac{\sum_i\sum_j m_{i,j}s_{i,j}}
 {\sum_i\sum_j m_{i,j}}.
-\]
+$$
 
 Every token has equal weight; long trajectories influence more terms.
 
 ### Per-sequence normalization
 
-\[
+$$
 L_{\text{seq}}=
 \frac{1}{B}\sum_i
 \frac{\sum_jm_{i,j}s_{i,j}}{\sum_jm_{i,j}}.
-\]
+$$
 
 Every sequence has equal total weight; each token in a long response receives
 less weight.
@@ -490,11 +490,11 @@ not equivalent to globally summing numerators and denominators.
 
 ## 14. Multi-turn credit assignment
 
-For a terminal-only task reward \(R_T\), Monte Carlo credit uses
+For a terminal-only task reward $R_T$, Monte Carlo credit uses
 
-\[
+$$
 \hat A_t=R_T-b(h_t)
-\]
+$$
 
 for every turn. It is unbiased with a valid baseline but high variance and does
 not distinguish an essential early tool call from irrelevant later text.
@@ -503,19 +503,19 @@ Possible refinements include:
 
 ### Turn-level environment rewards
 
-Use verified progress \(r_t\) and reward-to-go. Dense rewards reduce temporal
+Use verified progress $r_t$ and reward-to-go. Dense rewards reduce temporal
 distance but can alter the optimum. Potential-based shaping
 
-\[
+$$
 F(s_t,s_{t+1})=\gamma\Phi(s_{t+1})-\Phi(s_t)
-\]
+$$
 
 preserves optimal policies under standard MDP conditions, whereas arbitrary
 “looks like progress” rewards do not.
 
 ### Learned values
 
-Estimate \(V(h_t)\) or \(Q(h_t,a_t)\). This can use all downstream reward but is
+Estimate $V(h_t)$ or $Q(h_t,a_t)$. This can use all downstream reward but is
 susceptible to approximation error and distribution shift.
 
 ### Process rewards
@@ -525,7 +525,7 @@ The supervision becomes denser, but the policy can optimize evaluator artifacts.
 
 ### Counterfactual and branching estimates
 
-From a saved state before action \(a_t\), sample alternate continuations to
+From a saved state before action $a_t$, sample alternate continuations to
 estimate its marginal effect. This is closer to causal credit but multiplies
 environment and rollout cost and requires reproducible state cloning.
 
@@ -539,10 +539,10 @@ credit paths, provided the option boundaries are meaningful and trainable.
 
 For a categorical token distribution,
 
-\[
+$$
 \mathcal H(\pi(\cdot\mid h))
 =-\sum_x\pi(x\mid h)\log\pi(x\mid h).
-\]
+$$
 
 Entropy is not identical to useful behavioral diversity:
 
@@ -562,26 +562,26 @@ and group reward variance separately.
 Agent utility normally includes success, safety, cost, latency, and user
 preference. A scalar reward might be
 
-\[
+$$
 r_t=w_s r_t^{\text{success}}
 -w_c c_t^{\text{cost}}
 -w_v c_t^{\text{violation}}.
-\]
+$$
 
 The weights encode policy decisions and can hide unacceptable tradeoffs. For a
 hard expected constraint
 
-\[
+$$
 \mathbb E_\pi[C(\tau)]\le d,
-\]
+$$
 
 form a Lagrangian
 
-\[
+$$
 \mathcal L(\theta,\lambda)
 =J_R(\theta)-\lambda(J_C(\theta)-d),
 \qquad \lambda\ge0.
-\]
+$$
 
 Alternating policy ascent and multiplier ascent/descent (depending on sign
 convention) can enforce an expectation constraint, but it does not guarantee
@@ -606,7 +606,7 @@ Track quantities that reveal the estimator, not just final reward:
 - value loss, explained variance, and calibration by horizon;
 - gradient norm before/after clipping and by parameter group;
 - effective sample size for importance weights,
-  \((\sum_i w_i)^2/\sum_iw_i^2\);
+  $(\sum_i w_i)^2/\sum_iw_i^2$;
 - response/episode length and correlation with reward/advantage;
 - policy lag measured in optimizer steps and divergence, not wall time alone.
 
@@ -649,7 +649,7 @@ remain testable.
 3. Masked observation tokens contribute exactly zero policy loss and gradient.
 4. Re-tokenizing decoded rollout text is never used to reconstruct behavior
    log-probabilities.
-5. With \(\theta=\theta_{\text{old}}\), every valid importance ratio is one
+5. With $\theta=\theta_{\text{old}}$, every valid importance ratio is one
    within numerical tolerance.
 6. Padding or repacking the same examples leaves the globally normalized loss
    unchanged.

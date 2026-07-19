@@ -108,27 +108,27 @@ change tokenization
 
 For one policy update, approximate wall time as
 
-\[
-T_{\text{sync}}
+$$
+T_{\text{update}}
 =T_{\text{rollout}}+T_{\text{reward}}+T_{\text{prep}}+T_{\text{train}}
 +T_{\text{sync}}+T_{\text{eval}}.
-\]
+$$
 
 With pipelining, steady-state throughput is bounded by the slowest stage plus
 dependencies and bubbles:
 
-\[
+$$
 \text{throughput}\lesssim
 \min(C_{\text{rollout}},C_{\text{env}},C_{\text{reward}},C_{\text{train}}).
-\]
+$$
 
 But raw trajectories/s is misleading. Define effective yield:
 
-\[
+$$
 Y=
 \frac{\text{valid action tokens admitted to updates}}
 {\text{accelerator-seconds} + \lambda\,\text{environment/tool cost}}.
-\]
+$$
 
 Track losses from:
 
@@ -203,7 +203,7 @@ For an unfinished trajectory, preserve environment snapshot, agent state, token
 history, policy segments, and remaining budget. At the next collection window,
 resume with a current or declared policy.
 
-If earlier turns came from policy \(v\) and later turns from \(v+1\), the
+If earlier turns came from policy $v$ and later turns from $v+1$, the
 trajectory is multi-policy. Options:
 
 1. train only newly generated tokens using prior history as fixed context;
@@ -296,11 +296,11 @@ Agentic RL adds variable-length packed samples and potentially several models
 
 ## 11. Model placement and memory budget
 
-For parameter count \(P\), rough training memory includes:
+For parameter count $P$, rough training memory includes:
 
-- weights: \(P b_w\);
-- gradients: \(P b_g\);
-- optimizer states/master weights: often several \(P\) bytes;
+- weights: $P b_w$;
+- gradients: $P b_g$;
+- optimizer states/master weights: often several $P$ bytes;
 - activations: function of batch, sequence, layers, hidden width, checkpointing;
 - temporary/fused-kernel workspaces;
 - communication buffers.

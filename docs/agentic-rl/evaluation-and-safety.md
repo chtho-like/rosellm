@@ -2,10 +2,10 @@
 
 An **Agentic Reinforcement Learning (Agentic RL)** score is a property of a complete system under a protocol:
 
-\[
+$$
 \text{result}=f(\text{model},\text{scaffold},\text{tools},\text{environment},
 \text{budget},\text{sampler},\text{evaluator},\text{seed},\text{time}).
-\]
+$$
 
 Changing any argument can change the result. This chapter designs evaluation
 that separates policy learning from scaffolding, inference compute, leakage,
@@ -52,25 +52,25 @@ different tool and inference-compute budgets.
 
 ### Verified success
 
-For binary task outcome \(S_i\),
+For binary task outcome $S_i$,
 
-\[
+$$
 \widehat p=\frac{1}{n}\sum_i S_i.
-\]
+$$
 
 Prefer backend state, tests, formal kernels, or independent validators over the
 agent's self-declared completion.
 
 ### Pass@k
 
-When \(n\) samples contain \(c\) correct results, the common unbiased estimator
-for probability that at least one of \(k\) samples succeeds without replacement
+When $n$ samples contain $c$ correct results, the common unbiased estimator
+for probability that at least one of $k$ samples succeeds without replacement
 is
 
-\[
+$$
 \operatorname{pass@}k=
 1-\frac{\binom{n-c}{k}}{\binom nk}.
-\]
+$$
 
 Pass@k measures search/sampling capacity, not single-attempt reliability. Report
 total generated tokens, environment executions, and selection method.
@@ -89,7 +89,7 @@ Report distributions, not only averages:
 - turns, tool calls, searches, code executions;
 - wall time, TTFT, inter-action latency;
 - accelerator/environment/API cost;
-- success-weighted cost \(\mathbb E[C]/\mathbb E[S]\) with caveats when success
+- success-weighted cost $\mathbb E[C]/\mathbb E[S]$ with caveats when success
   is rare;
 - success under fixed token/time/cost budgets;
 - critical-path time versus total work for multi-agent systems.
@@ -325,8 +325,8 @@ Report:
 - multi-agent amplification factor for cost and violations.
 
 Zero observed incidents is not proof of zero risk. State sample size and upper
-confidence bounds. For zero incidents in \(n\) independent trials, the rough
-95% “rule of three” upper bound is \(3/n\), subject to independence and
+confidence bounds. For zero incidents in $n$ independent trials, the rough
+95% “rule of three” upper bound is $3/n$, subject to independence and
 representativeness.
 
 ## 13. Evaluation environment integrity

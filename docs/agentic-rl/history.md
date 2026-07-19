@@ -26,10 +26,10 @@ them to prediction over temporally extended trajectories
 Williams' REINFORCE estimator showed that a stochastic policy can be optimized
 without differentiating through environment dynamics:
 
-\[
+$$
 \nabla_\theta J(\theta)
 =\mathbb{E}\left[G_t\nabla_\theta\log\pi_\theta(a_t\mid s_t)\right].
-\]
+$$
 
 This identity remains the core of modern **Large Language Model (LLM)
 Reinforcement Learning (RL)**. **Proximal Policy Optimization (PPO)**,

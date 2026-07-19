@@ -64,7 +64,7 @@ group size, and learning rate are **[U]**. A current repository configuration is
 - **Leave-One-Out (RLOO):** a baseline that compares one rollout with the mean
   reward of the other rollouts in its group.
 - **Generalized Advantage Estimation (GAE):** a discounted sum of temporal-
-  difference residuals controlled by \(\gamma\) and \(\lambda\).
+  difference residuals controlled by $\gamma$ and $\lambda$.
 - **Mixture of Experts (MoE):** a sparse model in which each token activates a
   subset of feed-forward experts.
 - **Generative Reward Model (GenRM):** a language model that reasons about and
@@ -169,15 +169,15 @@ group size, and learning rate are **[U]**. A current repository configuration is
 
 ### 2.1 Trajectory contract
 
-For task \(x\), let a rollout be
+For task $x$, let a rollout be
 
-\[
+$$
 \tau=(o_1,a_1,r_1,o_2,a_2,r_2,\ldots,o_T,a_T,r_T),
 \qquad R(\tau)=\sum_{t=1}^{T}\gamma^{t-1}r_t.
-\]
+$$
 
-An assistant action \(a_t\) can itself contain tokens
-\(y_{t,1:L_t}\). External tool output belongs to the observation, not the
+An assistant action $a_t$ can itself contain tokens
+$y_{t,1:L_t}$. External tool output belongs to the observation, not the
 policy action. A correct training record therefore needs at least:
 
 ```text
@@ -195,50 +195,50 @@ objective.
 
 ### 2.2 Group-relative advantage
 
-For \(G\) responses to prompt \(x\), the familiar GRPO estimator is
+For $G$ responses to prompt $x$, the familiar GRPO estimator is
 
-\[
+$$
 \hat A_i = \frac{R_i-\bar R}{s_R+\epsilon},
 \quad
 \bar R=\frac1G\sum_{j=1}^{G}R_j.
-\]
+$$
 
-All tokens in response \(i\) often receive the same \(\hat A_i\). If every
-response is correct or every response is wrong, \(s_R=0\) and the group supplies
+All tokens in response $i$ often receive the same $\hat A_i$. If every
+response is correct or every response is wrong, $s_R=0$ and the group supplies
 no relative signal. Dynamic sampling therefore tries to retain groups with
-mixed outcomes. Removing \(s_R\) yields a centered, fixed-scale estimator; using
-the other \(G-1\) samples as the baseline yields RLOO.
+mixed outcomes. Removing $s_R$ yields a centered, fixed-scale estimator; using
+the other $G-1$ samples as the baseline yields RLOO.
 
 ### 2.3 Clipped update and token aggregation
 
 Let
 
-\[
+$$
 \rho_{i,t}(\theta)=
 \frac{\pi_\theta(y_{i,t}\mid x,y_{i,<t})}
      {\pi_{\mathrm{old}}(y_{i,t}\mid x,y_{i,<t})}.
-\]
+$$
 
 An asymmetric clipped surrogate is
 
-\[
+$$
 L_{i,t}^{\mathrm{clip}}=
 \min\!\left(
   \rho_{i,t}\hat A_i,
   \operatorname{clip}(\rho_{i,t},1-\epsilon_{\mathrm{low}},
   1+\epsilon_{\mathrm{high}})\hat A_i
 \right).
-\]
+$$
 
-“Clip-Higher” makes \(\epsilon_{\mathrm{high}}>\epsilon_{\mathrm{low}}\),
+“Clip-Higher” makes $\epsilon_{\mathrm{high}}>\epsilon_{\mathrm{low}}$,
 allowing more upward movement for initially unlikely rewarded tokens. Given an
-action mask \(m_{i,t}\), token-global aggregation is
+action mask $m_{i,t}$, token-global aggregation is
 
-\[
+$$
 J_{\mathrm{token}}=
 \frac{\sum_{i,t}m_{i,t}L_{i,t}^{\mathrm{clip}}}
      {\sum_{i,t}m_{i,t}}.
-\]
+$$
 
 Per-response aggregation instead gives each sequence equal weight regardless of
 length. Neither is “just an implementation detail”: it changes the effective
@@ -248,22 +248,22 @@ training distribution.
 
 At scale, distinguish:
 
-- \(\pi_{\mathrm{beh}}\): generated the token;
-- \(\pi_{\mathrm{prox}}\): recent trust-region center;
-- \(\pi_\theta\): current learner.
+- $\pi_{\mathrm{beh}}$: generated the token;
+- $\pi_{\mathrm{prox}}$: recent trust-region center;
+- $\pi_\theta$: current learner.
 
 Their ratios answer different questions:
 
-\[
+$$
 c_t=\frac{\pi_{\mathrm{prox}}(a_t\mid s_t)}
           {\pi_{\mathrm{beh}}(a_t\mid s_t)},
 \qquad
 r_t=\frac{\pi_\theta(a_t\mid s_t)}
           {\pi_{\mathrm{prox}}(a_t\mid s_t)}.
-\]
+$$
 
 The first corrects stale sampling; the second constrains the learner around a
-recent policy. Clipping \(\pi_\theta/\pi_{\mathrm{beh}}\) alone conflates both
+recent policy. Clipping $\pi_\theta/\pi_{\mathrm{beh}}$ alone conflates both
 roles. A systems diagram that says “async PPO” without naming these policies is
 underspecified.
 
@@ -316,7 +316,7 @@ Its RL task pool has three verifiable branches and one preference branch:
 1. Begin with several hundred thousand competition-grade mathematics, physics,
    and chemistry questions; mathematics exceeds 80%.
 2. Remove incomplete statements, inconsistent notation, and unclear demands.
-3. Sample several Doubao-Pro 1.5 answers. Remove a prompt when its worst-of-\(N\)
+3. Sample several Doubao-Pro 1.5 answers. Remove a prompt when its worst-of-$N$
    score is 1, meaning every sampled answer succeeds.
 4. Detect suspect reference answers when strong models disagree with the
    reference yet agree with one another, or solve with implausibly few reasoning
@@ -382,8 +382,8 @@ those seeds generates candidates, and Seed-Verifier performs rejection sampling.
 The same cold-start-then-reject pattern is applied beyond math.
 
 Training truncates each example to **32K tokens**, runs **two epochs**, and uses
-a cosine schedule from peak \(2\times10^{-5}\) to
-\(2\times10^{-6}\). The report explicitly warns that too much non-chain-of-
+a cosine schedule from peak $2\times10^{-5}$ to
+$2\times10^{-6}$. The report explicitly warns that too much non-chain-of-
 thought SFT reduced exploration in preliminary experiments.
 
 ### 3.5 Seed1.5's value-based RL mechanics [D]
@@ -391,36 +391,28 @@ thought SFT reduced exploration in preliminary experiments.
 Seed1.5 mixes verifier-scored, reward-model-scored, and hybrid examples in one
 framework. Its disclosed stability mechanisms are:
 
-1. **Value pretraining.** Freeze a policy such as \(\pi_{\mathrm{SFT}}\), sample
+1. **Value pretraining.** Freeze a policy such as $\pi_{\mathrm{SFT}}$, sample
    completions, compute Monte Carlo returns, and fit the value model before joint
    PPO. This aligns the initial critic with the starting policy.
-2. **Decoupled GAE.** Use \(\lambda_{\mathrm{value}}=1\) for an unbiased value
-   target and \(\lambda_{\mathrm{policy}}=0.95\) for a lower-variance policy
+2. **Decoupled GAE.** Use $\lambda_{\mathrm{value}}=1$ for an unbiased value
+   target and $\lambda_{\mathrm{policy}}=0.95$ for a lower-variance policy
    advantage.
 3. **Length-adaptive GAE.** The paper sets
-
-   \[
-   \lambda_{\mathrm{policy}}=1-\frac{1}{\alpha l},
-   \]
-
-   where \(l\) is response length and \(\alpha\) is a hyperparameter, so long and
+   $\lambda_{\mathrm{policy}}=1-1/(\alpha l)$,
+   where $l$ is response length and $\alpha$ is a hyperparameter, so long and
    short sequences distribute temporal-difference residuals more uniformly.
 4. **Dynamic sampling.** Exclude accuracy-0 and accuracy-1 groups.
 5. **Clip-Higher.** Decouple PPO's upper and lower clip bounds.
 6. **Token-level loss.** Aggregate across eligible tokens rather than first
    normalizing each response.
 7. **Positive-example language-model loss.** For successful trajectories,
-
-   \[
-   L(\theta)=L_{\mathrm{PPO}}(\theta)+\mu L_{\mathrm{NLL}}(\theta),
-   \]
-
+   $L(\theta)=L_{\mathrm{PPO}}(\theta)+\mu L_{\mathrm{NLL}}(\theta)$,
    adding direct negative-log-likelihood imitation of positive samples.
 8. **Online data-distribution adaptation.** Change prompt-domain weights as the
    policy learns to reduce interference among domains and reward scales.
 
 **[U]** The report omits PPO epochs/minibatches, rollout group size, clip values,
-\(\alpha\), \(\mu\), value-loss coefficient, KL coefficient, domain weights,
+$\alpha$, $\mu$, value-loss coefficient, KL coefficient, domain weights,
 total RL tasks, RL updates, and stopping rule. DAPO values must not be silently
 substituted for these missing production settings.
 
@@ -433,9 +425,9 @@ hybrid engine to reuse GPUs across phases.
 
 The **Streaming Rollout System (SRS)** attacks long-tail generation:
 
-- completion ratio \(\alpha\) is the fraction completed on-policy by the newest
+- completion ratio $\alpha$ is the fraction completed on-policy by the newest
   policy;
-- the remaining \(1-\alpha\) portion is continued asynchronously using
+- the remaining $1-\alpha$ portion is continued asynchronously using
   versioned policy snapshots on standalone compute;
 - partial samples enter prioritized pools, decoupling policy evolution from
   runtime completion;
@@ -473,15 +465,15 @@ configurations.
 
 - remove the KL penalty;
 - use asymmetric clip bounds
-  \(\epsilon_{\mathrm{low}}=0.20\),
-  \(\epsilon_{\mathrm{high}}=0.28\);
+  $\epsilon_{\mathrm{low}}=0.20$,
+  $\epsilon_{\mathrm{high}}=0.28$;
 - oversample replacement prompts until a batch contains enough non-all-correct,
   non-all-wrong groups;
 - use token-global policy loss;
 - drop overlong truncated responses from the loss;
 - apply a soft overlong reward before the hard length limit:
 
-\[
+$$
 r_{\mathrm{len}}(y)=
 \begin{cases}
 0,&|y|\le L_{\max}-L_{\mathrm{cache}},\\
@@ -489,14 +481,14 @@ r_{\mathrm{len}}(y)=
 &L_{\max}-L_{\mathrm{cache}}<|y|\le L_{\max},\\
 -1,&|y|>L_{\max}.
 \end{cases}
-\]
+$$
 
 The middle region smoothly changes from 0 to -1, avoiding a discontinuous
 penalty immediately below the cap.
 
 #### Exact disclosed run
 
-- AdamW, constant learning rate \(10^{-6}\);
+- AdamW, constant learning rate $10^{-6}$;
 - 20 rollout steps of learning-rate warmup;
 - 512 unique prompts per rollout step;
 - 16 responses per prompt, hence 8,192 sampled trajectories before dynamic
@@ -504,7 +496,7 @@ penalty immediately below the cap.
 - minibatch 512, hence 16 gradient updates per rollout batch;
 - expected response limit 16,384 plus 4,096-token overlong cache, maximum
   20,480;
-- evaluation temperature 1.0, top-\(p=0.7\), average over 32 samples.
+- evaluation temperature 1.0, top-$p=0.7$, average over 32 samples.
 
 The paper's American Invitational Mathematics Examination (AIME) 2024 ablation
 progresses from about 30 for naïve GRPO to 36 after overlong filtering, 38 after
@@ -529,7 +521,7 @@ reward for producing executable code or for using the tool.
 The main disclosed run uses:
 
 - maximum sequence length 16,384;
-- AdamW, learning rate \(10^{-6}\);
+- AdamW, learning rate $10^{-6}$;
 - minibatch 512;
 - KL coefficient 0;
 - veRL and a parallel asynchronous sandbox pool;
@@ -678,7 +670,7 @@ come from Art of Problem Solving discussions, exclude proofs/multiple-choice/
 binary/invalid prompts, and receive 16 DeepSeek-R1 reasoning generations plus
 64 Qwen2.5-Math-7B-Instruct non-reasoning generations. Qwen2.5-32B-Instruct
 judges answer equivalence. Code starts from 28,904 deduplicated competition
-questions; DeepSeek-R1 samples at temperature 0.6/top-\(p=0.95\), and syntax plus
+questions; DeepSeek-R1 samples at temperature 0.6/top-$p=0.95$, and syntax plus
 format filtering yields about 488K Python reasoning samples. The broader table
 counts repeated and non-reasoning variants, explaining why it is much larger
 than the unique-question count.
@@ -686,15 +678,15 @@ than the unique-question count.
 #### SFT and optimization stages
 
 - Nano: three-stage SFT, batch 256, packed 32K; reasoning-only stage at
-  \(10^{-4}\) for four epochs, then mixed reasoning modes, then chat/tool data.
-- Super: one epoch, 16K, batch 256, fixed \(5\times10^{-6}\).
-- Ultra: packed 24K, batch 256; warm to \(10^{-5}\), cosine to \(10^{-6}\),
+  $10^{-4}$ for four epochs, then mixed reasoning modes, then chat/tool data.
+- Super: one epoch, 16K, batch 256, fixed $5\times10^{-6}$.
+- Ultra: packed 24K, batch 256; warm to $10^{-5}$, cosine to $10^{-6}$,
   10% warmup. The report discloses gradient explosions after epoch one and an
   optimizer-state reinitialization before resuming.
 
 Reasoning GRPO is applied only to LN-Ultra because preliminary smaller-model RL
 underperformed distillation. Each rollout batch uses 72 prompts with 16 responses each,
-temperature/top-\(p=1\), global training batch 576, and two gradient updates per
+temperature/top-$p=1$, global training batch 576, and two gradient updates per
 rollout. Ground-truth equivalence is judged by Llama-3.3-70B-Instruct; a format
 reward enforces thinking tags. Prompts solved at least 6 of 8 times by LN-Super
 are removed, then a Gaussian curriculum shifts from easier to harder pass-rate
@@ -708,9 +700,9 @@ and CUDA graphs increase reported decoding throughput.
 After reasoning RL, Super and Ultra receive less than 120 steps of RLOO on
 instruction-following verifiers, batch 128. Preference optimization differs by
 size: Super uses two 500-step online RPO iterations on HelpSteer2
-(learning rate \(4\times10^{-7}\), KL \(10^{-5}\), reward scale 3, batch 64);
+(learning rate $4\times10^{-7}$, KL $10^{-5}$, reward scale 3, batch 64);
 Ultra uses 30 GRPO steps with 8 responses, learning rate
-\(3\times10^{-7}\), batch 288, KL \(10^{-3}\); Nano uses two offline RPO rounds.
+$3\times10^{-7}$, batch 288, KL $10^{-3}$; Nano uses two offline RPO rounds.
 
 ### 4.3 AceReason-Nemotron: sequential domain RL [D]
 
@@ -745,7 +737,7 @@ which makes the old/current likelihood ratio one at update time. KL and entropy
 loss coefficients are zero. Maximum response length follows
 8K → 16K → 24K → 32K. Later stages remove prompts solved more than 6 of 16
 times. Batch is 128 prompts; group size is 8 at 8K and 16 later; AdamW learning
-rate is \(10^{-6}\).
+rate is $10^{-6}$.
 
 #### Code task construction and curriculum
 
@@ -759,7 +751,7 @@ Code stage 1 uses difficulty ≤5 for 7B and ≤7 for 14B, 24K responses,
 temperature 0.6, and 8 rollouts. Stage 2 uses all retained problems, 32,768
 tokens, epoch-wise removal of newly easy tasks, and ramps temperature 0.6→1.0
 and rollouts 8→16. Batch is 128 and AdamW learning rate
-\(5\times10^{-6}\).
+$5\times10^{-6}$.
 
 The final curriculum is math 8K→24K, code 24K→32K, then math at 32K. The paper
 reports that math-only RL improves both AIME and LiveCodeBench, while subsequent
@@ -790,7 +782,7 @@ validation set.
 The optimizer is DAPO-enhanced GRPO with KL regularization. Each prompt gets 16
 responses at temperature 1.2; context is reported as 8,096 tokens; prompt batch
 256, minibatch 64, hence four gradient updates per rollout; constant AdamW
-learning rate \(2\times10^{-6}\). Training uses **48 nodes × 8 H100-80GB = 384
+learning rate $2\times10^{-6}$. Training uses **48 nodes × 8 H100-80GB = 384
 GPUs** and about **16K GPU-hours**.
 
 As the KL term becomes restrictive or validation stalls, the reference policy
@@ -801,9 +793,9 @@ with resets; and a final roughly 200-step 16K stage with 16 rollouts. These are
 manual, validation-triggered interventions—not a fully specified automatic
 algorithm.
 
-The paper's pass@\(k\) analysis is nuanced: some high-baseline math tasks improve
+The paper's pass@$k$ analysis is nuanced: some high-baseline math tasks improve
 pass@1 while pass@128 declines; some tasks plateau; code and selected logic tasks
-continue improving at high \(k\). Claims of “novel reasoning” rely on those
+continue improving at high $k$. Claims of “novel reasoning” rely on those
 distribution shifts, held-out complexity generalization, and corpus-overlap
 analysis. They are evidence against a universal “RL only reweights” claim, not a
 proof that every generated reasoning token is semantically novel.
@@ -848,18 +840,18 @@ loss.
 
 - Reward model: Qwen2.5-72B-Instruct initialization, 82K preference pairs,
   Bradley-Terry scalar training, batch 256, learning rate
-  \(2\times10^{-6}\).
+  $2\times10^{-6}$.
 - RLHF: approximately 12K curated in-distribution prompts; 8 responses,
-  temperature 0.6/top-\(p=.95\), learning rate \(2\times10^{-6}\), 12K max
+  temperature 0.6/top-$p=.95$, learning rate $2\times10^{-6}$, 12K max
   response. Math/code prompts are excluded because reward-model out-of-
   distribution errors destabilized early runs.
-- Instruction-following RL: batch 128×8, temperature 0.6, top-\(p=.95\),
-  top-\(k=20\), learning rate \(2\times10^{-6}\).
+- Instruction-following RL: batch 128×8, temperature 0.6, top-$p=.95$,
+  top-$k=20$, learning rate $2\times10^{-6}$.
 - Math RL: 18K AceReason-derived problems; batch 128×8, temperature 1,
-  top-\(p=.95\), learning rate \(2\) or \(2.5\times10^{-6}\), dynamic
+  top-$p=.95$, learning rate $2$ or $2.5\times10^{-6}$, dynamic
   difficulty re-sampling.
 - Code RL: 9.8K test-hardened problems; batch 128×8, temperature 1,
-  top-\(p=.95\), learning rate \(4\times10^{-6}\). Asynchronous verification
+  top-$p=.95$, learning rate $4\times10^{-6}$. Asynchronous verification
   reduces reported batch verification from 1,172.4 seconds to a much smaller
   critical-path cost; the speedup is pipeline-specific.
 - SWE-RL: final repository-focused stage after code expertise; environments and
@@ -881,7 +873,7 @@ SFT trains over **18M samples** with the published blend: chat 28.6%, code
 20.7%, science 12.8%, math 9.9%, math-with-tools 4.9%, multilingual 7.4%, plus
 SWE, formal proof, terminal, conversational-agent, long-context, and generative-
 selection data. It runs 13,000 steps, batch 64, packed 256K, learning rate
-\(5\times10^{-5}\), 800 warmup steps. Ten percent of traces lose reasoning for
+$5\times10^{-5}$, 800 warmup steps. Ten percent of traces lose reasoning for
 reasoning-off control; 3% are truncated to teach token budgets.
 
 The first and second RLVR stages jointly mix environments rather than cascading
@@ -912,18 +904,18 @@ For RLHF, NVIDIA first trains Qwen3-235B-A22B-Thinking as a GenRM with GRPO:
 and absolute errors in two helpfulness scores and one pair ranking. Candidate
 positions are swapped to reduce positional bias. Policy RLHF then samples 16
 responses per 128 prompts. Circular comparisons require 16 GenRM calls rather
-than all \(\binom{16}{2}=120\) pairs.
+than all $\binom{16}{2}=120$ pairs.
 
 To prevent verbosity, group-relative length control adds centered bonuses for
 shorter reasoning and answer components:
 
-\[
+$$
 R_i=R_i^{\mathrm{base}}
  +\lambda_{\mathrm{think}}\widetilde w_i^{\mathrm{think}}
  +\lambda_{\mathrm{answer}}\widetilde w_i^{\mathrm{answer}},
-\]
+$$
 
-with both \(\lambda=0.5\), plus 0.5 bonuses for shortest responses above the
+with both $\lambda=0.5$, plus 0.5 bonuses for shortest responses above the
 80th-quality percentile. The report says verbosity falls 30% without measured
 accuracy loss.
 
@@ -965,16 +957,16 @@ Strict on-policy GRPO through NeMo RL uses one update. Most stages omit KL, but
 the RLHF stage explicitly uses a KL-loss coefficient of 0.03. Disclosed
 settings include:
 
-- instruction RL: 128 prompts ×16, temperature 1/top-\(p=1\), learning rate
-  \(3\times10^{-6}\);
+- instruction RL: 128 prompts ×16, temperature 1/top-$p=1$, learning rate
+  $3\times10^{-6}$;
 - mixed multi-domain RL: roughly 55% multiple-choice question answering, 30%
   agentic tools, and smaller other domains; 128×16, learning rate
-  \(3\times10^{-6}\);
-- RLHF: 128×16, learning rate \(3\times10^{-6}\), KL coefficient 0.03;
-- long-context RL: 128×16, learning rate \(3\times10^{-6}\), no reported KL
+  $3\times10^{-6}$;
+- RLHF: 128×16, learning rate $3\times10^{-6}$, KL coefficient 0.03;
+- long-context RL: 128×16, learning rate $3\times10^{-6}$, no reported KL
   penalty;
 - hard code RL: 3.5K tasks, 128×16, learning rate
-  \(3\times10^{-6}\);
+  $3\times10^{-6}$;
 - agentless SWE: 128×16 = 2,048 rollouts, maximum 98,304 tokens;
 - execution SWE: 16 prompts ×64 rollouts, maximum 256K tokens.
 
@@ -982,22 +974,22 @@ settings include:
 student and matches the relevant domain teacher on those exact student states.
 Its ideal negative reverse-KL sequence objective can be written
 
-\[
+$$
 J_i(\theta)=
 \mathbb E_{y\sim\pi_\theta(\cdot\mid x),x\sim D_i}
 \sum_t\left[
 \log\pi_{T_i}(y_t\mid s_t)-\log\pi_\theta(y_t\mid s_t)
 \right].
-\]
+$$
 
 The implemented loss distinguishes the inference sampler
-\(\pi_{\mathrm{inf}}\) from the train-time policy \(\pi_{\mathrm{train}}\),
-applies the ratio \(\pi_{\mathrm{train}}/\pi_{\mathrm{inf}}\), and retains
-ratios only in \([0.5,2.0]\), together with a valid-token mask. **[D]** The math
+$\pi_{\mathrm{inf}}$ from the train-time policy $\pi_{\mathrm{train}}$,
+applies the ratio $\pi_{\mathrm{train}}/\pi_{\mathrm{inf}}$, and retains
+ratios only in $[0.5,2.0]$, together with a valid-token mask. **[D]** The math
 teacher is the initial SFT checkpoint; the other teachers are an RLHF-from-SFT
 checkpoint and the post-instruction-RL/multi-domain checkpoint. The default
 batch is 128 prompts ×4 rollouts =512; later 512×1 is reported more stable. The
-learning rate warms from \(2\times10^{-7}\) to \(2\times10^{-6}\) over 30
+learning rate warms from $2\times10^{-7}$ to $2\times10^{-6}$ over 30
 steps, with typical convergence in 40–50 steps. MOPD is not offline teacher
 imitation: the student chooses the state distribution, reducing the support
 mismatch of a fixed teacher corpus.
@@ -1010,16 +1002,16 @@ embeddings), 88 layers, width 4,096, 32 query/2 key-value heads, Mamba state
 and two shared-weight MTP layers.
 
 Pretraining uses 25T tokens, 8,192-token sequences, batch 3,072
-(about 25.17M tokens/batch), AdamW \((\beta_1=.9,\beta_2=.95)\), weight decay
+(about 25.17M tokens/batch), AdamW $(\beta_1=.9,\beta_2=.95)$, weight decay
 .1, and a Warmup-Stable-Decay schedule: 200B-token warmup to
-\(4.5\times10^{-4}\), then stable, then minus-square-root decay over the final
-5T to \(4.5\times10^{-6}\). A 34B-token 1M-context phase is followed by 17B
+$4.5\times10^{-4}$, then stable, then minus-square-root decay over the final
+5T to $4.5\times10^{-6}$. A 34B-token 1M-context phase is followed by 17B
 tokens alternating 1M and 4K sequences.
 
 #### SFT and agent data
 
 Two-stage SFT consumes **more than 7M samples / about 80B tokens**. Stage 1 uses
-token-global loss, packed 256K, batch 64, learning rate \(10^{-5}\). Stage 2
+token-global loss, packed 256K, batch 64, learning rate $10^{-5}$. Stage 2
 switches to equal per-conversation loss, packed 512K, batch 32, same learning
 rate, specifically to restore long-input/short-output performance.
 
@@ -1087,7 +1079,7 @@ and two shared MTP heads.
 
 - 20T tokens under Warmup-Stable-Decay: 15T broad coverage plus 5T higher
   quality;
-- 200B-token warmup to \(2.5\times10^{-4}\), final 5T decay;
+- 200B-token warmup to $2.5\times10^{-4}$, final 5T decay;
 - code refresh includes 173B fresh GitHub tokens through 2025-09-30; a
   separate list covers 11 **natural** languages, not programming languages;
 - NVFP4 E2M1 training with two-dimensional scaling blocks;
@@ -1101,7 +1093,7 @@ and two shared MTP heads.
 #### SFT
 
 Stage 1 packs to 294,912 tokens, batch 64, 204,800 samples, peak learning rate
-\(1.5\times10^{-5}\), floor \(10^{-6}\). Stage 2 packs to about 515K tokens,
+$1.5\times10^{-5}$, floor $10^{-6}$. Stage 2 packs to about 515K tokens,
 adds long-context examples up to 512K tokens, and trains on 19,200 samples.
 Search SFT includes more than 97K OpenResearcher trajectories generated against
 a 15M-document offline browser corpus; licensing filters reduce the releasable
@@ -1121,21 +1113,21 @@ tools, terminal, agentic safety, STEM, chat, instruction following, coding, and
 usability. A light SFT warmup first moves the student toward each teacher's
 support. Two MOPD iterations then optimize the student-state reverse-KL mixture:
 
-\[
+$$
 J(\theta)=\sum_i\lambda_i
 \mathbb E_{x\sim D_i,\,y\sim\pi_\theta}
 \sum_t
 \left[
 \log\pi_{T_i}(y_t\mid s_t)-\log\pi_\theta(y_t\mid s_t)
 \right].
-\]
+$$
 
 MOPD uses a maximum generation length of 192K tokens and 1,024 prompts ×1
 rollout. In the asynchronous
 implementation, a dense token advantage is
-\(\operatorname{stopgrad}(\log\pi_T-\log\pi_{\mathrm{prox}})\), behavior
-correction is \(c=\pi_{\mathrm{prox}}/\pi_{\mathrm{beh}}\), and learner update
-ratio is \(r=\pi_\theta/\pi_{\mathrm{prox}}\), followed by PPO-style clipping
+$\operatorname{stopgrad}(\log\pi_T-\log\pi_{\mathrm{prox}})$, behavior
+correction is $c=\pi_{\mathrm{prox}}/\pi_{\mathrm{beh}}$, and learner update
+ratio is $r=\pi_\theta/\pi_{\mathrm{prox}}$, followed by PPO-style clipping
 and token masks.
 
 #### Scale and failure accounting
@@ -1189,14 +1181,14 @@ and [official repository](https://github.com/microsoft/agent-lightning).
 The paper first describes agent execution in Markov-decision-process language,
 but its formal tuple is a partially observable Markov decision process (POMDP)
 
-\[
+$$
 \mathcal{M}=(\mathcal{S},\mathcal{O},\mathcal{A},P,R),
-\]
+$$
 
-where \(s\in\mathcal S\) is the complete runtime state, \(o\in\mathcal O\) is
-the information exposed to the language model, \(a\in\mathcal A\) is one model
-call's complete output, \(P\) is the transition induced by agent code and its
-environment, and \(R(s,a)\) is the scalar reward function. **[D]** This is a
+where $s\in\mathcal S$ is the complete runtime state, $o\in\mathcal O$ is
+the information exposed to the language model, $a\in\mathcal A$ is one model
+call's complete output, $P$ is the transition induced by agent code and its
+environment, and $R(s,a)$ is the scalar reward function. **[D]** This is a
 better model than
 declaring the concatenated chat transcript to be one flat action: branching,
 retries, tool-side state, and messages between agents may affect the next call
@@ -1205,9 +1197,9 @@ without appearing in the current model input.
 An execution trace can be represented as a graph of spans rather than only a
 list of tokens:
 
-\[
+$$
 \tau=\{(o_i,a_i,r_i,\text{parent}_i,\text{metadata}_i)\}_{i=1}^{m}.
-\]
+$$
 
 The parent relation preserves nested agent and tool calls. The trainer's first
 job is therefore **credit-assignment data transformation**: select trainable
@@ -1297,7 +1289,7 @@ The SFT mixture contains three disclosed components:
 | General conversation | 27K | Llama-Nemotron chat data rewritten with o4-mini |
 
 **[D]** Training runs for three epochs with AdamW, peak learning rate
-\(5\times10^{-6}\), 4% warmup, cosine decay, and global batch size 128. The
+$5\times10^{-6}$, 4% warmup, cosine decay, and global batch size 128. The
 targets are intentionally concise rather than long hidden chains of thought.
 This stage teaches valid JSON/tool syntax and ordinary assistant behavior; it
 does not teach the final reasoning policy by imitation.
@@ -1342,9 +1334,9 @@ must reproduce the artifact's exact mask, not rely on the ambiguous phrase
 
 #### GRPO-RoC: resample on correct
 
-Ordinary GRPO samples a group of \(G\) trajectories and normalizes their
+Ordinary GRPO samples a group of $G$ trajectories and normalizes their
 rewards. rStar2 uses **Resample-on-Correct (RoC)**. It first oversamples
-\(2G=32\) rollouts, then retains \(G=16\):
+$2G=32$ rollouts, then retains $G=16$:
 
 1. preserve negative trajectories through uniform sampling, up to half of the
    retained group;
@@ -1363,7 +1355,7 @@ The optimization reward remains binary final-answer correctness. RoC separately
 scores already successful trajectories for *selection*: the tool-error score is
 0.5 when there is no tool call and otherwise equals erroneous calls divided by
 all calls; the format score is 1 when there is no answer tag and otherwise is
-\(\min(1,(n_{\text{answers}}-1)/n_{\text{turns}})\). Their sum controls
+$\min(1,(n_{\text{answers}}-1)/n_{\text{turns}})$. Their sum controls
 inverse-penalty sampling of half the positive trajectories. **[D]** These are
 not additive or multiplicative reward penalties. Conflating rollout selection
 with reward shaping changes the algorithm.
@@ -1372,21 +1364,21 @@ The policy objective uses token-global aggregation, no explicit KL penalty,
 PPO-style lower/upper clip bounds 0.20/0.28, and no entropy bonus. **[D]** In a
 schematic notation,
 
-\[
+$$
 L=-\frac{1}{\sum_i |M_i|}
 \sum_{i,t}M_{i,t}\min\!\left(
 r_{i,t}\widehat A_i,
 \operatorname{clip}(r_{i,t},0.8,1.28)\widehat A_i
 \right),
-\]
+$$
 
-where \(M\) is the trainable-token mask. The actual asymmetric clipping must be
+where $M$ is the trainable-token mask. The actual asymmetric clipping must be
 implemented exactly; the equation emphasizes that the denominator is the total
 eligible-token count rather than a mean of per-response means.
 
 #### The three RL stages
 
-All stages use learning rate \(10^{-6}\). **[D]** The disclosed progression is:
+All stages use learning rate $10^{-6}$. **[D]** The disclosed progression is:
 
 | Stage | Prompt pool | Maximum response length | Updates | Operational purpose |
 |---|---:|---:|---:|---|
@@ -1622,9 +1614,9 @@ of tools across dozens of domains and used long-horizon, multi-turn RL to retain
 performance across a two-million-token context window. **[D]** A realistic
 reproduction would need a simulator contract for every domain:
 
-\[
+$$
 (s_0,\mathcal T,\text{tool schemas},P,\text{termination},R,\text{version})
-\]
+$$
 
 plus distributions for user goals, invalid calls, partial success, delayed
 state changes, and recovery. None of those exact environment packages, reward
@@ -1793,7 +1785,7 @@ At the audited revision, `OpenR1-Distill-7B` starts from
 `open-r1/Mixture-of-Thoughts` with:
 
 - maximum length 32,768;
-- learning rate \(4\times10^{-5}\);
+- learning rate $4\times10^{-5}$;
 - five epochs and cosine decay to 10% of peak;
 - 3% warmup, gradient norm cap 0.2, bfloat16, and no packing;
 - per-device batch two and gradient accumulation eight; and
@@ -1812,7 +1804,7 @@ The pinned `Qwen2.5-Coder-7B-Instruct` CodeForces recipe specifies:
 |---|---:|
 | Advantage/loss | Dr.GRPO loss; reward scaling disabled |
 | KL coefficient | `beta: 0.0` |
-| Policy learning rate | \(10^{-6}\) |
+| Policy learning rate | $10^{-6}$ |
 | Generations per prompt | 16 |
 | Maximum prompt/completion | 2,000 / 8,192 tokens |
 | Per-device batch / accumulation / GPUs | 4 / 32 / 8 |
@@ -1874,16 +1866,16 @@ optimization problem.
 #### OpenThinker3 training
 
 The paper's large-scale configuration uses LlamaFactory with DeepSpeed ZeRO-3,
-AdamW \((\beta_1,\beta_2)=(0.9,0.999)\), zero weight decay, cosine schedule, and
+AdamW $(\beta_1,\beta_2)=(0.9,0.999)$, zero weight decay, cosine schedule, and
 10% warmup. For the large mixture, it reports learning rate
-\(8\times10^{-5}\), global batch 512, five epochs, sequence packing, and training
+$8\times10^{-5}$, global batch 512, five epochs, sequence packing, and training
 sets larger than approximately 31.6K examples. **[D]** A cross-entropy mask trains on
 assistant solution tokens:
 
-\[
+$$
 L_{\text{SFT}}=-\frac{1}{|M|}\sum_t M_t
 \log \pi_\theta(y_t\mid x,y_{<t}).
-\]
+$$
 
 There is no environment transition, on-policy rollout, sampled return,
 behavior-policy ratio, or policy-gradient advantage in this objective. The
@@ -1933,15 +1925,15 @@ trajectory.
 
 #### Explicit staleness control
 
-Let learner update \(i\) require batch \(B\), let \(N_r\) be the number of
-accepted rollout samples, and let \(\eta\) be the maximum allowed lag. The
+Let learner update $i$ require batch $B$, let $N_r$ be the number of
+accepted rollout samples, and let $\eta$ be the maximum allowed lag. The
 scheduler enforces the paper's version-progress constraint of the form
 
-\[
+$$
 \left\lfloor\frac{N_r-1}{B}\right\rfloor\le i+\eta.
-\]
+$$
 
-**[D]** The experiments use \(\eta=4\) for code and \(\eta=8\) for math. The
+**[D]** The experiments use $\eta=4$ for code and $\eta=8$ for math. The
 constraint is operationally important: the generator cannot run arbitrarily
 far ahead and fill the queue with samples from obsolete policies.
 
@@ -1949,14 +1941,14 @@ far ahead and fill the queue with samples from obsolete policies.
 
 AReaL distinguishes three policies:
 
-- \(\pi_{\text{beh}}\), which generated the stored token;
-- \(\pi_{\text{prox}}\), a snapshot immediately before the learner's current
+- $\pi_{\text{beh}}$, which generated the stored token;
+- $\pi_{\text{prox}}$, a snapshot immediately before the learner's current
   proximal update; and
-- \(\pi_\theta\), the trainable current policy.
+- $\pi_\theta$, the trainable current policy.
 
 Its schematic per-token surrogate is
 
-\[
+$$
 L(\theta)=\mathbb E_{a\sim\pi_{\text{beh}}}
 \left[
 \frac{\pi_{\text{prox}}(a\mid s)}{\pi_{\text{beh}}(a\mid s)}
@@ -1967,7 +1959,7 @@ L(\theta)=\mathbb E_{a\sim\pi_{\text{beh}}}
 \right)A
 \right)
 \right].
-\]
+$$
 
 **[D]** The outer ratio corrects behavior staleness toward the proximal policy;
 the inner ratio controls the current optimization step. Log probabilities are
@@ -1978,7 +1970,7 @@ weights can still have high variance and clipping introduces bias.
 #### Reported reasoning configuration
 
 The math/code experiments disable a critic and reference model, set
-\(\gamma=\lambda=1\), assign outcome reward +5/-5, and normalize advantages
+$\gamma=\lambda=1$, assign outcome reward +5/-5, and normalize advantages
 globally. **[D]** The main disclosed settings are:
 
 | Field | Value |
@@ -1988,13 +1980,13 @@ globally. **[D]** The main disclosed settings are:
 | Prompt / generation limit | 1,024 / 27,648 tokens |
 | Sampling | temperature 1, top-p 1 |
 | PPO minibatches | 4 |
-| Clip \(\epsilon\) | 0.2 |
-| Adam learning rate | \(2\times10^{-5}\) |
-| Adam betas / epsilon | 0.9, 0.95 / \(10^{-5}\) |
+| Clip $\epsilon$ | 0.2 |
+| Adam learning rate | $2\times10^{-5}$ |
+| Adam betas / epsilon | 0.9, 0.95 / $10^{-5}$ |
 | Weight decay / gradient cap | 0.05 / 1.0 |
 | Prompt data | DeepScaleR math and DeepCoder code |
 
-These settings are aggressive compared with many \(10^{-6}\)-scale RL
+These settings are aggressive compared with many $10^{-6}$-scale RL
 recipes; the relevant unit is the full optimizer/data/normalization system, not
 the learning rate in isolation.
 
@@ -2011,7 +2003,7 @@ trajectory stores action masks, environment state/version, and behavior log
 probabilities. **[D]** The paper's headline experiments are math and code
 reasoning, and it leaves multi-turn agentic interaction to future work; it does
 not demonstrate that arbitrary hours-long stateful agents tolerate the same
-\(\eta\).
+$\eta$.
 For an external environment, interrupt-and-resume is safe only if the state can
 be snapshotted or replayed deterministically. Otherwise a weight switch can
 produce a token prefix under one policy and an irreversible world state under
@@ -2022,32 +2014,32 @@ another, which cannot be reconstructed by merely recomputing KV cache. **[I]**
 Primary source: [Process Reinforcement through Implicit
 Rewards](https://arxiv.org/abs/2502.01456).
 
-Outcome-only RL assigns a terminal reward \(R_i\) to every eligible token in
-trajectory \(i\). This is scalable but cannot tell which intermediate token
+Outcome-only RL assigns a terminal reward $R_i$ to every eligible token in
+trajectory $i$. This is scalable but cannot tell which intermediate token
 helped. A conventional process reward model requires expensive step labels and
 becomes stale as the policy changes. PRIME instead parameterizes an **implicit
-process reward model (PRM)** as a causal language model \(\pi_\phi\) relative to a
-fixed reference \(\pi_{\text{ref}}\):
+process reward model (PRM)** as a causal language model $\pi_\phi$ relative to a
+fixed reference $\pi_{\text{ref}}$:
 
-\[
+$$
 r_{\phi,t}=\beta\log
 \frac{\pi_\phi(y_t\mid x,y_{<t})}
      {\pi_{\text{ref}}(y_t\mid x,y_{<t})}.
-\]
+$$
 
 **[D]** The same trajectory-level correct/incorrect outcome used by the policy
-trains \(\pi_\phi\) online with binary cross-entropy on the sequence-level
+trains $\pi_\phi$ online with binary cross-entropy on the sequence-level
 implicit-reward logit. This is not next-token SFT cross-entropy. The
 log-likelihood ratio then yields a reward at every token without human step
 annotation.
 
-For \(K\) rollouts of the same prompt, PRIME uses leave-one-out baselines. Let
-\(\bar r_{\phi,j}=T_j^{-1}\sum_{u=1}^{T_j}r_{\phi,j,u}\) be rollout \(j\)'s
+For $K$ rollouts of the same prompt, PRIME uses leave-one-out baselines. Let
+$\bar r_{\phi,j}=T_j^{-1}\sum_{u=1}^{T_j}r_{\phi,j,u}$ be rollout $j$'s
 mean implicit process reward. It computes process-return and outcome-return
 baselines separately to avoid mixing incompatible scales, then adds their
 advantages:
 
-\[
+$$
 \widehat A_{i,t}=
 \underbrace{
 \sum_{u=t}^{T_i}\gamma^{u-t}
@@ -2057,7 +2049,7 @@ advantages:
 \underbrace{
 R_i-\frac{1}{K-1}\sum_{j\ne i}R_j
 }_{\text{outcome component}}.
-\]
+$$
 
 The per-rollout mean makes the leave-one-out process baseline comparable when
 response lengths differ; masking still defines which tokens enter each mean.
@@ -2070,7 +2062,7 @@ The starting model is Qwen2.5-Math-7B-Base. Its SFT warmup has 229,763 examples
 (reported as 230K) averaging 1,390.75 response tokens, spanning math, code, and
 biomedicine. Llama-3.1-70B-Instruct generates action-centric traces with seven
 labels: ASSESS, ADVANCE, VERIFY, SIMPLIFY, SYNTHESIZE, PIVOT, and OUTPUT. **[D]**
-Full-parameter SFT uses AdamW, learning rate \(10^{-5}\), cosine decay, 10%
+Full-parameter SFT uses AdamW, learning rate $10^{-5}$, cosine decay, 10%
 warmup, global batch 96, seed 42, and three epochs. **[D]**
 
 The RL preprocessing begins with NuminaMath and the APPS, CodeContests, TACO,
@@ -2087,10 +2079,10 @@ online settings are:
 |---|---:|
 | Prompts sampled per rollout batch | 256 |
 | Responses per prompt | 4 |
-| Policy / PRM learning rate | \(5\times10^{-7}\) / \(10^{-6}\) |
+| Policy / PRM learning rate | $5\times10^{-7}$ / $10^{-6}$ |
 | Policy / PRM batch | 256 each |
 | Microbatch | 8 |
-| Implicit-reward scale \(\beta\) | 0.05 |
+| Implicit-reward scale $\beta$ | 0.05 |
 | KL coefficient | 0 |
 | PRM initialization | same SFT model; SFT model retained as reference |
 
@@ -2110,7 +2102,7 @@ direct ratio is about 28% more **[I]**, whereas the paper's prose reports 24%; i
 still reaches a given training reward in fewer steps. Wall time, not steps
 alone, is the proper efficiency metric.
 
-The method still has a potential failure mode. \(\pi_\phi\) is trained from the
+The method still has a potential failure mode. $\pi_\phi$ is trained from the
 same terminal label for a whole response, so its token decomposition is an
 implicit statistical attribution, not proof that an intermediate proposition
 is valid. Correlated policy/PRM blind spots can survive. A verifier audit and
@@ -2130,7 +2122,7 @@ token-global aggregation, and active entropy control.
 
 #### Data operations
 
-The offline difficulty profiler samples \(N=16\) math or \(N=8\) code responses
+The offline difficulty profiler samples $N=16$ math or $N=8$ code responses
 per prompt at temperature 1 and maximum 32K tokens. It removes pass-rate 0 and
 1 prompts. **[D]** Depending on the starting 7B/32B model, only about 38–48% of
 profiled math/code prompts remain, demonstrating that “same dataset” is not the
@@ -2152,14 +2144,14 @@ source data -> verifier/quality cleaning -> base-model pass profiling
 #### Objective and entropy controller
 
 MAGIC removes GRPO's per-response length denominator and averages across all
-eligible response tokens. It uses learning rate \(10^{-6}\), PPO clip 0.2,
+eligible response tokens. It uses learning rate $10^{-6}$, PPO clip 0.2,
 sampling temperature 1, target entropy 0.2, no KL loss, and rejection sampling
 in the released runs. **[D]**
 
-Let \(c_k\) be the controller state, \(\alpha_k\) the active entropy-loss
-coefficient, and \(\mathcal H_k\) the rollout entropy. The report defines
+Let $c_k$ be the controller state, $\alpha_k$ the active entropy-loss
+coefficient, and $\mathcal H_k$ the rollout entropy. The report defines
 
-\[
+$$
 c_0=0,\qquad
 c_{k+1}=
 \begin{cases}
@@ -2168,11 +2160,11 @@ c_k-\Delta,&\mathcal H_k>H^*,
 \end{cases}
 \qquad
 \alpha_k=c_k\mathbf 1\{\mathcal H_k\le H^*\},\quad H^*=0.2.
-\]
+$$
 
 The entropy loss is activated when observed entropy falls below the target, so
 unnecessary regularization does not dominate a naturally diverse policy.
-**[D]** The report gives adjustment step \(\Delta=0.005\) and does not put a
+**[D]** The report gives adjustment step $\Delta=0.005$ and does not put a
 clip in this equation. This is a feedback controller, not merely a constant
 entropy bonus; its state must be checkpointed and restored with the optimizer.
 
@@ -2206,7 +2198,7 @@ choice is empirical and base-policy dependent.
 **[D]** All use staged difficulty data and exact-answer/code verifiers. The
 reported evaluation uses maximum 32,768 generated tokens, temperature 1,
 top-p 1, avg@32 for AIME, and avg@4 for LiveCodeBench. **[D]** Those metrics are
-averages of independent attempts, not best-of-\(K\) or majority vote.
+averages of independent attempts, not best-of-$K$ or majority vote.
 
 For OR1-32B, 1,000 training steps on 32 H800 GPUs consume 309 hours: 223 hours
 rollout, 27 hours policy update, and 59 hours other work. **[D]** Rollout is
@@ -2239,10 +2231,10 @@ end-of-sequence, or a four-action budget.
 
 For a binary exact-match reward,
 
-\[
+$$
 R(\tau)=\mathbf 1\{\operatorname{normalize}(a_{\text{final}})
 =\operatorname{normalize}(a^*)\}.
-\]
+$$
 
 There is no hand-labeled search trajectory. Policy gradient discovers query
 wording and when to issue another query from final-answer success. **[D]** This
@@ -2255,12 +2247,12 @@ them.
 The serialized trajectory contains both policy tokens and retrieved passages,
 but the latter were emitted by the search engine. The objective therefore uses
 
-\[
+$$
 M_t=\begin{cases}
 1,&t\text{ generated by the policy},\\
 0,&t\text{ inserted by retrieval}.
 \end{cases}
-\]
+$$
 
 The mask applies to policy and KL terms. **[D]** Without it, training treats the
 Wikipedia passage as an action the policy chose token-by-token and increases
@@ -2282,9 +2274,9 @@ configuration is:
 
 | Field | Value |
 |---|---:|
-| Policy / value learning rate | \(10^{-6}\) / \(10^{-5}\) |
+| Policy / value learning rate | $10^{-6}$ / $10^{-5}$ |
 | Policy / value warmup ratio | 0.285 / 0.015 |
-| \((\gamma,\lambda)\) | 1, 1 |
+| $(\gamma,\lambda)$ | 1, 1 |
 | Steps / checkpoint interval | 500 / 100 |
 | Global / mini / microbatch | 512 / 256 / 64 |
 | Maximum total / model response / retrieved text | 4,096 / 500 / 500 tokens |
@@ -2316,33 +2308,33 @@ Training](https://arxiv.org/abs/2505.10978).
 
 Trajectory-level GRPO gives every action in a successful episode the same
 episode advantage. GiGPO adds a second comparison group without sampling new
-counterfactual actions. It rolls out \(G\) copies of the same task and initial
+counterfactual actions. It rolls out $G$ copies of the same task and initial
 state, then hashes environment states that recur across trajectories. All
 actions actually taken from the same **anchor state** form a step-level group.
 **[D]**
 
-For episode \(i\), let
+For episode $i$, let
 
-\[
+$$
 G_{i,t}=\sum_{u=t}^{T_i}\gamma^{u-t}r_{i,u}
-\]
+$$
 
-be the discounted return following action \(a_{i,t}\). GiGPO computes:
+be the discounted return following action $a_{i,t}$. GiGPO computes:
 
-\[
+$$
 A^{E}_i=\operatorname{relative}\!\left(G_{i,0};
 \{G_{j,0}\}_{j=1}^{G}\right),
-\]
+$$
 
-\[
+$$
 A^{S}_{i,t}=\operatorname{relative}\!\left(G_{i,t};
 \{G_{j,u}:s_{j,u}=s_{i,t}\}\right),
 \qquad
 A_{i,t}=A^{E}_i+\omega A^{S}_{i,t}.
-\]
+$$
 
-**[D]** The reported experiments use \(\omega=1\) without tuning and
-\(\gamma=0.95\). Episode advantage rewards globally coherent success; anchor
+**[D]** The reported experiments use $\omega=1$ without tuning and
+$\gamma=0.95$. Episode advantage rewards globally coherent success; anchor
 advantage asks which action had better downstream return from the same state.
 No critic and no additional rollout are required.
 
@@ -2361,7 +2353,7 @@ code, not logging code.
 | Episode limit | 50 steps | 15 steps | 4 search turns |
 | Success / failure / invalid reward | 10 / 0 / -0.1 | 10 / 0 / -0.1 | 1 / 0 / -0.01 |
 | Group × groups | 8 × 16 = 128 envs | 8 × 16 = 128 envs | group 5; train set 256 |
-| Actor learning rate | \(10^{-6}\) | \(10^{-6}\) | \(10^{-6}\) |
+| Actor learning rate | $10^{-6}$ | $10^{-6}$ | $10^{-6}$ |
 | Rollout / validation temperature | 1 / 0.4 | 1 / 0.4 | 1 / 0 |
 | Minibatch / KL coefficient | 256 / 0.01 | 64 / 0.01 | 512 / 0.001 |
 | Iterations / compute | 150; 2 H100 (1.5B), 4 H100 (7B) | same | 200; 4 H100 (3B), 8 H100 (7B) |
@@ -2384,10 +2376,10 @@ The paper reports 362.83 seconds for the shared per-iteration work, 0.01 seconds
 for anchor grouping, and 0.53 seconds for step-relative advantage, then calls
 the additional cost less than 0.002%. **[D]** Direct arithmetic gives
 
-\[
+$$
 \frac{0.01+0.53}{362.83+0.01+0.53}\times100\%
 \approx 0.149\%,
-\]
+$$
 
 not 0.002%. **[I]** The overhead is still small, but the published percentage
 is inconsistent with its disclosed timing components. Reproducibility includes
@@ -2501,7 +2493,7 @@ Perspective](https://arxiv.org/abs/2503.20783).
 
 Consider a common sequence-averaged group objective:
 
-\[
+$$
 J_{\mathrm{seq}}
 =
 \frac{1}{G}
@@ -2510,18 +2502,18 @@ J_{\mathrm{seq}}
 \sum_{t=1}^{|o_i|}
 \ell_{i,t}\,
 \frac{R_i-\bar R}{s_R}.
-\]
+$$
 
 Two normalizers have independent effects.
 
-1. **Response normalization by \(1/|o_i|\).** Every response has approximately
+1. **Response normalization by $1/|o_i|$.** Every response has approximately
    equal total weight, so each token in a long response receives less magnitude
    than each token in a short response. With mixed binary outcomes, a short
    correct response can receive concentrated positive updates while a long
    incorrect response receives diluted negative updates. The cited study
    identifies this as a response-level length bias and observes artificial
    response growth, especially among incorrect answers. **[D]**
-2. **Reward normalization by \(1/s_R\).** The reward standard deviation is a
+2. **Reward normalization by $1/s_R$.** The reward standard deviation is a
    prompt-dependent multiplier. For binary rewards, an imbalanced group has a
    smaller standard deviation than a balanced group, so its few minority
    samples can receive larger normalized advantages. Prompt difficulty and
@@ -2532,24 +2524,24 @@ Dr.GRPO removes the prompt-specific standard-deviation division and replaces
 response-specific length normalization with a fixed response-length constant.
 In schematic form,
 
-\[
+$$
 J_{\mathrm{Dr}}
 =
 \frac{1}{G L_{\max}}
 \sum_{i=1}^{G}\sum_{t=1}^{|o_i|}
 \ell_{i,t}\left(R_i-\bar R\right).
-\]
+$$
 
 Token-global aggregation, as in DAPO, also removes equal-per-sequence weighting:
 
-\[
+$$
 J_{\mathrm{token}}
 =
 \frac{\sum_{i,t}m_{i,t}\ell_{i,t}\left(R_i-\bar R\right)}
        {\sum_{i,t}m_{i,t}}.
-\]
+$$
 
-These are related but not interchangeable. A fixed \(L_{\max}\) makes gradient
+These are related but not interchangeable. A fixed $L_{\max}$ makes gradient
 scale depend on the configured cap; token-global aggregation makes it depend on
 the number of eligible tokens in the realized batch. A reproduction must log
 the loss type, reward scaling, denominator, completion mask, and treatment of
@@ -2575,13 +2567,13 @@ elicited, contamination-audited base checkpoint under matched inference?”
 Primary source: [The Entropy Mechanism of Reinforcement Learning for Reasoning
 Language Models](https://arxiv.org/abs/2505.22617).
 
-For a token state \(s\), policy entropy is
+For a token state $s$, policy entropy is
 
-\[
+$$
 \mathcal H(\pi_\theta(\cdot\mid s))
 =
 -\sum_a \pi_\theta(a\mid s)\log\pi_\theta(a\mid s).
-\]
+$$
 
 The study aggregates 11 runs using different model families and RL algorithms
 over 2,400 gradient steps. It reports that the first 200 steps consumed about
@@ -2592,13 +2584,13 @@ produced marginal average gain in those experiments.
 
 The authors fit an empirical relation
 
-\[
+$$
 R=-a\exp(H)+b,
-\]
+$$
 
-where \(H\) is measured policy entropy and \(R\) is validation performance.
+where $H$ is measured policy entropy and $R$ is validation performance.
 This is an empirical family of fitted curves, not a universal law of RL. The
-suggested zero-entropy ceiling is \(R=-a+b\) within that fit. It should not be
+suggested zero-entropy ceiling is $R=-a+b$ within that fit. It should not be
 extrapolated across a different model, task distribution, sampling
 temperature, or off-policy system without re-estimation. **[D]**
 
@@ -2677,13 +2669,13 @@ defines an equivalence class of outputs that receive the same reward. RL
 searches that entire class, including cases the verifier author did not imagine.
 For each reward, document:
 
-\[
+$$
 \mathcal E_r(x)
 =
 \{y:\operatorname{verifier}(x,y)=r\}.
-\]
+$$
 
-Then ask whether all high-reward elements of \(\mathcal E_r(x)\) satisfy the
+Then ask whether all high-reward elements of $\mathcal E_r(x)$ satisfy the
 intended property. Usually they do not. Metamorphic transforms, hidden tests,
 independent graders, manual audits, and adversarial policy sampling shrink the
 gap but cannot prove it is empty.
@@ -2706,7 +2698,7 @@ authors still treat verifier quality as a central bottleneck. **[D]**
 
 A practical reward should be decomposed:
 
-\[
+$$
 r
 =
 w_{\mathrm{sem}}r_{\mathrm{sem}}
@@ -2714,7 +2706,7 @@ w_{\mathrm{sem}}r_{\mathrm{sem}}
 +w_{\mathrm{format}}r_{\mathrm{format}}
 +w_{\mathrm{safety}}r_{\mathrm{safety}}
 -w_{\mathrm{cost}}c.
-\]
+$$
 
 Log every raw component before scalarization. A scalar alone cannot reveal
 whether performance rose because answer correctness improved, a format regex
@@ -2742,12 +2734,12 @@ Policy staleness means the rollout came from old weights. Training-inference
 mismatch means nominally identical weights implement different distributions
 in the rollout and learner engines. Both alter the importance ratio:
 
-\[
+$$
 \rho_t
 =
 \frac{\pi_{\theta,\mathrm{train}}(a_t\mid s_t)}
        {\pi_{\mathrm{beh},\mathrm{rollout}}(a_t\mid s_t)}.
-\]
+$$
 
 Potential causes include:
 
@@ -2774,7 +2766,7 @@ mask changes the event being assigned a probability.
 Before RL, run a fixed prefix through both engines and compare:
 
 - token IDs and attention masks exactly;
-- top-\(k\) token identities;
+- top-$k$ token identities;
 - maximum and mean absolute logit difference;
 - sampled-token log-probability difference;
 - per-layer or per-router checksums where available; and
@@ -2788,13 +2780,13 @@ gate, not a universal constant.
 
 For an agent transcript, the loss mask should usually be
 
-\[
+$$
 m_t=
 \begin{cases}
 1,&\text{token sampled as a trainable model action},\\
 0,&\text{system, user, environment, tool-result, padding, or replayed token}.
 \end{cases}
-\]
+$$
 
 Training on tool-result tokens teaches the model to imitate observations it did
 not choose. Excluding tool-call syntax, however, prevents the policy from
@@ -2802,8 +2794,8 @@ learning to invoke the environment. The correct unit is provenance, not a
 hard-coded role name: some multi-agent systems treat another model's message as
 an external observation, while self-play may intentionally train both sides.
 
-Truncation creates censoring. Let \(z_i=1\) indicate that a rollout terminated
-naturally and \(z_i=0\) indicate a length cutoff. Four common policies optimize
+Truncation creates censoring. Let $z_i=1$ indicate that a rollout terminated
+naturally and $z_i=0$ indicate a length cutoff. Four common policies optimize
 different objectives:
 
 | Treatment | Benefit | Failure |
@@ -2851,10 +2843,10 @@ must be decided before generation or rejection sampling.
 
 An external environment is also data and must be versioned:
 
-\[
+$$
 e=(\text{container digest},\text{dependencies},\text{fixtures},
 \text{network snapshot},\text{seed},\text{resource limits}).
-\]
+$$
 
 A package update can make a code test pass; a search index refresh can reveal
 the answer; a website redesign can break an action sequence; a changed timeout
@@ -2872,21 +2864,21 @@ At least six choices commonly change a reasoning or agent benchmark score:
 
 1. checkpoint and tokenizer revision;
 2. prompt and chat template;
-3. temperature, top-\(p\), top-\(k\), and random seed;
+3. temperature, top-$p$, top-$k$, and random seed;
 4. reasoning-token, tool-call, turn, and wall-clock budgets;
 5. number of samples and aggregation rule; and
 6. parser, verifier, judge, and environment revisions.
 
-For independent samples with single-sample success probability \(p\),
+For independent samples with single-sample success probability $p$,
 
-\[
+$$
 \operatorname{pass@}k=1-(1-p)^k
-\]
+$$
 
 only under the simplifying independence and identical-distribution
-assumptions. Best-of-\(k\), majority vote, learned selection, and
+assumptions. Best-of-$k$, majority vote, learned selection, and
 multi-agent debate are different inference systems. A vendor's
-\(\operatorname{pass@}1\), \(\operatorname{pass@}64\), and tool-assisted score
+$\operatorname{pass@}1$, $\operatorname{pass@}64$, and tool-assisted score
 must not be placed in one column without protocol labels.
 
 Public benchmark improvement also does not identify the training cause.
@@ -2907,7 +2899,7 @@ invalidate floating citations.
 
 Every reproduction should therefore bind:
 
-\[
+$$
 \text{claim}
 \longleftrightarrow
 \text{paper version}
@@ -2921,7 +2913,7 @@ Every reproduction should therefore bind:
 \text{container digests}
 \longleftrightarrow
 \text{checkpoint hash}.
-\]
+$$
 
 If one link is unavailable, mark it unknown. Do not silently fill a private
 hyperparameter with a public-framework default.
@@ -2981,7 +2973,7 @@ reproduction needs raw data lineage, executable configs, and code revisions.
 
 The operational progression across these cases is:
 
-\[
+$$
 \text{single response}
 \rightarrow
 \text{response with executable verifier}
@@ -2991,7 +2983,7 @@ The operational progression across these cases is:
 \text{stateful multi-turn environment}
 \rightarrow
 \text{multi-environment asynchronous training}.
-\]
+$$
 
 Each transition adds a new object that must be versioned:
 
@@ -3251,11 +3243,11 @@ cryptographic hash, retrieval key, and retention policy should still be logged.
 
 ### 11.3 Metrics that reveal mechanism
 
-For a batch of \(N\) action tokens, log:
+For a batch of $N$ action tokens, log:
 
 **Policy movement**
 
-\[
+$$
 \widehat D_{\mathrm{KL}}
 =
 \frac1N\sum_t
@@ -3266,26 +3258,26 @@ f_{\mathrm{clip}}
 =
 \frac1N\sum_t
 \mathbf 1\{\rho_t\notin[1-\epsilon_l,1+\epsilon_h]\}.
-\]
+$$
 
 **Importance-weight health**
 
-\[
+$$
 \operatorname{ESS}
 =
 \frac{\left(\sum_t w_t\right)^2}{\sum_t w_t^2}.
-\]
+$$
 
 Report ESS as an absolute count and fraction of eligible tokens. Also report
 weight quantiles, maximum, and fraction clipped.
 
 **Exploration**
 
-\[
+$$
 \bar H
 =
 \frac1N\sum_t\mathcal H(\pi_\theta(\cdot\mid s_t)),
-\]
+$$
 
 plus answer diversity, program diversity, tool-choice diversity, and conditional
 entropy by advantage sign and action type.
@@ -3453,7 +3445,7 @@ The deepest commonality across ByteDance, NVIDIA, Microsoft, xAI, and the open
 community is not one optimizer. It is the construction of a closed learning
 loop whose expensive parts are automated:
 
-\[
+$$
 \text{task generation and selection}
 \rightarrow
 \text{policy interaction}
@@ -3465,7 +3457,7 @@ loop whose expensive parts are automated:
 \text{distributed update}
 \rightarrow
 \text{adversarial evaluation}.
-\]
+$$
 
 ByteDance contributes unusually concrete value-learning, critic-free, tool, and
 systems variants. NVIDIA shows how a commercial open-model program composes

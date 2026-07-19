@@ -57,15 +57,15 @@ drawn.
 
 | Symbol | General meaning | Agent example | Common implementation mistake |
 |---|---|---|---|
-| \(s_t\) | latent environment state | filesystem, browser DOM, user intent, permissions | treating transcript text as the complete state |
-| \(o_t\) | observation | tool result, screenshot, error, user reply | training on hidden evaluator state unavailable at inference |
-| \(h_t\) | policy information state | prompt, memory, retrieved history | silently changing summarization between train and test |
-| \(a_t\) | action | text, function call, shell command, click | mixing environment text with policy-generated tokens |
-| \(P\) | transition kernel | API execution and state change | ignoring retries, nondeterminism, or irreversible side effects |
-| \(R\) | reward | task success minus cost and violations | rewarding proxy compliance instead of verified outcome |
-| \(\rho_0\) | initial-state distribution | sampled task and sandbox snapshot | leaking evaluation task templates into training |
-| \(T\) | horizon | maximum turns/actions/time | allowing different budgets for compared models |
-| \(\gamma\) | discount | preference for earlier progress | using discounting without a time-scale interpretation |
+| $s_t$ | latent environment state | filesystem, browser DOM, user intent, permissions | treating transcript text as the complete state |
+| $o_t$ | observation | tool result, screenshot, error, user reply | training on hidden evaluator state unavailable at inference |
+| $h_t$ | policy information state | prompt, memory, retrieved history | silently changing summarization between train and test |
+| $a_t$ | action | text, function call, shell command, click | mixing environment text with policy-generated tokens |
+| $P$ | transition kernel | API execution and state change | ignoring retries, nondeterminism, or irreversible side effects |
+| $R$ | reward | task success minus cost and violations | rewarding proxy compliance instead of verified outcome |
+| $\rho_0$ | initial-state distribution | sampled task and sandbox snapshot | leaking evaluation task templates into training |
+| $T$ | horizon | maximum turns/actions/time | allowing different budgets for compared models |
+| $\gamma$ | discount | preference for earlier progress | using discounting without a time-scale interpretation |
 
 In partial observability, the optimal action may depend on the complete action–
 observation history. A transcript is one hand-engineered information state, not
@@ -76,12 +76,12 @@ are attempts to construct a useful approximation to a belief state.
 
 ### Token scale
 
-The policy factorizes a semantic action \(a_t=(x_{t,1},\ldots,x_{t,L_t})\):
+The policy factorizes a semantic action $a_t=(x_{t,1},\ldots,x_{t,L_t})$:
 
-\[
+$$
 \pi_\theta(a_t\mid h_t)=
 \prod_{j=1}^{L_t}\pi_\theta(x_{t,j}\mid h_t,x_{t,<j}).
-\]
+$$
 
 Log-probability ratios and most gradients are computed here. Padding, loss
 masks, response length, and token normalization directly affect the update.

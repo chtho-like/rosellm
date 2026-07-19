@@ -10,23 +10,23 @@ the major algorithm families are appropriate.
 
 Most online methods in this chapter can be written schematically as
 
-\[
+$$
 \widehat{\nabla J}(\theta)=
 \frac{1}{Z}\sum_{i,t,j}
 m_{i,t,j}\,w_{i,t,j}(\theta)\,
 \widehat A_{i,t,j}\,
 \nabla_\theta\log\pi_\theta(x_{i,t,j}\mid h_{i,t},x_{i,t,<j})
 -\nabla_\theta\mathcal R(\theta).
-\]
+$$
 
-- \(i\): trajectory/sample
-- \(t\): environment turn
-- \(j\): policy-generated token
-- \(m\): action-token mask
-- \(w\): importance/clipping/truncation term
-- \(\widehat A\): advantage or centered return
-- \(Z\): token/turn/sequence/task normalization
-- \(\mathcal R\): KL, entropy, constraint, or auxiliary regularizer
+- $i$: trajectory/sample
+- $t$: environment turn
+- $j$: policy-generated token
+- $m$: action-token mask
+- $w$: importance/clipping/truncation term
+- $\widehat A$: advantage or centered return
+- $Z$: token/turn/sequence/task normalization
+- $\mathcal R$: KL, entropy, constraint, or auxiliary regularizer
 
 To compare two methods, fill in these six blanks rather than comparing their
 names.
@@ -36,10 +36,10 @@ names.
 **Supervised Fine-Tuning (SFT)** is behavioral cloning for model outputs. It
 minimizes negative log-likelihood of demonstrated policy tokens:
 
-\[
+$$
 L_{\text{SFT}}=-\frac{1}{Z}\sum_{i,t,j}
 m_{i,t,j}\log\pi_\theta(x^*_{i,t,j}\mid h^*_{i,t},x^*_{i,t,<j}).
-\]
+$$
 
 Strengths:
 
@@ -58,12 +58,12 @@ SFT remains part of almost every practical Agentic RL pipeline, but it is not RL
 
 ## 3. REINFORCE
 
-For sampled trajectory \(\tau_i\),
+For sampled trajectory $\tau_i$,
 
-\[
+$$
 \widehat g=\frac{1}{B}\sum_i\sum_t
 (G_{i,t}-b(h_{i,t}))\nabla\log\pi_\theta(a_{i,t}\mid h_{i,t}).
-\]
+$$
 
 Use REINFORCE when:
 
@@ -99,11 +99,11 @@ used by the selected framework.
 **REINFORCE Leave-One-Out (RLOO)** uses other samples for the same task as a
 baseline for the current sample.
 
-For \(G\) independent outputs on the same task,
+For $G$ independent outputs on the same task,
 
-\[
+$$
 \widehat A_i=R_i-\frac{1}{G-1}\sum_{k\ne i}R_k.
-\]
+$$
 
 RLOO removes the critic and uses other samples as a control variate. It is
 attractive when:
@@ -114,8 +114,8 @@ attractive when:
 - long-horizon state values are too expensive or unreliable.
 
 It still assigns coarse trajectory-level credit unless rewards/returns are
-defined per turn. With \(G=2\), advantages are exact opposites and highly noisy.
-As \(G\) grows, rollout cost rises. Ahmadian et al. found simple REINFORCE-style
+defined per turn. With $G=2$, advantages are exact opposites and highly noisy.
+As $G$ grows, rollout cost rises. Ahmadian et al. found simple REINFORCE-style
 methods competitive for RLHF when carefully tuned
 ([*Back to Basics*](https://arxiv.org/abs/2402.14740), 2024).
 
@@ -123,8 +123,8 @@ methods competitive for RLHF when carefully tuned
 
 **Proximal Policy Optimization (PPO)** normally combines:
 
-1. on/near-policy rollouts under \(\pi_{\text{old}}\);
-2. a critic \(V_\phi(h_t)\);
+1. on/near-policy rollouts under $\pi_{\text{old}}$;
+2. a critic $V_\phi(h_t)$;
 3. GAE advantages;
 4. clipped importance-ratio surrogate;
 5. value loss, entropy, and often reference KL;
@@ -132,13 +132,13 @@ methods competitive for RLHF when carefully tuned
 
 The policy objective is
 
-\[
+$$
 L^{\text{CLIP}}=
 \mathbb E\left[
 \min(\rho_t\hat A_t,
 \operatorname{clip}(\rho_t,1-\epsilon,1+\epsilon)\hat A_t)
 \right].
-\]
+$$
 
 ### When PPO is valuable
 
@@ -171,14 +171,14 @@ L^{\text{CLIP}}=
 ## 6. Group Relative Policy Optimization
 
 DeepSeekMath introduced **Group Relative Policy Optimization (GRPO)** to eliminate the
-learned critic. For each question/task, sample \(G\) outputs, compute rewards,
+learned critic. For each question/task, sample $G$ outputs, compute rewards,
 and estimate relative advantages, commonly
 
-\[
+$$
 \hat A_i=
 \frac{R_i-\operatorname{mean}(R_{1:G})}
 {\operatorname{std}(R_{1:G})+\varepsilon}.
-\]
+$$
 
 A PPO-like clipped surrogate then compares current and old policy probabilities.
 Read the exact objective in DeepSeekMath
@@ -259,12 +259,12 @@ clipping/optimization
 
 If sequence score uses a geometric mean,
 
-\[
+$$
 \rho_i^{\text{seq}}=
 \exp\left(\frac{1}{L_i}\sum_j
 [\log\pi_\theta(x_{i,j})-\log\pi_{\text{old}}(x_{i,j})]
 \right),
-\]
+$$
 
 the length average avoids exponentially small/large raw products but defines a
 particular length normalization. Sequence clipping aligns the trust signal with
@@ -272,9 +272,9 @@ sequence reward; it supplies less localized control over individual token
 changes. For multi-turn agents, decide whether the “sequence” is a turn or a
 complete trajectory.
 
-For (G) responses to one query, the published objective is
+For $G$ responses to one query, the published objective is
 
-\[
+$$
 J_{\mathrm{GSPO}}(\theta)
 =\frac1G\sum_{i=1}^{G}
 \min\left(
@@ -282,18 +282,18 @@ J_{\mathrm{GSPO}}(\theta)
 \operatorname{clip}(\rho_i^{\mathrm{seq}},1-\epsilon_l,1+\epsilon_h)
 \widehat A_i
 \right).
-\]
+$$
 
 The average is over responses, not over all response tokens. Consequently,
 each response has equal outer weight. Differentiating an unclipped response
 shows why its action tokens are weighted equally:
 
-\[
+$$
 \nabla_\theta \rho_i^{\mathrm{seq}}
 =\rho_i^{\mathrm{seq}}\frac1{L_i}
 \sum_{t=1}^{L_i}\nabla_\theta
 \log\pi_\theta(y_{i,t}\mid x,y_{i,<t}).
-\]
+$$
 
 This is a different estimator from multiplying every token by its own token
 ratio. It also means one outlier token can move the sequence ratio outside the
@@ -304,19 +304,19 @@ trust band and suppress the complete sequence.
 The paper defines a token-customizable variant for settings such as multi-turn
 RL. Let `sg` denote stop-gradient and
 
-\[
+$$
 \rho_{i,t}^{\mathrm{GSPO-token}}
 =\operatorname{sg}(\rho_i^{\mathrm{seq}})
 \frac{\pi_\theta(y_{i,t}\mid x,y_{i,<t})}
 {\operatorname{sg}[\pi_\theta(y_{i,t}\mid x,y_{i,<t})]}.
-\]
+$$
 
 Numerically, the fraction is one, so every token sees the same sequence ratio.
-Its derivative flows only through token (t). If all token advantages equal
+Its derivative flows only through token $t$. If all token advantages equal
 
-\[
+$$
 \widehat A_{i,t}=\widehat A_i,
-\]
+$$
 
 GSPO and GSPO-token have the same objective value and theoretical gradient. If
 turn/token advantages differ, GSPO-token preserves those differences while
@@ -325,8 +325,8 @@ value and gradient equivalence rather than assuming the stop-gradient trick is
 cosmetic.
 
 Do not transfer the paper's tiny GSPO clip bounds mechanically. Its controlled
-Qwen3-30B-A3B run used left/right bounds (3\times10^{-4}) and
-(4\times10^{-4}), while its GRPO baseline used (0.2/0.27), precisely
+Qwen3-30B-A3B run used left/right bounds $3\times10^{-4}$ and
+$4\times10^{-4}$, while its GRPO baseline used $0.2/0.27$, precisely
 because sequence and token ratios have different scales.
 
 ## 10. Soft Adaptive Policy Optimization
@@ -335,55 +335,55 @@ because sequence and token ratios have different scales.
 gate with a differentiable token gate
 ([Gao et al., 2025](https://arxiv.org/abs/2511.20347)). For token ratio
 
-\[
-r_{i,t}=\exp(log\pi_\theta-log\pi_{\mathrm{old}}),
-\]
+$$
+r_{i,t}=\exp(\log\pi_\theta-\log\pi_{\mathrm{old}}),
+$$
 
 choose a temperature by advantage sign,
 
-\[
+$$
 \tau_{i,t}=\begin{cases}
 \tau_{\mathrm{pos}},&\widehat A_{i,t}>0,\\
 \tau_{\mathrm{neg}},&\widehat A_{i,t}\le0,
 \end{cases}
-\]
+$$
 
 and define
 
-\[
+$$
 f_{i,t}(r)=\frac{4}{\tau_{i,t}}
 \sigma[\tau_{i,t}(r-1)].
-\]
+$$
 
 The sequence-normalized objective is
 
-\[
+$$
 J_{\mathrm{SAPO}}(\theta)
 =\frac1G\sum_{i=1}^{G}\frac1{L_i}
 \sum_{t=1}^{L_i}f_{i,t}(r_{i,t})\widehat A_{i,t}.
-\]
+$$
 
 This formula applies the smooth surrogate to the ratio itself; it is not
 `ratio × advantage × log-probability`. With
 
-\[
+$$
 p_{i,t}=\sigma[\tau_{i,t}(r_{i,t}-1)],
-\]
+$$
 
 differentiation gives
 
-\[
+$$
 \nabla_\theta J_{\mathrm{SAPO}}
 =\frac1G\sum_i\frac1{L_i}\sum_t
 \underbrace{4p_{i,t}(1-p_{i,t})}_{\text{smooth gradient gate}}
 r_{i,t}\widehat A_{i,t}
 \nabla_\theta\log\pi_\theta(y_{i,t}\mid x,y_{i,<t}).
-\]
+$$
 
-At (r=1), the gate is exactly one for any positive temperature, so the
+At $r=1$, the gate is exactly one for any positive temperature, so the
 on-policy gradient matches the unclipped ratio objective. Farther away, it
 decays continuously instead of switching to zero at a hard boundary. The paper
-uses (	au_{\mathrm{neg}}>\tau_{\mathrm{pos}}): a negative sampled-token
+uses $\tau_{\mathrm{neg}}>\tau_{\mathrm{pos}}$: a negative sampled-token
 update raises logits for a very large set of unsampled vocabulary items, so its
 off-policy gradient is damped faster.
 
@@ -400,9 +400,9 @@ ReMax uses a deterministic greedy rollout as a baseline for the stochastic
 sample, avoiding a critic
 ([Li et al., 2023](https://arxiv.org/abs/2310.10505)). Conceptually,
 
-\[
+$$
 \hat A=R(y_{\text{sample}})-R(y_{\text{greedy}}).
-\]
+$$
 
 It can be effective when an extra baseline rollout is cheaper than critic
 training and reward is sequence-level. In stochastic agent environments, both
@@ -433,7 +433,7 @@ optimize the sum of step rewards or use them to estimate advantages. Specify:
 
 ### Potential-based shaping
 
-Adding \(\gamma\Phi(s')-\Phi(s)\) preserves optimal policies under standard
+Adding $\gamma\Phi(s')-\Phi(s)$ preserves optimal policies under standard
 conditions. Learned “progress” scores generally do not have this guarantee.
 
 ## 13. Turn-level and hierarchical agent methods
@@ -476,7 +476,7 @@ can reduce variance when transitions are stochastic.
 Agent rollouts are slow, so collectors frequently lag behind the trainer.
 Possible controls:
 
-1. **bounded staleness:** reject trajectories older than \(K\) versions;
+1. **bounded staleness:** reject trajectories older than $K$ versions;
 2. **ratio/KL gate:** reject or downweight samples whose behavior/target
    divergence exceeds a threshold;
 3. **truncated importance weights:** trade bias for variance control;
@@ -509,11 +509,11 @@ mismatch between long asynchronous agent episodes and prompt-group methods
 
 DIS keeps a token only when
 
-\[
+$$
 1-\epsilon_l<
 \exp(\log\pi_\theta-\log\pi_{\text{rollout}})
 <1+\epsilon_h.
-\]
+$$
 
 Outside the interval its policy contribution is zero. Unlike PPO clipping,
 this masks both tails for either advantage sign. SAO is attractive when:
@@ -538,14 +538,14 @@ an online agent algorithm by itself.
 
 ### DPO
 
-For preferred \(y_w\), rejected \(y_l\), reference \(\pi_{\text{ref}}\),
+For preferred $y_w$, rejected $y_l$, reference $\pi_{\text{ref}}$,
 
-\[
+$$
 L_{\text{DPO}}=-\mathbb E\log\sigma\left(
 \beta\log\frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)}
 -\beta\log\frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}
 \right).
-\]
+$$
 
 It avoids reward-model and online-rollout infrastructure. For agent trajectories,
 the pair can be complete trajectories or segments, but fixed preferences do not

@@ -1,7 +1,7 @@
 # Makefile for RoseLLM - Python Build and Test Automation
 # Usage: make [target]
 
-.PHONY: help install dev test lint format clean build docs
+.PHONY: help install dev test lint format clean build docs-lint docs docs-render docs-serve
 
 # Default target
 help:
@@ -16,7 +16,9 @@ help:
 	@echo "  make format     - Auto-format code (black, isort)"
 	@echo "  make clean      - Remove build artifacts and cache"
 	@echo "  make build      - Build distribution packages"
-	@echo "  make docs       - Generate documentation"
+	@echo "  make docs-lint   - Validate Markdown and TeX source"
+	@echo "  make docs        - Validate and generate documentation"
+	@echo "  make docs-render - Render every page and formula in headless Chrome"
 
 # Install package in production mode
 install:
@@ -84,13 +86,22 @@ clean:
 build: clean
 	python -m build
 
-## Generate documentation
-docs:
-	mkdocs build --strict
+## Validate Markdown and TeX source without documentation dependencies
+docs-lint:
+	python3 scripts/check_docs_math.py
+
+## Generate and validate documentation
+docs: docs-lint
+	python3 -m mkdocs build --strict --clean
+	python3 scripts/check_docs_math.py --site-dir site
+
+## Render every generated page and formula in a real browser
+docs-render: docs
+	python3 scripts/check_docs_math.py --site-dir site --browser
 
 ## Serve documentation locally
 docs-serve:
-	mkdocs serve -a 0.0.0.0:8000
+	python3 -m mkdocs serve -a 0.0.0.0:8000
 
 # Run continuous integration tests (what CI/CD would run)
 ci: lint test

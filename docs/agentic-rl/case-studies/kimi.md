@@ -149,18 +149,18 @@ PDF p. 8:
 - ~1M text and ~1M text-vision examples.
 - Listed text: 500K general QA, 200K code, 200K math/science, 5K creative,
   20K long context = 925K; remaining ~75K uncategorized.
-- Epoch 1: 32K, LR \(2\times10^{-5}\to2\times10^{-6}\).
-- Epoch 2: 128K, rewarm \(10^{-5}\), decay \(10^{-6}\).
+- Epoch 1: 32K, LR $2\times10^{-5}\to2\times10^{-6}$.
+- Epoch 2: 128K, rewarm $10^{-5}$, decay $10^{-6}$.
 - Packed examples.
 
 ### 4.3 RL data and anti-hacking [D]
 
 Pipeline:
 
-\[
+$$
 \text{pretraining}\to\text{vanilla SFT}\to
 \text{long-CoT SFT warmup}\to\text{RL}.
-\]
+$$
 
 Prompts cover STEM, code, and general domains; balance difficulty; require
 automatic evaluation. Estimate difficulty by sampling ten high-temperature SFT
@@ -178,9 +178,9 @@ reflection, and exploration traces.
 
 Terminal binary outcome:
 
-\[
+$$
 r(x,y,y^*)\in\{0,1\}.
-\]
+$$
 
 - code: executable tests;
 - structured math: exact/rule verification;
@@ -193,11 +193,11 @@ teach an implicit search pattern.
 ### 4.5 Value-model-free policy optimization [D]
 
 PDF pp. 4–6 defines an online mirror-descent-like objective with relative
-entropy. From \(K\) old-policy responses:
+entropy. From $K$ old-policy responses:
 
-\[
+$$
 A_i=r_i-\frac1K\sum_jr_j.
-\]
+$$
 
 The policy minimizes a squared difference between new-policy sequence
 log-ratio and an analytically reward-tilted target.
@@ -208,7 +208,7 @@ log-ratio and an analytically reward-tilted target.
 - older-policy responses can be used through log-ratio objective;
 - gradual length reward favors shorter correct and penalizes longer incorrect;
 - easy-to-hard curriculum;
-- task priority roughly \(1-\text{success rate}\).
+- task priority roughly $1-\text{success rate}$.
 
 The rationale for avoiding token/state values is important: a locally failing
 reasoning branch can be useful exploration if the model later detects/repairs
@@ -270,7 +270,7 @@ For matrices, compute momentum then approximate orthogonalization with five
 Newton–Schulz iterations. Moonlight adds:
 
 - weight decay for weight/output RMS growth;
-- shape multiplier approximately \(0.2\sqrt{\max(A,B)}\) for an \(A\times B\)
+- shape multiplier approximately $0.2\sqrt{\max(A,B)}$ for an $A\times B$
   matrix to match AdamW-like update RMS;
 - AdamW retained for embeddings, norms, output head.
 
@@ -295,12 +295,12 @@ Muon uses one momentum buffer versus AdamW's two moments. Report estimates
 
 Schedule:
 
-1. 0–33B: warm to \(4.2\times10^{-4}\), 2,000 steps, batch 2,048 sequences.
-2. 33B–5.2T: cosine to \(4.2\times10^{-5}\); batch 2,048 until 200B then 4,096.
-3. 5.2–5.7T: math/code/reasoning cooldown; rewarm \(10^{-4}\) over 100 steps,
+1. 0–33B: warm to $4.2\times10^{-4}$, 2,000 steps, batch 2,048 sequences.
+2. 33B–5.2T: cosine to $4.2\times10^{-5}$; batch 2,048 until 200B then 4,096.
+3. 5.2–5.7T: math/code/reasoning cooldown; rewarm $10^{-4}$ over 100 steps,
    linearly decay to zero.
 
-Weight decay .1; expert-bias rate \(10^{-3}\) first two stages then zero.
+Weight decay .1; expert-bias rate $10^{-3}$ first two stages then zero.
 Scaling fits across 399M–1.5B dense models estimate Muon needs ~52% AdamW FLOPs
 for equal loss. This is a fit, not universal 2× wall-clock proof.
 
@@ -349,7 +349,7 @@ more inference FLOPs at 128K for 0.5–1.2% validation-loss gain.
 
 ### 7.2 MuonClip [D]
 
-QK-Clip measures maximum pre-softmax logit per head. If above \(\tau=100\),
+QK-Clip measures maximum pre-softmax logit per head. If above $\tau=100$,
 rescale selected query/key components, treating rotary/non-rotary keys
 differently. A 53B/9B active precursor saw unbounded logits >1,000; K2 reports
 15.5T training without a loss spike. This is vendor evidence, not an independent
@@ -371,9 +371,9 @@ synthetic ratio, dedup thresholds, unique tokens are **[U]**.
 ### 7.4 Schedule/system [D/U]
 
 - main sequence 4,096; global batch ~67M tokens; decay .1; 500 warmup;
-- LR \(2\times10^{-4}\) through 10T, cosine to \(2\times10^{-5}\) over 5.5T;
+- LR $2\times10^{-4}$ through 10T, cosine to $2\times10^{-5}$ over 5.5T;
 - late annealing/long context: ~400B at 4K + 60B at 32K, LR
-  \(2\times10^{-5}\to7\times10^{-6}\); wording does not prove these add to
+  $2\times10^{-5}\to7\times10^{-6}$; wording does not prove these add to
   15.5T;
 - YaRN to 128K.
 
@@ -437,7 +437,7 @@ the result.
 
 [Official model card](https://huggingface.co/moonshotai/Kimi-K2-Instruct-0905):
 same 1T/32B family; context 256K; agent coding/frontend emphasis. Five-run
-vendor means include SWE Verified \(69.2\pm.63\), multilingual \(55.9\pm.72\),
+vendor means include SWE Verified $69.2\pm.63$, multilingual $55.9\pm.72$,
 Multi-SWE 33.5, TerminalBench 44.5, SWE-Dev 66.6. Harness derives from SWE-agent;
 unreachable Git objects and SWE-Dev tests were removed.
 
@@ -475,14 +475,14 @@ Sources: [paper](https://arxiv.org/abs/2510.26692),
 
 ### Kimi Delta Attention [D]
 
-KDA combines per-channel decay \(\alpha_t\), delta-rule writes \(\beta_t\),
+KDA combines per-channel decay $\alpha_t$, delta-rule writes $\beta_t$,
 normalized Q/K, short convolution + Swish, low-rank decay/write gates, RMSNorm,
 and sigmoid output gate:
 
-\[
+$$
 S_t=\operatorname{diag}(\alpha_t)S_{t-1}
 +\beta_t(v_t-S_{t-1}k_t)k_t^\top.
-\]
+$$
 
 The delta writes only the value not predicted from memory; diagonal decay lets
 channels forget at different rates.
@@ -493,7 +493,7 @@ KDA reduces long sequential cost.
 
 ### Training [D]
 
-- initial 1.4T at 4K; MuonClip; WSD schedule; peak LR \(1.1\times10^{-3}\);
+- initial 1.4T at 4K; MuonClip; WSD schedule; peak LR $1.1\times10^{-3}$;
   global batch ~32M;
 - released checkpoint through 5.7T; long context to 1M;
 - broad SFT, reasoning SFT, RL over math/code/STEM;
@@ -592,10 +592,10 @@ remain frozen.
 
 Reward:
 
-\[
+$$
 r=\lambda_1r_{\text{parallel}}+
 \lambda_2r_{\text{finish}}+r_{\text{performance}}.
-\]
+$$
 
 Parallel shaping prevents serial collapse; finish shaping prevents meaningless
 spawns/uncompleted work; both anneal toward zero so task performance dominates.
@@ -647,19 +647,19 @@ Sources: [paper](https://arxiv.org/abs/2603.15031),
 
 Ordinary residual accumulation
 
-\[
+$$
 h_\ell=\sum_{i<\ell}v_i
-\]
+$$
 
 is replaced by learned normalized routing
 
-\[
+$$
 h_\ell=\sum_{i<\ell}\alpha_{i\to\ell}v_i,
 \qquad\alpha=\operatorname{softmax}(q_\ell^\top k_i).
-\]
+$$
 
 A blockwise variant attends over block representatives, reducing residual
-attention memory from roughly \(O(Ld)\) to \(O(Nd)\). Around eight blocks recover
+attention memory from roughly $O(Ld)$ to $O(Nd)$. Around eight blocks recover
 most reported benefit. Scaling fits suggest conventional residual baseline
 needs ~1.25× compute; 48B/3B Kimi Linear experiment reports GPQA +7.5 among other
 gains. K3 adopts AttnRes, but exact K3 block/key/query details are **[U]**.

@@ -89,7 +89,7 @@ and 4, pp. 4–6 and 12–13.
 - 2T training tokens.
 - BBPE tokenizer trained on about 24 GB of multilingual text; 100,015 realized
   tokens in a nominal 102,400-token setup.
-- AdamW \((\beta_1=.9,\beta_2=.95)\), weight decay .1, 2,000-step warmup,
+- AdamW $(\beta_1=.9,\beta_2=.95)$, weight decay .1, 2,000-step warmup,
   gradient clipping 1.0.
 - Data/tensor/sequence/pipeline parallelism, FlashAttention, ZeRO-1, BF16
   forward/backward, FP32 gradients, asynchronous five-minute checkpoints.
@@ -106,9 +106,9 @@ per-dump deduplication dramatically overstates unique corpus size.
 - 1.5M SFT examples.
 - 1.2M helpful: 31.2% general, 46.6% math, 22.2% code.
 - 300K safety examples.
-- SFT: four epochs for 7B and two for 67B; learning rates \(10^{-5}\) and
-  \(5\times10^{-6}\).
-- DPO: one epoch, learning rate \(5\times10^{-6}\), batch 512.
+- SFT: four epochs for 7B and two for 67B; learning rates $10^{-5}$ and
+  $5\times10^{-6}$.
+- DPO: one epoch, learning rate $5\times10^{-6}$, batch 512.
 - No online RL stage is reported.
 
 **[U]** Source-level corpus mixture, DPO pair count, GPU count/hours/cost, and
@@ -148,7 +148,7 @@ contains 797.92 GB and 603.173M files.
 
 - Human instructions plus Alpaca-family data.
 - About 2B instruction tokens.
-- Batch about 4M tokens; learning rate \(10^{-5}\); 100 warmup steps.
+- Batch about 4M tokens; learning rate $10^{-5}$; 100 warmup steps.
 - No RL stage.
 
 This stage contributes realistic repository context and executable filtering,
@@ -190,10 +190,10 @@ preserved in every model table.
 
 - 776K SFT examples: chain-of-thought, program-of-thought, and tool-integrated
   reasoning in English and Chinese.
-- SFT: 500 steps, batch 256, max 4K, constant LR \(5\times10^{-5}\).
+- SFT: 500 steps, batch 256, max 4K, constant LR $5\times10^{-5}$.
 - RL prompts: about 144K GSM8K/MATH-style questions.
 - 64 outputs per question; max response 1,024.
-- Training batch 1,024; policy LR \(10^{-6}\); KL coefficient .04.
+- Training batch 1,024; policy LR $10^{-6}$; KL coefficient .04.
 - One policy update per exploration batch.
 - Outcome-reward and process-reward variants.
 - Iterative RL refreshes the reward model and retains 10% historical replay.
@@ -219,22 +219,22 @@ Primary sources: [paper](https://arxiv.org/abs/2405.04434), Sections 3–4;
 ### Pretraining and systems [D]
 
 - 8.1T tokens; base sequence 4K.
-- AdamW .9/.95, weight decay .1, peak LR \(2.4\times10^{-4}\), 2K warmup;
+- AdamW .9/.95, weight decay .1, peak LR $2.4\times10^{-4}$, 2K warmup;
   LR drops at 60% and 90%.
 - Batch grows from 2,304 to 9,216 sequences over the first 225B tokens.
 - H800 nodes with eight GPUs, NVLink/NVSwitch, and InfiniBand.
 - 16-way zero-bubble pipeline; experts across eight nodes; ZeRO-1; no tensor
   parallelism.
 - 172.8K H800 GPU-hours per trillion tokens, versus 300.6K for DeepSeek-67B.
-- **[D→calc]** \(172.8\text{K}\times8.1\approx1.40\text{M}\) H800 GPU-hours
+- **[D→calc]** $172.8\text{K}\times8.1\approx1.40\text{M}$ H800 GPU-hours
   for base pretraining, excluding context extension, post-training, experiments,
   and data processing.
 
 ### Context and alignment [D]
 
-- YaRN scale 40, \(\alpha=1\), \(\beta=32\), target 160K.
+- YaRN scale 40, $\alpha=1$, $\beta=32$, target 160K.
 - 1,000 extension steps at 32K, batch 576.
-- 1.5M SFT examples, two epochs, LR \(5\times10^{-6}\).
+- 1.5M SFT examples, two epochs, LR $5\times10^{-6}$.
 - Two RL stages with GRPO:
   1. code/math reasoning with rule or learned reasoning rewards;
   2. helpfulness, safety, and rule rewards together.
@@ -270,7 +270,7 @@ before November 2023 and cover 338 languages.
 - Extension: 1,000 steps at 32K/batch 1,152, then 1,000 at 128K/batch 288.
 - 20K code + 30K math instructions plus V2 general instructions.
 - About 300M unique instruction tokens sampled to 1B exposure.
-- SFT batch 1M tokens, LR \(5\times10^{-6}\), 100 warmup steps.
+- SFT batch 1M tokens, LR $5\times10^{-6}$, 100 warmup steps.
 - RL uses roughly 40K code/math prompts.
 - Math reward is ground truth.
 - Raw compiler 0/1 feedback was judged noisy; compiler outcomes supervise a
@@ -305,7 +305,7 @@ Table 1; [repository](https://github.com/deepseek-ai/DeepSeek-V3).
 - MLA: 128 heads; KV latent 512; query latent 1,536; RoPE head 64.
 - First three FFNs dense.
 - Later MoE: 1 shared, 256 routed, 8 active; expert intermediate 2,048.
-- Auxiliary-loss-free routing bias plus sequence-level balance loss \(10^{-4}\).
+- Auxiliary-loss-free routing bias plus sequence-level balance loss $10^{-4}$.
 - One-depth multi-token prediction.
 
 ### Data and optimization [D/U]
@@ -315,22 +315,22 @@ Table 1; [repository](https://github.com/deepseek-ai/DeepSeek-V3).
   source mixture is **[U]**.
 - 128K BBPE vocabulary; cross-document packed attention; FIM probability .1.
 - AdamW .9/.95, weight decay .1.
-- 2K warmup to \(2.2\times10^{-4}\); constant through 10T; cosine over 4.3T to
-  \(2.2\times10^{-5}\); final 500B at \(2.2\times10^{-5}\) for 333B then
-  \(7.3\times10^{-6}\) for 167B.
+- 2K warmup to $2.2\times10^{-4}$; constant through 10T; cosine over 4.3T to
+  $2.2\times10^{-5}$; final 500B at $2.2\times10^{-5}$ for 333B then
+  $7.3\times10^{-6}$ for 167B.
 - Batch grows 3,072 → 15,360 sequences over first 469B.
 - MTP loss .3 for first 10T and .1 for final 4.8T.
 
 ### Context, infrastructure, and disclosed cost [D]
 
 - YaRN: 1,000 steps at 32K/batch 1,920, then 1,000 at 128K/batch 480, LR
-  \(7.3\times10^{-6}\).
+  $7.3\times10^{-6}$.
 - 2,048 H800 GPUs; FP8 mixed precision; DualPipe; eight-node expert parallel;
   ZeRO-1; no tensor parallelism.
-- Pretraining 2.664M H800-hours, estimated $5.328M.
-- Context extension 119K hours/$238K.
-- Post-training 5K hours/$10K.
-- Total 2.788M hours/$5.576M at $2/H800-hour.
+- Pretraining 2.664M H800-hours, estimated \$5.328M.
+- Context extension 119K hours/\$238K.
+- Post-training 5K hours/\$10K.
+- Total 2.788M hours/\$5.576M at \$2/H800-hour.
 
 The dollar value is a rental-equivalent for listed runs, not audited total
 development cost; it excludes prior research, ablations, data work, and failed
@@ -338,7 +338,7 @@ runs.
 
 ### Post-training [D]
 
-- 1.5M SFT examples; two epochs; cosine LR \(5\times10^{-6}\to10^{-6}\).
+- 1.5M SFT examples; two epochs; cosine LR $5\times10^{-6}\to10^{-6}$.
 - Domain reasoning experts trained with SFT and RL generate long-CoT material.
 - R1-family outputs are rejection sampled.
 - Non-reasoning data begins from V2.5 and is human-verified.
@@ -365,7 +365,7 @@ Initialization: DeepSeek-V3-Base; no cold-start SFT; same 671B/37B family.
 
 Rollout/update configuration:
 
-- policy LR \(3\times10^{-6}\);
+- policy LR $3\times10^{-6}$;
 - KL coefficient .001;
 - reported GRPO clip ratio 10;
 - temperature 1;
@@ -379,9 +379,9 @@ Rollout/update configuration:
 
 Reward:
 
-\[
+$$
 R=R_{\text{accuracy}}+R_{\text{format}}
-\]
+$$
 
 with equal weights. Math uses answer parsing/matching; code uses compiler/hidden
 tests; logic uses deterministic verification; format enforces
@@ -404,7 +404,7 @@ problems.
 
 #### Stage 2 — reasoning RL
 
-Essentially R1-Zero settings: LR \(3\times10^{-6}\), KL .001, clip ratio 10,
+Essentially R1-Zero settings: LR $3\times10^{-6}$, KL .001, clip ratio 10,
 temperature 1, 16 outputs, 32 questions/step, max 32,768, batch 512, reference
 refresh every 400 steps. A language-consistency reward measures fraction of
 words in the target language.
@@ -423,7 +423,7 @@ words in the target language.
 | Total | 804,745 | 5,355.3 overall |
 
 Roughly 600K reasoning and 200K non-reasoning examples. Train 2–3 epochs, max
-32,768, batch 128, cosine \(5\times10^{-5}\to5\times10^{-6}\).
+32,768, batch 128, cosine $5\times10^{-5}\to5\times10^{-6}$.
 
 #### Stage 4 — mixed RL
 
@@ -452,7 +452,7 @@ Code prompt pipeline:
 Reward models:
 
 - helpfulness: 66K preference pairs, R1 backbone + scalar head, batch 256, LR
-  \(6\times10^{-6}\), one epoch, max 8,192;
+  $6\times10^{-6}$, one epoch, max 8,192;
 - safety: 106K prompts with safe/unsafe point labels, same optimization;
 - prompts include public sources and opt-in user data.
 
@@ -466,21 +466,21 @@ Reward models:
   speculative rollout;
 - host/disk offload between phases.
 
-At $2/H800-hour:
+At \$2/H800-hour:
 
-- R1-Zero: 512 H800 × ~198 h ≈ 101K hours, $202K;
-- SFT data creation: 5K hours, $10K;
-- R1: 512 H800 × ~80 h ≈ 41K hours, $82K;
-- total: 147K hours, $294K.
+- R1-Zero: 512 H800 × ~198 h ≈ 101K hours, \$202K;
+- SFT data creation: 5K hours, \$10K;
+- R1: 512 H800 × ~80 h ≈ 41K hours, \$82K;
+- total: 147K hours, \$294K.
 
 This is post-training on an already trained V3, not total R1 development cost.
 
 ### 10.5 Distillation [D]
 
 The roughly 800K examples fine-tune Qwen/Llama bases for 2–3 epochs, max 32,768,
-batch 64. Initial learning rates: Qwen 1.5B \(10^{-4}\), 7B \(8\times10^{-5}\),
-14B \(7\times10^{-5}\), 32B \(6\times10^{-5}\); Llama 8B
-\(5\times10^{-5}\), 70B \(2\times10^{-5}\).
+batch 64. Initial learning rates: Qwen 1.5B $10^{-4}$, 7B $8\times10^{-5}$,
+14B $7\times10^{-5}$, 32B $6\times10^{-5}$; Llama 8B
+$5\times10^{-5}$, 70B $2\times10^{-5}$.
 
 ### 10.6 Explicit limitations [D]
 
@@ -532,10 +532,10 @@ Sections 2–3.
 
 Conversion:
 
-1. Freeze main model; train indexer only, LR \(10^{-3}\), 1,000 steps,
-   \(16\times128\text{K}\) tokens/step → 2.1B tokens.
-2. Joint sparse continuation, main LM LR \(7.3\times10^{-6}\), 15,000 steps,
-   \(480\times128\text{K}\) tokens/step → 943.7B tokens. Indexer KL gradients
+1. Freeze main model; train indexer only, LR $10^{-3}$, 1,000 steps,
+   $16\times128\text{K}$ tokens/step → 2.1B tokens.
+2. Joint sparse continuation, main LM LR $7.3\times10^{-6}$, 15,000 steps,
+   $480\times128\text{K}$ tokens/step → 943.7B tokens. Indexer KL gradients
    are detached from the main model.
 
 Total conversion exposure is about 945.8B tokens.
@@ -672,7 +672,7 @@ head-dimension-128 baseline.
 
 **MoE:** routing affinity changes from sigmoid to
 `sqrt(softplus(...))`; loss-free balancing remains with sequence balance
-\(10^{-4}\); node restrictions are removed; the first three layers hash-route.
+$10^{-4}$; node restrictions are removed; the first three layers hash-route.
 
 ### 14.3 Data and pretraining [D/U]
 
@@ -688,12 +688,12 @@ head-dimension-128 baseline.
 Optimizer:
 
 - Muon for most matrices; AdamW for embeddings, output head, RMSNorm.
-- AdamW .9/.95, epsilon \(10^{-20}\), decay .1.
+- AdamW .9/.95, epsilon $10^{-20}$, decay .1.
 - Muon momentum .95, decay .1, update RMS .18.
 
-Flash: 32T, 2K warmup, peak LR \(2.7\times10^{-4}\), cosine final
-\(2.7\times10^{-5}\). Pro: 33T, peak \(2\times10^{-4}\), final
-\(2\times10^{-5}\). Context curriculum is 4K → 16K → 64K → 1M; Flash uses
+Flash: 32T, 2K warmup, peak LR $2.7\times10^{-4}$, cosine final
+$2.7\times10^{-5}$. Pro: 33T, peak $2\times10^{-4}$, final
+$2\times10^{-5}$. Context curriculum is 4K → 16K → 64K → 1M; Flash uses
 dense attention for the first 1T before sparse conversion, while Pro retains a
 longer dense stage. MTP loss .3 then .1 at LR decay.
 
@@ -718,12 +718,12 @@ Easy-to-verify tasks use rules/tests. Hard-to-verify tasks use rubric-guided
 generative reward models; conventional scalar RMs are removed. RL is also
 applied to the generative judge.
 
-For student \(\pi_\theta\) and expert \(\pi_{E_i}\):
+For student $\pi_\theta$ and expert $\pi_{E_i}$:
 
-\[
+$$
 L_{\mathrm{OPD}}=
 \sum_iw_iD_{\mathrm{KL}}(\pi_\theta\Vert\pi_{E_i}).
-\]
+$$
 
 The student generates the trajectories, preserving student-state coverage.
 DeepSeek computes full-vocabulary reverse KL rather than only a sampled-token
@@ -855,8 +855,8 @@ V3.2-Speciale.
 ## 18. Claims to avoid
 
 - “R1 was trained entirely without SFT.” Only R1-Zero was.
-- “DeepSeek spent $5.6M to develop V3.” That is a listed-run rental-equivalent.
-- “R1 cost only $294K end to end.” That is disclosed post-training on V3.
+- “DeepSeek spent \$5.6M to develop V3.” That is a listed-run rental-equivalent.
+- “R1 cost only \$294K end to end.” That is disclosed post-training on V3.
 - “V2.5 used merge method X.” The method is unknown.
 - “V3 had 14.8T unique tokens.” It had 14.8T processed exposure.
 - “V3.2 had 85K environments.” It had 85,267 tasks and >1,800 environments.

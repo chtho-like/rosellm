@@ -27,34 +27,34 @@ policy and environment boundary.
 
 Model an episode as a POMDP
 
-\[
+$$
 \mathcal{M} = \langle \mathcal{S}, \mathcal{O}, \mathcal{A}, P, O, R,
 \rho_0, \gamma, T \rangle.
-\]
+$$
 
-At time \(t\), the environment has latent state \(s_t\). The agent receives an
-observation \(o_t \sim O(\cdot\mid s_t)\), constructs a history or learned memory
-\(h_t\), and samples an action
+At time $t$, the environment has latent state $s_t$. The agent receives an
+observation $o_t \sim O(\cdot\mid s_t)$, constructs a history or learned memory
+$h_t$, and samples an action
 
-\[
+$$
 a_t \sim \pi_\theta(\cdot\mid h_t), \qquad
 s_{t+1} \sim P(\cdot\mid s_t,a_t).
-\]
+$$
 
 The trajectory is
 
-\[
+$$
 \tau=(s_0,o_0,h_0,a_0,r_0,\ldots,s_T,o_T),
-\]
+$$
 
 and the basic objective is
 
-\[
+$$
 J(\theta)=\mathbb{E}_{\tau\sim p_\theta(\tau)}
 \left[\sum_{t=0}^{T-1}\gamma^t r_t\right].
-\]
+$$
 
-For an autoregressive LLM, each semantic action \(a_t\) is itself a token
+For an autoregressive LLM, each semantic action $a_t$ is itself a token
 sequence. Agentic RL therefore has at least three clocks:
 
 1. **token time** inside an LLM generation;
@@ -96,7 +96,7 @@ higher level is often caused by an unchecked assumption lower in the tree.
 ### Layer B — Classical sequential decision making
 
 1. Markov chains, MDPs, POMDPs, belief state, and history state.
-2. Return, value \(V^\pi\), action value \(Q^\pi\), and advantage \(A^\pi\).
+2. Return, value $V^\pi$, action value $Q^\pi$, and advantage $A^\pi$.
 3. Bellman expectation and optimality equations.
 4. Dynamic programming, Monte Carlo, temporal difference learning, and
    eligibility traces.
@@ -306,15 +306,17 @@ table from being mistaken for a newly disclosed training recipe.
 
 | Phase | Read | Build | Exit criterion |
 |---|---|---|---|
-| 1 | [Terminology](terminology.md) and classical RL prerequisites | tabular bandit and MDP | Explain why a multi-turn tool task is not a contextual bandit. |
-| 2 | [Mathematics](mathematical-foundations.md) | REINFORCE on a toy sequence task | Derive the estimator and measure its variance. |
-| 3 | [Algorithms](algorithms.md) | PPO, RLOO, and GRPO on identical samples | Explain every normalization, mask, and ratio. |
-| 4 | [Data and environments](data-and-environments.md) | deterministic tool sandbox | Reset/replay a trajectory bit-for-bit and prove split isolation. |
+| 0 | The [repository roadmap](../learning-roadmap.md), especially the five-pass loop and Levels 0–6 | the prerequisite mastery checks | Identify every missing probability, optimization, transformer, and classical-RL dependency before specialization. The levels are checklists, not complete prerequisite textbooks; use the [bibliography](bibliography.md) as a source rail. |
+| 1 | [Curriculum map](index.md), [terminology](terminology.md), and [history](history.md) | a timeline and concept map | Explain why a multi-turn tool task is not a contextual bandit and place each algorithm in its historical setting. |
+| 2 | [Mathematical foundations](mathematical-foundations.md) and [step-by-step derivations](derivations-and-code.md) | REINFORCE on a toy sequence task | Derive the estimator, trace its tensor implementation, and measure its variance. |
+| 3 | [Algorithms](algorithms.md) | PPO, RLOO, and GRPO on identical samples | Explain every normalization, mask, ratio, and estimator assumption. |
+| 4 | [Data and environments](data-and-environments.md) | deterministic tool sandbox | Reset and replay a trajectory bit-for-bit and prove split isolation. |
 | 5 | [Training pipeline](training-pipeline.md) | multi-turn rollout collector | Preserve exact tokens, tool boundaries, rewards, and policy-version identifiers. |
-| 6 | [Systems](systems.md) | asynchronous rollout/trainer prototype | Quantify Graphics Processing Unit (GPU) idle time, queue delay, and policy staleness. |
-| 7 | [Evaluation and safety](evaluation-and-safety.md) | hidden stochastic test suite | Report uncertainty, cost, and a failure taxonomy. |
-| 8 | [Case studies](case-studies/index.md) | reconstruct one model generation and reproduce one disclosed mechanism at small scale | Separate disclosed, confirmed-artifact, reproduced, inferred, and unknown claims; preserve the exact benchmark and inference protocol. |
-| 9 | [Source lab](source-lab.md) | extend `roserlhf` | Pass numerical, invariance, and end-to-end tests. |
+| 6 | The roadmap's [inference-systems dependencies](../learning-roadmap.md#level-8-inference-systems), then [systems](systems.md) | asynchronous rollout/trainer prototype | Quantify GPU idle time, queue delay, memory, throughput, and policy staleness. |
+| 7 | [Evaluation and safety](evaluation-and-safety.md) | hidden stochastic test suite | Report uncertainty, cost, contamination controls, and a failure taxonomy. |
+| 8 | [Source lab](source-lab.md) | extend `roserlhf` | Trace one token through rollout and update, then pass numerical, invariance, and end-to-end tests. |
+| 9 | [Research standard](../research-method.md) and [evidence matrix](case-studies/index.md) | a five-label evidence ledger | Separate disclosed, confirmed-artifact, reproduced, inferred, and unknown claims. |
+| 10 | [DeepSeek](case-studies/deepseek.md), [GLM](case-studies/glm.md), [Kimi](case-studies/kimi.md), western labs, then open industry | reconstruct one generation and reproduce one disclosed mechanism at small scale | Preserve exact source versions, training stages, benchmark protocol, assumptions, and unknowns without inventing a private recipe. |
 
 ## What “source-level understanding” means
 

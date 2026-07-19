@@ -174,6 +174,12 @@ An agentic episode includes state-changing environment interaction rather than
 only one prompt and one response. Study the complete
 [Agentic RL curriculum](agentic-rl/index.md):
 
+Before the curriculum's systems phase, complete the Level 8 topics on
+prefill/decode, KV-cache layout, batching, scheduling, parallel inference, and
+serving reliability. Level 7 defines the scientific specialization; this
+explicit dependency edge supplies the inference machinery used by rollout
+workers.
+
 - **Partially Observable Markov Decision Process (POMDP)** formulation and
   multiple time scales;
 - planning, memory, tool use, perception, reflection, and self-improvement;

@@ -59,11 +59,11 @@ TARGET_PATHS = tensor([
 
 The policy stores logits with shape
 
-\[
+$$
 [N_{\text{tasks}},T,N_{\text{actions}}]=[4,3,2].
-\]
+$$
 
-For each task, the collector samples \(G\) complete trajectories. The exact
+For each task, the collector samples $G$ complete trajectories. The exact
 verifier returns one only if all three actions match. This gives a sparse,
 delayed terminal reward. The policy receives no step-level hint.
 
@@ -77,7 +77,7 @@ policy does not change the rollout or estimator contract.
 
 `collect_rollouts` runs under `torch.no_grad()`:
 
-1. repeat each task ID \(G\) times;
+1. repeat each task ID $G$ times;
 2. compute behavior logits/probabilities;
 3. sample each turn;
 4. store sampled actions;
@@ -85,7 +85,7 @@ policy does not change the rollout or estimator contract.
 6. execute the verifier;
 7. return an immutable logical batch.
 
-For \(B\) tasks, shapes are:
+For $B$ tasks, shapes are:
 
 | Tensor | Shape |
 |---|---:|
@@ -102,10 +102,10 @@ quantization, routing, or changed weights can alter the distribution.
 
 Reshape reward to `[B, G]` and compute
 
-\[
+$$
 A_{b,i}=\frac{R_{b,i}-\overline R_b}
 {\operatorname{std}(R_{b,1:G})+\epsilon}.
-\]
+$$
 
 `group_standardized_advantages` uses population standard deviation and returns
 exactly zero when a group is uniform. That no-signal behavior is an explicit
@@ -115,9 +115,9 @@ The trajectory advantage has shape `[B * G]`. Because the toy has only terminal
 reward and no critic/process reward, it is copied to all three generated action
 positions:
 
-\[
+$$
 A_{i,0}=A_{i,1}=A_{i,2}=A_i.
-\]
+$$
 
 This is trajectory-level credit broadcast to tokens, not evidence that every
 turn was equally causal.
@@ -127,10 +127,10 @@ turn was equally causal.
 After collection, call the trainable policy again on the exact task/action
 sequence. Initially current weights equal behavior weights, so
 
-\[
+$$
 \log\pi_\theta(a)-\log\pi_{\text{old}}(a)=0,
 \qquad \rho=1.
-\]
+$$
 
 The unit tests make ratio-one an invariant. In a real disaggregated system, a
 failure indicates mismatched weights, tokenizer/template, positions, attention,
@@ -153,25 +153,25 @@ also have length `sequence_length - 1`.
 
 The implementation computes
 
-\[
+$$
 \rho_{i,j}=
 \exp(\log\pi_\theta(x_{i,j})-
 \log\pi_{\text{old}}(x_{i,j})),
-\]
+$$
 
-\[
+$$
 s_{i,j}=\min\left(
 \rho_{i,j}A_{i,j},
 \operatorname{clip}(\rho_{i,j},1-\epsilon_l,1+\epsilon_h)A_{i,j}
 \right),
-\]
+$$
 
 and minimizes the negative globally token-normalized mean:
 
-\[
+$$
 L=-\frac{\sum_{i,j}m_{i,j}s_{i,j}}
 {\sum_{i,j}m_{i,j}}.
-\]
+$$
 
 The test `test_clipping_uses_advantage_sign` verifies the asymmetric effect of
 the `min`: for positive advantage, a ratio above the upper bound stops adding
@@ -179,7 +179,7 @@ gain; for negative advantage, the more negative unclipped term remains.
 
 Diagnostics:
 
-- non-negative approximate KL \(\rho-1-\log\rho\);
+- non-negative approximate KL $\rho-1-\log\rho$;
 - clip fraction;
 - mean ratio;
 - objective and minimized loss.
@@ -220,12 +220,12 @@ Mask mistakes train qualitatively wrong behavior:
   could continue;
 - `valid_mask=False`: padding; not a state transition at all.
 
-Example with \(\gamma=.5\), rewards `[1, 2]`, no true terminal, bootstrap 10:
+Example with $\gamma=.5$, rewards `[1, 2]`, no true terminal, bootstrap 10:
 
-\[
+$$
 G_1=2+.5(10)=7,
 \qquad G_0=1+.5(7)=4.5.
-\]
+$$
 
 Marking the time limit terminal would instead produce `[2, 2]` and bias the
 critic/actor against states near the collector limit.
@@ -234,21 +234,21 @@ critic/actor against states near the collector limit.
 
 For each step in reverse:
 
-\[
+$$
 \delta_t=r_t+\gamma(1-d_t)V_{t+1}-V_t,
-\]
+$$
 
-\[
+$$
 \hat A_t=\delta_t+\gamma\lambda(1-d_t)\hat A_{t+1}.
-\]
+$$
 
 The code preserves `next_value` and `next_advantage` while crossing padding.
-With \(\lambda=1\) and a true final terminal, tests prove
+With $\lambda=1$ and a true final terminal, tests prove
 
-\[
+$$
 \hat A_t=G_t-V_t,
 \qquad \text{value target}=G_t.
-\]
+$$
 
 Before optimizing a large critic, reproduce this equality on a hand-created
 batch and test time-limit behavior.
@@ -259,23 +259,23 @@ SAO removes the rollout-group synchronization barrier: one prompt produces one
 trajectory, and that trajectory may enter training immediately. The stored
 behavior log-probability and the recomputed current log-probability define
 
-\[
+$$
 r_t=\exp\!\left(
 \log\pi_\theta(a_t\mid s_t)-
 \log\pi_{\text{rollout}}(a_t\mid s_t)
 \right).
-\]
+$$
 
 **Direct Double-Sided Importance Sampling (DIS)** retains a sampled action only
 inside a strict open interval:
 
-\[
+$$
 f(r_t)=
 \begin{cases}
 r_t,&1-\epsilon_l<r_t<1+\epsilon_h,\\
 0,&\text{otherwise}.
 \end{cases}
-\]
+$$
 
 `direct_double_sided_mask` tests those exact inequalities. A ratio exactly on
 either boundary is rejected. This is categorically different from PPO's clipped
@@ -284,10 +284,10 @@ whereas DIS makes either stale tail contribute zero.
 
 `sao_policy_loss` implements the paper's printed token objective
 
-\[
+$$
 J(\theta)=\frac{1}{\sum_t m_t}
 \sum_t m_t f(r_t)\hat A_t\log\pi_\theta(a_t\mid s_t).
-\]
+$$
 
 Three details are intentionally visible:
 
@@ -296,41 +296,43 @@ Three details are intentionally visible:
    staleness changes.
 2. Rollout log-probabilities are detached immutable evidence. Gradients never
    flow into the behavior policy record.
-3. The SAO paper does not state whether \(f(r_t)\) is stop-gradient. With the
+3. The SAO paper does not state whether $f(r_t)$ is stop-gradient. With the
    repository default, `detach_ratio=True`, a trusted token's derivative with
-   respect to its current log-probability \(\ell_t\) is proportional to
-   \(r_t\hat A_t\). A literal autograd reading instead gives
+   respect to its current log-probability $\ell_t$ is proportional to
+   $r_t\hat A_t$. A literal autograd reading is different.
 
-   \[
-   \frac{\partial}{\partial\ell_t}
-   [r_t\hat A_t\ell_t]
-   =r_t\hat A_t(1+\ell_t),
-   \]
+For the literal-autograd case in item 3,
 
-   which can even reverse sign because log-probabilities are negative. The
-   `detach_ratio=False` research switch and its gradient test expose this
-   ambiguity; neither setting should be attributed to the production GLM-5.2
-   implementation without source evidence.
+$$
+\frac{\partial}{\partial\ell_t}
+[r_t\hat A_t\ell_t]
+=r_t\hat A_t(1+\ell_t),
+$$
+
+which can even reverse sign because log-probabilities are negative. The
+`detach_ratio=False` research switch and its gradient test expose this
+ambiguity; neither setting should be attributed to the production GLM-5.2
+implementation without source evidence.
 
 SAO restores a critic because a single rollout has no within-prompt group
 baseline. For an agent transcript, observations are not policy actions and
-must not become GAE loss positions. Let \(a_{i,N}\) be the last token of action
-\(i\), and let \(a_{i+1,0}\) be the first policy token after the next tool or
+must not become GAE loss positions. Let $a_{i,N}$ be the last token of action
+$i$, and let $a_{i+1,0}$ be the first policy token after the next tool or
 environment observation. The paper bridges those two policy boundaries:
 
-\[
+$$
 \delta_i=r_i+\gamma(1-d_i)V(a_{i+1,0})-V(a_{i,N}),
-\]
+$$
 
-\[
+$$
 \hat A_i=\delta_i+
 \gamma\lambda(1-d_i)\hat A_{i+1}.
-\]
+$$
 
 `skip_observation_generalized_advantage_estimation` takes one entry per
 semantic action. Tests prove that a true terminal removes the bootstrap, a
 time-limit truncation preserves it, padding is absent time rather than a false
-terminal, and \(\lambda=0\) reduces to one-step temporal-difference error.
+terminal, and $\lambda=0$ reduces to one-step temporal-difference error.
 The observation still affects the next value through the model prefix; only its
 tokens are skipped as policy-loss positions.
 
@@ -347,9 +349,10 @@ sequence_ratio = sequence_log_ratio.exp()
 
 Clipping, advantage multiplication, and the outer mean then operate once per
 response. This gives every response equal outer weight. A two-token response
-with token ratios `[4, 1]` has sequence ratio two, not (4+1), (4\), or
-(4\times1). A one-token response with ratio one receives the same outer weight
-as that two-token response.
+with token ratios `[4, 1]` has sequence ratio
+$\sqrt{4\times1}=2$, not the arithmetic mean $2.5$, sum $5$, or raw
+product $4$. A one-token response with ratio one receives the same outer
+weight as that two-token response.
 
 `gspo_token_policy_loss` reproduces the paper's stop-gradient carrier:
 
@@ -395,9 +398,9 @@ gradients to remain absent.
 
 For RLOO:
 
-\[
+$$
 A_i=R_i-\frac{1}{G-1}\sum_{k\ne i}R_k.
-\]
+$$
 
 The baseline excludes the current trajectory. For standardized GRPO-like
 advantages, current reward participates in the mean/std. These estimators have
@@ -418,16 +421,16 @@ Hold samples and loss normalization fixed.
 
 `sequence_log_ratio` exposes two choices:
 
-\[
+$$
 \Delta_{\text{sum}}=\sum_j
 [\log\pi_\theta(x_j)-\log\pi_{\text{old}}(x_j)],
-\]
+$$
 
 or
 
-\[
+$$
 \Delta_{\text{mean}}=\frac1L\Delta_{\text{sum}}.
-\]
+$$
 
 Exponentiating the sum gives the exact sampled sequence probability ratio but
 can explode/vanish with length. Exponentiating the mean gives a geometric-mean

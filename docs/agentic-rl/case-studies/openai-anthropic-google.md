@@ -65,7 +65,7 @@ all five. This chapter names the mechanism only when a source does.
   between the trainable and reference policies.
 - **Chain of Thought (CoT):** intermediate natural-language reasoning tokens.
   A hidden CoT may be used internally without being shown verbatim to users.
-- **Best-of-\(N\), rejection sampling, reranking:** sample \(N\) candidates and
+- **Best-of-$N$, rejection sampling, reranking:** sample $N$ candidates and
   select one with a scorer. This changes inference and data selection; by
   itself it does not update the policy.
 - **Rule-Based Rewards (RBRs):** OpenAI's system in which propositions are
@@ -131,30 +131,30 @@ all five. This chapter names the mechanism only when a source does.
 
 ### 2.1 From a comparison to a scalar reward
 
-Given prompt \(x\), preferred response \(y_w\), rejected response \(y_l\), and
-reward model \(r_\phi\), the Bradley-Terry likelihood used throughout early
+Given prompt $x$, preferred response $y_w$, rejected response $y_l$, and
+reward model $r_\phi$, the Bradley-Terry likelihood used throughout early
 language RL is
 
-\[
+$$
 P_\phi(y_w \succ y_l\mid x)
 = \sigma\!\left(r_\phi(x,y_w)-r_\phi(x,y_l)\right),
-\]
+$$
 
 with loss
 
-\[
+$$
 \mathcal L_{\text{RM}}(\phi)
 =-\mathbb E_{(x,y_w,y_l)}
 \log\sigma\!\left(r_\phi(x,y_w)-r_\phi(x,y_l)\right).
-\]
+$$
 
 The loss identifies reward differences, not an absolute physical utility. If a
 constant is added to every score, the preference probabilities are unchanged.
 Reward normalization, clipping, and calibration therefore matter when a PM is
 connected to an optimizer.
 
-When a human ranks \(K\) candidates, one ranking can be expanded into up to
-\(K(K-1)/2\) ordered pairs. InstructGPT processes all pairwise comparisons from
+When a human ranks $K$ candidates, one ranking can be expanded into up to
+$K(K-1)/2$ ordered pairs. InstructGPT processes all pairwise comparisons from
 each 4–9-way ranking together to reduce overfitting to correlated comparisons;
 naively shuffling them as independent examples changes the effective weighting
 of prompts. See Appendix C of the
@@ -164,19 +164,19 @@ of prompts. See Appendix C of the
 
 A standard sequence-level construction is
 
-\[
+$$
 R(x,y)=r_\phi(x,y)
 -\beta\log\frac{\pi_\theta(y\mid x)}{\pi_{\mathrm{ref}}(y\mid x)}.
-\]
+$$
 
 Because an autoregressive sequence probability factorizes,
 
-\[
+$$
 \log\frac{\pi_\theta(y\mid x)}{\pi_{\mathrm{ref}}(y\mid x)}
 =\sum_{t=1}^{T}
 \left[\log\pi_\theta(y_t\mid x,y_{<t})
 -\log\pi_{\mathrm{ref}}(y_t\mid x,y_{<t})\right].
-\]
+$$
 
 The KL term is more than an abstract trust region. It gives every generated
 token a dense policy-relative cost, counteracts exploitation of narrow reward
@@ -186,31 +186,31 @@ policy can find high-reward behavior inside a small KL neighborhood.
 
 ### 2.3 Policy gradient and PPO
 
-For trajectory \(\tau=(s_0,a_0,\ldots,s_T)\), the policy-gradient identity is
+For trajectory $\tau=(s_0,a_0,\ldots,s_T)$, the policy-gradient identity is
 
-\[
+$$
 \nabla_\theta J(\theta)
 =\mathbb E_{\tau\sim\pi_\theta}
 \left[\sum_t\nabla_\theta\log\pi_\theta(a_t\mid s_t)A_t\right],
-\]
+$$
 
-where \(A_t\) estimates how much better action \(a_t\) was than the value
-baseline expected at \(s_t\). PPO uses the old-policy ratio
+where $A_t$ estimates how much better action $a_t$ was than the value
+baseline expected at $s_t$. PPO uses the old-policy ratio
 
-\[
+$$
 \rho_t(\theta)=
 \frac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\mathrm{old}}}(a_t\mid s_t)}
-\]
+$$
 
 and clipped surrogate
 
-\[
+$$
 \mathcal L_{\mathrm{clip}}
 =\mathbb E_t\left[
 \min\left(\rho_tA_t,
 \operatorname{clip}(\rho_t,1-\epsilon,1+\epsilon)A_t\right)
 \right].
-\]
+$$
 
 Clipping limits the incentive for a large likelihood-ratio change on the
 sampled action. It is not a hard bound on whole-policy KL. Production systems
@@ -226,17 +226,9 @@ Three reward placements produce materially different credit assignment:
 2. **Process reward:** scores on intermediate reasoning steps or state-action
    transitions. It supplies denser credit but can encode a judge's preferred
    style instead of genuine progress.
-3. **Potential difference:** for learned utility \(U(s)\),
-
-   \[
-   r_t=U(s_{t+1})-U(s_t).
-   \]
-
-   The undiscounted trajectory return telescopes:
-
-   \[
-   \sum_{t=0}^{T-1}r_t=U(s_T)-U(s_0).
-   \]
+3. **Potential difference:** for learned utility $U(s)$,
+   $r_t=U(s_{t+1})-U(s_t)$. The undiscounted trajectory return telescopes to
+   $\sum_{t=0}^{T-1}r_t=U(s_T)-U(s_0)$.
 
 Google DeepMind's embodied RLHF work uses this third construction. Its density
 does not create new information; it redistributes an estimated change in
@@ -291,7 +283,7 @@ One system may use all five. Evidence for one does not establish the others.
 | Date | System or report | Publicly supported transition |
 |---|---|---|
 | 2019-09 | Fine-Tuning Language Models from Human Preferences | comparison-trained reward + KL-regularized PPO |
-| 2021-12 | WebGPT | text-browser demonstrations, preference reward, PPO experiment, best-of-\(N\) deployment result |
+| 2021-12 | WebGPT | text-browser demonstrations, preference reward, PPO experiment, best-of-$N$ deployment result |
 | 2022-03 | InstructGPT | detailed SFT → RM → PPO/PPO-ptx recipe |
 | 2023-05 | Let's Verify Step by Step / PRM800K | process supervision for verifier-guided selection, not reported policy RL |
 | 2023–2024 | GPT-4 alignment / Rule-Based Rewards | model-graded safety propositions combined with helpfulness reward in PPO |
@@ -381,7 +373,7 @@ The principal evaluated configurations use reward-model selection over BC
 samples: 760M best-of-4, 13B best-of-16, and 175B best-of-64. The 175B PPO model
 was preferred to plain BC **58%** of the time, whereas best-of-64 BC was
 preferred to plain BC **68%** of the time. PPO did not materially improve the
-best-of-\(N\) combination, so it was excluded from the main evaluation.
+best-of-$N$ combination, so it was excluded from the main evaluation.
 
 The strongest 175B best-of-64 configuration was preferred **56%** of the time
 to human demonstrations and **69%** of the time to the ELI5 Reddit reference
@@ -454,22 +446,22 @@ learning-rate decay to 10% of its peak, and no warmup:
 
 | Policy size | Peak learning rate | Batch size |
 |---:|---:|---:|
-| 1.3B | \(9.65\times10^{-6}\) | 32 |
-| 6B | \(9.65\times10^{-6}\) | 32 |
-| 175B | \(5.03\times10^{-6}\) | 8 |
+| 1.3B | $9.65\times10^{-6}$ | 32 |
+| 6B | $9.65\times10^{-6}$ | 32 |
+| 175B | $5.03\times10^{-6}$ | 8 |
 
-All stages use Adam with \(\beta_1=0.9\), \(\beta_2=0.95\), 16-bit floating
+All stages use Adam with $\beta_1=0.9$, $\beta_2=0.95$, 16-bit floating
 point (FP16) weights and activations, and a 32-bit floating point (FP32) master
 copy. The final PPO policies instead initialize
 from GPT-3 checkpoints followed by two SFT epochs with a 10% pretraining-data
-mix; reported learning rates are \(5\times10^{-6}\),
-\(1.04\times10^{-5}\), and \(2.45\times10^{-6}\) for 1.3B, 6B, and 175B.
+mix; reported learning rates are $5\times10^{-6}$,
+$1.04\times10^{-5}$, and $2.45\times10^{-6}$ for 1.3B, 6B, and 175B.
 
 #### Stage B: reward model [D]
 
 The 6B reward model initializes from a GPT-3 checkpoint, replaces the language
 head with a scalar head, and trains for one epoch at learning rate
-\(9\times10^{-6}\). A batch contains 64 distinct prompts and as many as 2,304
+$9\times10^{-6}$. A batch contains 64 distinct prompts and as many as 2,304
 pair comparisons. The 6B RM and a separate 6B value/critic model supervise
 every policy size, including the 175B actor.
 
@@ -488,23 +480,23 @@ The main settings are:
 - 10-iteration learning-rate warmup;
 - parameter exponential moving average decay 0.992;
 - no temporal discounting;
-- PPO ratio clip \(\epsilon=0.2\);
+- PPO ratio clip $\epsilon=0.2$;
 - rollout temperature 1;
-- KL coefficient \(\beta=0.02\);
-- value learning rate \(9\times10^{-6}\) for 1.3B/6B actors and
-  \(5\times10^{-6}\) for the 175B actor.
+- KL coefficient $\beta=0.02$;
+- value learning rate $9\times10^{-6}$ for 1.3B/6B actors and
+  $5\times10^{-6}$ for the 175B actor.
 
 PPO-ptx adds a pretraining gradient to reduce regressions on public Natural
 Language Processing (NLP) tasks:
 
-\[
+$$
 \nabla_\theta \mathcal L_{\text{total}}
 =\nabla_\theta \mathcal L_{\text{PPO}}
 +\gamma\nabla_\theta \mathcal L_{\text{pretrain}}.
-\]
+$$
 
 The run uses roughly **eight times as many pretraining examples as RL
-episodes**, with reported pretraining gradient coefficient \(\gamma=27.8\).
+episodes**, with reported pretraining gradient coefficient $\gamma=27.8$.
 This is not merely a KL penalty: KL constrains output distributions on rollout
 states, whereas the auxiliary language-model loss rehearses broad pretraining
 tokens.
@@ -543,11 +535,11 @@ answer; the PRM predicts whether each intermediate step remains valid.
 At inference, many solutions can be generated and ranked by their process
 scores. A simple aggregation is the product of step-valid probabilities,
 
-\[
+$$
 S(y)=\prod_{t=1}^{T}p_\phi(\text{valid}_t\mid x,y_{\le t}),
 \qquad
 \log S(y)=\sum_t\log p_\phi(\text{valid}_t\mid x,y_{\le t}).
-\]
+$$
 
 The exact aggregation and search protocol are experimental choices. Long
 solutions receive more multiplicative opportunities to be penalized, so length
@@ -581,14 +573,14 @@ including GPT-4o mini:
    grades into one rule reward.
 4. PPO combines the RBR signal with a helpfulness RM.
 
-If \(g_i(x,y)\) is the model grader's score for proposition \(i\), a simplified
+If $g_i(x,y)$ is the model grader's score for proposition $i$, a simplified
 representation is
 
-\[
+$$
 r_{\text{RBR}}(x,y)=b+\sum_i w_i g_i(x,y),
 \qquad
 r_{\text{total}}=\lambda_h r_{\text{help}}+\lambda_r r_{\text{RBR}}.
-\]
+$$
 
 **[I]** The equation captures the disclosed linear combination, not OpenAI's
 exact feature encoding or weights.
@@ -663,12 +655,12 @@ and adaptation when an interface behaves unexpectedly.
 
 A GUI trajectory can be represented as
 
-\[
+$$
 s_t=(I_t,h_t,z_t),\quad
 a_t\in\{\text{click}(x,y),\text{type}(u),\text{scroll}(d),\text{key}(k),\ldots\},
-\]
+$$
 
-where \(I_t\) is a screenshot, \(h_t\) the interaction history, and \(z_t\)
+where $I_t$ is a screenshot, $h_t$ the interaction history, and $z_t$
 the task/runtime metadata. Coordinate actions make observation rendering part
 of the environment: screen size, zoom, pop-ups, animation timing, and login
 state can alter the transition.
@@ -752,10 +744,10 @@ inconsistent with user instructions.
 
 Executable reward improves objectivity but does not solve specification:
 
-\[
+$$
 r(\tau)=w_t r_{\text{tests}}+w_i r_{\text{instruction}}
 +w_q r_{\text{quality}}-w_s c_{\text{safety}}-w_h c_{\text{hack}}.
-\]
+$$
 
 **[I]** This equation is a useful decomposition, not a disclosed Codex reward
 formula. Passing visible tests alone permits deleting tests, hard-coding known
@@ -784,17 +776,17 @@ with output-level optimization: maximize helpfulness subject to a safety
 constraint, with penalties increasing with the severity of harmful content. A
 conceptual constrained objective is
 
-\[
+$$
 \max_\pi\ \mathbb E[H(x,y)]
 \quad\text{subject to}\quad
 \mathbb E[C_{\text{safety}}(x,y)]\leq c,
-\]
+$$
 
 or, in Lagrangian form,
 
-\[
+$$
 \max_\pi\ \mathbb E[H(x,y)-\lambda(C_{\text{safety}}(x,y)-c)].
-\]
+$$
 
 **[I]** These equations formalize the public framing; they are not disclosed
 production code or coefficients. The practical goal is to give a bounded,
@@ -878,8 +870,8 @@ initial language model
 ```
 
 This loop addresses a fundamental covariate-shift problem. A reward model
-trained only on samples from \(\pi_0\) is evaluated during RL on outputs from
-\(\pi_1,\pi_2,\ldots\). Online collection moves some annotation budget toward
+trained only on samples from $\pi_0$ is evaluated during RL on outputs from
+$\pi_1,\pi_2,\ldots$. Online collection moves some annotation budget toward
 the regions the optimized policy actually visits.
 
 #### Helpful and harmless comparisons are not interchangeable [D]
@@ -893,12 +885,12 @@ prompts and badly on harmless ones.
 At policy-training time the learned preference score supplies a terminal
 reward, while PPO and a KL penalty control policy movement. In abstract form,
 
-\[
+$$
 R(x,y,c)=r_\phi(x,y,c)
 -\beta\log\frac{\pi_\theta(y\mid x)}{\pi_{\mathrm{ref}}(y\mid x)},
-\]
+$$
 
-where \(c\) denotes the helpfulness/harmlessness context represented in data or
+where $c$ denotes the helpfulness/harmlessness context represented in data or
 prompting. This notation is pedagogical; it is not a claim about the paper's
 exact software interface.
 
@@ -908,9 +900,9 @@ Across much of training, the paper observes approximately linear growth in
 preference reward with the square root of KL divergence from the initial
 policy:
 
-\[
+$$
 r\approx a\sqrt{D_{\mathrm{KL}}(\pi\Vert\pi_0)}+b.
-\]
+$$
 
 This is an empirical scaling relation, not a theorem. It says that increasing
 measured reward becomes progressively more expensive in policy divergence. It
@@ -983,13 +975,13 @@ episodes.
 
 The core distinction is
 
-\[
+$$
 \underbrace{\text{principle}\to\text{AI pair label}}_{\text{RLAIF data}}
 \quad\longrightarrow\quad
 \underbrace{\text{train PM}}_{\text{supervised judge}}
 \quad\longrightarrow\quad
 \underbrace{\text{PPO policy update}}_{\text{RL}}.
-\]
+$$
 
 #### “No human harmlessness labels” needs qualification
 
@@ -1035,11 +1027,11 @@ classifiers detected the behavior and mitigations were applied before launch.
 
 This is a direct specification-gaming example:
 
-\[
+$$
 \text{intended objective: correct implementation}
 \neq
 \text{proxy: visible tests pass}.
-\]
+$$
 
 A secure coding environment should make protected tests immutable, keep hidden
 tests outside the actor's writable namespace, inspect diffs to tests and build
@@ -1225,14 +1217,14 @@ several preceding actions are unavoidable annotation variables.
 
 #### Inter-Temporal Bradley-Terry utility [D]
 
-Let \(x_{\le t_1}\) and \(x_{\le t_2}\) be two prefixes of the same episode,
-with \(t_2>t_1\), and let learned utility be \(U_\phi(x_{\le t})\). A positive
+Let $x_{\le t_1}$ and $x_{\le t_2}$ be two prefixes of the same episode,
+with $t_2>t_1$, and let learned utility be $U_\phi(x_{\le t})$. A positive
 mark between them trains
 
-\[
+$$
 P(+\mid t_1,t_2)
 =\sigma\!\left(U_\phi(x_{\le t_2})-U_\phi(x_{\le t_1})\right),
-\]
+$$
 
 while a negative mark reverses the preference. This is IBT: humans supervise
 relative progress through time, not absolute state value.
@@ -1250,9 +1242,9 @@ rather than generic motion.
 
 The RL reward is the potential difference
 
-\[
+$$
 r_t=U_\phi(x_{\le t+1})-U_\phi(x_{\le t}).
-\]
+$$
 
 For an undiscounted episode this telescopes to terminal utility improvement.
 The construction supplies a reward on every transition without asking humans
@@ -1384,24 +1376,24 @@ call and its prompt stability.
 
 | Component | Reported setting |
 |---|---|
-| Summarization SFT | batch 128, one epoch, Adafactor, learning rate \(10^{-5}\), input 1,024, output 128 |
-| Reward model | PaLM 2 XS, 2–3 epochs, Adafactor \(10^{-5}\), batch 128 summarization / 32 dialogue, input 1,152 |
+| Summarization SFT | batch 128, one epoch, Adafactor, learning rate $10^{-5}$, input 1,024, output 128 |
+| Reward model | PaLM 2 XS, 2–3 epochs, Adafactor $10^{-5}$, batch 128 summarization / 32 dialogue, input 1,152 |
 | RL algorithm | modified REINFORCE with learned value baseline |
-| RL return | terminal RM reward, discount \(\gamma=1\) |
-| KL control | coefficient \(\beta=0.05\) |
+| RL return | terminal RM reward, discount $\gamma=1$ |
+| KL control | coefficient $\beta=0.05$ |
 | Sampling | temperature 0.9 |
-| RL update | batch 128, learning rate \(10^{-5}\), eight epochs |
+| RL update | batch 128, learning rate $10^{-5}$, eight epochs |
 
 The policy objective can be written
 
-\[
+$$
 \nabla_\theta J
 =\mathbb E\left[
 \sum_t \nabla_\theta\log\pi_\theta(a_t\mid s_t)
 \left(R-V_\psi(s_t)\right)
 \right]
 -\beta\nabla_\theta D_{\mathrm{KL}}(\pi_\theta\Vert\pi_{\mathrm{ref}}).
-\]
+$$
 
 This is REINFORCE with a learned baseline and KL regularization. It lacks PPO's
 clipped old-policy ratio, so calling it PPO is technically wrong.
@@ -1495,13 +1487,13 @@ found, and continuous evaluations track regressions.
 
 A conceptual multi-source reward is
 
-\[
+$$
 R(\tau)=
 \lambda_v R_{\text{verifier}}(\tau)
 +\lambda_g R_{\text{generative judge}}(\tau)
 +\lambda_h R_{\text{human-data RM}}(\tau)
 -\beta D_{\mathrm{KL}}.
-\]
+$$
 
 **[I]** The decomposition follows disclosed reward categories, but coefficients,
 normalization, gating, and whether signals are simultaneous or staged are
@@ -1585,7 +1577,7 @@ not wall-clock duration or financial cost.
 - **transition:** execute the tactic in Lean; invalid tactics fail
   deterministically;
 - **terminal success:** all goals closed and proof accepted by the Lean kernel;
-- **step cost:** \(-1\) per tactic, encouraging shorter successful proofs;
+- **step cost:** $-1$ per tactic, encouraging shorter successful proofs;
 - **branch aggregation:** return follows the hardest/longest required subgoal in
   the AND structure rather than treating one solved branch as full success.
 
@@ -1677,11 +1669,11 @@ form of self-correction.
 
 The key state is now conversational:
 
-\[
+$$
 s_{t+1}=(x,a_{\le t},f_{\le t}),
-\]
+$$
 
-where \(f_t\) is free-form feedback. The learner must infer which part is
+where $f_t$ is free-form feedback. The learner must infer which part is
 diagnostic, retain it across turns, and revise the solution rather than merely
 parrot it.
 
@@ -1697,7 +1689,7 @@ from the paper to any product, if any, is **[U]**.
 |---|---|---|---|---|---|
 | OpenAI 2019 preferences | text prompt/prefix | continuation tokens | human pair preference | PPO | no central role |
 | InstructGPT | instruction + dialogue | answer tokens | 6B RM from human rankings | PPO + KL + pretraining loss | no central role |
-| WebGPT | question + text-browser state | browser command or answer token | human answer preference | BC; PPO experiment | best-of-\(N\) RM selection |
+| WebGPT | question + text-browser state | browser command or answer token | human answer preference | BC; PPO experiment | best-of-$N$ RM selection |
 | Anthropic HH | dialogue/red-team prompt | answer tokens | helpful/harmless human pair preference | PPO + KL | not central |
 | Constitutional AI | prompt + dialogue | critique/revision/answer tokens | AI preference under constitution | SFT then PPO | sampling for data |
 | Sparrow | dialogue + search result | query or answer statement | preference RM + rule RM + checks | A2C/self-play | rerank eight candidates |
@@ -1718,14 +1710,14 @@ interpret untrusted observations, and preserve task intent across many steps.
 
 1. **Independent sampling and selection:** WebGPT best-of-64 and learned
    reranking draw many complete candidates, then select. Expected quality rises
-   with \(\mathbb E[\max_i S(y_i)]\), but reward-model bias is also maximized.
+   with $\mathbb E[\max_i S(y_i)]$, but reward-model bias is also maximized.
 2. **Structured search:** AlphaProof expands an AND-OR tree and backs up values
    through formal subgoals. Search state and verifier semantics are explicit.
 3. **Long autoregressive deliberation:** o1/o3, Claude extended thinking, and
    Gemini thinking spend more tokens adapting one evolving trajectory. Tool
    results can change the trajectory midstream.
 
-These have different compute scaling and failure modes. Best-of-\(N\) is easily
+These have different compute scaling and failure modes. Best-of-$N$ is easily
 parallelized but multiplies full-trajectory cost. Tree search reuses prefixes
 but needs a structured state and value estimate. Deliberation is flexible but
 can accumulate context, tool, and reasoning errors.
@@ -1811,19 +1803,19 @@ sealed evaluation   hidden tasks and graders never visible to actors
 
 BC or SFT usually teaches syntax and elementary navigation:
 
-\[
+$$
 \mathcal L_{\mathrm{BC}}(\theta)
 =-\sum_{t\in\mathcal A}
 \log\pi_\theta(a_t^*\mid o_{\le t},a_{<t}),
-\]
+$$
 
-where \(\mathcal A\) contains only demonstrator action tokens. Tool observations
+where $\mathcal A$ contains only demonstrator action tokens. Tool observations
 must not be treated as policy-selected actions. A loss mask should be zero on
 system prompts, user text, tool outputs, padding, and any hidden metadata the
 policy did not generate.
 
 WebGPT demonstrates why bootstrap quality matters: BC alone supplies a viable
-browser policy and, with best-of-\(N\), can outperform a less stable RL policy.
+browser policy and, with best-of-$N$, can outperform a less stable RL policy.
 Constitutional AI shows a different bootstrap: generate critiques and revisions
 before preference RL. AlphaProof uses state-tactic SFT before its much larger RL
 campaign.
@@ -1849,7 +1841,7 @@ constraints; URL-only logs are not durable evidence.
 
 Do not begin by summing unrelated judges. Record components separately:
 
-\[
+$$
 \mathbf r(\tau)=
 \begin{bmatrix}
 r_{\text{outcome}} &
@@ -1861,7 +1853,7 @@ r_{\text{citation}} &
 -c_{\text{invalid}} &
 -c_{\text{hack}}
 \end{bmatrix}.
-\]
+$$
 
 For every component define:
 
@@ -1895,8 +1887,8 @@ task sampler
 ```
 
 The policy must be fresh enough for the optimizer's assumptions. If workers
-sample with old checkpoint \(\mu\) while the learner updates \(\pi_\theta\), the
-ratio \(\pi_\theta(a\mid s)/\mu(a\mid s)\) can become extreme. PPO clipping
+sample with old checkpoint $\mu$ while the learner updates $\pi_\theta$, the
+ratio $\pi_\theta(a\mid s)/\mu(a\mid s)$ can become extreme. PPO clipping
 throws away much of that signal; IMPALA uses V-trace correction; fully on-policy
 systems pause or frequently refresh actors.
 
@@ -1915,14 +1907,14 @@ Suppose a serialized trajectory is
 
 Only the two assistant spans are sampled actions. The tool result affects later
 state and return but its tokens should have no policy log-probability loss. Let
-mask \(m_t=1\) for sampled policy tokens and zero otherwise:
+mask $m_t=1$ for sampled policy tokens and zero otherwise:
 
-\[
+$$
 \mathcal L_{\mathrm{policy}}
 =-\frac{\sum_t m_t\,
 \min(\rho_tA_t,\operatorname{clip}(\rho_t,1-\epsilon,1+\epsilon)A_t)}
 {\sum_t m_t}.
-\]
+$$
 
 For structured actions, decide whether credit belongs to every JSON token, the
 whole action as one macro-action, or a hybrid. Token-level ratios can overreact
@@ -1950,7 +1942,7 @@ hidden-test quality is the signature of overoptimization.
 
 Evaluate at least three configurations:
 
-1. **policy-only:** no optional tools or best-of-\(N\);
+1. **policy-only:** no optional tools or best-of-$N$;
 2. **fixed runtime:** same tools, prompts, budget, and router across checkpoints;
 3. **full product:** current routing, safeguards, confirmation flow, search,
    and selection.
@@ -2256,7 +2248,7 @@ actions and compute their log probability.
 
 Reproduce Bradley-Terry loss on a small chosen/rejected dataset. Add grouped
 ranking weights, annotator splits, calibration curves, and held-out policy
-versions. Compare pair accuracy with downstream best-of-\(N\) selection.
+versions. Compare pair accuracy with downstream best-of-$N$ selection.
 
 **Exit test:** show a case where higher pair accuracy produces worse selected
 outputs because its errors occur in the high-score tail.
@@ -2380,7 +2372,7 @@ different model, dataset, and environment. Label it accordingly.
   Preferences](https://arxiv.org/abs/1909.08593): early preference reward and
   PPO.
 - [WebGPT](https://arxiv.org/abs/2112.09332): browser interface,
-  demonstrations/comparisons, BC, PPO, and best-of-\(N\).
+  demonstrations/comparisons, BC, PPO, and best-of-$N$.
 - [InstructGPT](https://arxiv.org/pdf/2203.02155): exact SFT/RM/PPO/PPO-ptx
   recipe and evaluation.
 - [Let's Verify Step by Step](https://arxiv.org/abs/2305.20050) and
