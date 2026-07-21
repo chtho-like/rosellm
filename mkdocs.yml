@@ -1,7 +1,8 @@
 site_name: RoseLLM
 site_description: A source-cited LLM learning repository and executable systems lab
 site_url: https://www.wineandchord.com/rosellm/
-repo_url: https://github.com/chtho-like/rosellm
+repo_url: https://github.com/WineChord/rosellm
+repo_name: WineChord/rosellm
 docs_dir: docs
 
 theme:
