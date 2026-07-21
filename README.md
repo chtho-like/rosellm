@@ -8,7 +8,8 @@ kernels, and agentic reinforcement learning.
 [![Project status: experimental](https://img.shields.io/badge/status-experimental-orange.svg)](#project-status)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Documentation](docs/index.md) ·
+[Live documentation](https://www.wineandchord.com/rosellm/) ·
+[Documentation source](docs/index.md) ·
 [Learning roadmap](docs/learning-roadmap.md) ·
 [Agentic RL curriculum](docs/agentic-rl/index.md) ·
 [Serving benchmarks](benchmarks/serving/README.md)
@@ -207,8 +208,9 @@ python -m mkdocs serve -a 127.0.0.1:8000
 
 `make docs` runs strict MkDocs and source/generated-HTML math checks.
 `make docs-render` additionally opens every page in a real browser and verifies
-the rendered formulas. The generated site is local; every guide remains
-readable directly on GitHub.
+the rendered formulas. The generated site is published at
+[www.wineandchord.com/rosellm](https://www.wineandchord.com/rosellm/), and every
+guide remains readable directly on GitHub.
 
 Useful code checks:
 

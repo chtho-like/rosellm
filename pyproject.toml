@@ -54,7 +54,8 @@ dev = [
 all = ["rosellm[test,dev]"]
 
 [project.urls]
-Homepage = "https://github.com/chtho-like/rosellm"
+Homepage = "https://www.wineandchord.com/rosellm/"
+Documentation = "https://www.wineandchord.com/rosellm/"
 Repository = "https://github.com/chtho-like/rosellm.git"
 Issues = "https://github.com/chtho-like/rosellm/issues"
 
