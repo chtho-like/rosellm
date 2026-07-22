@@ -393,6 +393,12 @@ and Moonshot claims deep model integration, but “native” is not evidence tha
 K3 eliminated a ViT or can synthesize pixels. The pending report must answer
 those architectural questions.
 
+For a component-by-component derivation of KDA, Block AttnRes, Stable
+LatentMoE, Quantile Balancing, Per-Head Muon, MX quantization, expert-parallel
+training, Mooncake serving, preserved-thinking semantics, launch cases, and all
+35 benchmark rows, continue to the dedicated
+[Kimi K3 architecture and systems deep dive](kimi-k3.md).
+
 ## 7. Does Kimi natively generate images?
 
 No public K2.5/K2.6/K3 architecture source at the cutoff describes a visual

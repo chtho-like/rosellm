@@ -111,12 +111,15 @@ generation, or media-processing tools around any base model.
 2. [Kimi model lineage and visual architecture](kimi.md) explains why K2.5 is
    both “ViT + LLM” and a jointly trained multimodal model, what the K2 suffixes
    mean, and what is actually known about K3.
-3. [DeepSeek's multimodal portfolio](deepseek.md) separates VL, Janus, OCR, and
+3. [Kimi K3 architecture and systems](kimi-k3.md) derives KDA, Block AttnRes,
+   Stable LatentMoE, quantization, serving, API state, and every launch
+   benchmark while preserving the current disclosure boundary.
+4. [DeepSeek's multimodal portfolio](deepseek.md) separates VL, Janus, OCR, and
    the current text-only V4 line, with source-level OCR and VL2 structures.
-4. [How LLM-centered systems generate images](generation.md) compares
+5. [How LLM-centered systems generate images](generation.md) compares
    cascades, discrete visual-token autoregression, diffusion, rectified flow,
    and mixed-objective shared transformers.
-5. For training and agent details outside the modality path, continue to the
+6. For training and agent details outside the modality path, continue to the
    [Moonshot Kimi](../agentic-rl/case-studies/kimi.md) and
    [DeepSeek](../agentic-rl/case-studies/deepseek.md) evidence reconstructions.
 

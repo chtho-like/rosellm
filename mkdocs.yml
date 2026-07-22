@@ -57,6 +57,7 @@ nav:
       - Architecture and Evidence Map: multimodal/index.md
       - Representation, Fusion, and Native Multimodality: multimodal/architecture.md
       - Kimi Model Lineage and Native Vision: multimodal/kimi.md
+      - Kimi K3 Architecture and Systems: multimodal/kimi-k3.md
       - DeepSeek VL, Janus, and OCR: multimodal/deepseek.md
       - LLM-Centered Image Generation: multimodal/generation.md
   - Agentic Reinforcement Learning:

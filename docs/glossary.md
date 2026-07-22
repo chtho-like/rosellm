@@ -132,6 +132,9 @@ visible.
 | **KDA** | Kimi Delta Attention | Moonshot's gated delta-rule linear attention. |
 | **MoBA** | Mixture of Block Attention | Moonshot's parameter-free sparse routing of each query to selected context blocks. |
 | **AttnRes** | Attention Residuals | Moonshot's learned attention over earlier residual streams instead of a fixed cumulative sum. |
+| **LatentMoE** | Latent Mixture of Experts | Projects routed token activations into a narrower shared latent space before expert dispatch and computation, reducing routed communication and expert-weight bandwidth. |
+| **Quantile Balancing** | — | An MoE load-allocation family that derives routing offsets or thresholds from router-score quantiles rather than a hand-tuned auxiliary-loss coefficient or heuristic update rate; K3's exact algorithm was not yet public at the cutoff. |
+| **SiTU** | Sigmoid Tanh Unit | K3's named activation-control component; its exact public equation was still pending at the 2026-07-22 cutoff. |
 | **MoE** | Mixture of Experts | Routes each token to a small subset of feed-forward experts, increasing total parameters without proportional active compute. |
 | **FFN / MLP** | Feed-Forward Network / Multilayer Perceptron | The per-token nonlinear sublayer / the general stack of linear layers and nonlinearities. |
 | **MTP** | Multi-Token Prediction | Predicts several future tokens from one position, potentially improving representations and speculative decoding. |
@@ -144,6 +147,7 @@ visible.
 | **QK-Norm** | Query-Key Normalization | Normalizes attention queries and keys before the dot product. |
 | **KV cache** | Key-Value cache | Stores earlier attention keys/values to avoid recomputing them during decoding. |
 | **QAT** | Quantization-Aware Training | Simulates low precision during training so the model adapts before quantized inference. |
+| **Muon** | MomentUm Orthogonalized by Newton-Schulz | A matrix optimizer that applies approximate orthogonalization to gradient momentum; Moonshot's scalable variant adds weight decay and shape-aware update scaling. |
 
 ## Data and representation
 
@@ -197,6 +201,7 @@ visible.
 | **WSD** | Warmup-Stable-Decay | A learning-rate schedule that warms to a peak, holds a long stable phase, then decays near the end of a planned token budget. |
 | **TTFT / ITL / QPS** | Time to First Token / Inter-Token Latency / Queries per Second | First-token delay / decode spacing / request throughput. |
 | **1F1B** | One Forward, One Backward | A pipeline schedule alternating forward and backward microbatches after warmup. |
+| **Mooncake** | — | Moonshot's KV-cache-centric serving architecture, separating prefill and decode pools and scheduling around reusable cache placement, load, and latency objectives. |
 | **WAL** | Write-Ahead Log | A durable record written before mutation for replay and recovery. |
 
 ## Precision and hardware
