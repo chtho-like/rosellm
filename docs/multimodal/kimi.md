@@ -48,6 +48,37 @@ The decimal is therefore a family label chosen by Moonshot. Treating `K2.5` as
 base architecture is also wrong because its public training disclosure is much
 thinner.
 
+### Where are K2.1 through K2.4?
+
+There are no publicly released Moonshot checkpoints named `K2.1`, `K2.2`,
+`K2.3`, or `K2.4` in the official research timeline, model catalog, or
+Moonshot Hugging Face organization at this cutoff. The public sequence between
+the original K2 and K2.5 instead uses capability or date labels:
+
+```text
+K2 Base/Instruct
+  -> K2-Instruct-0905
+  -> K2 Thinking
+  -> K2.5
+```
+
+Moonshot's K2.5 announcement and report explain that K2.5 continues from K2
+with roughly 15T mixed visual/text tokens, MoonViT, multimodal training, and new
+agent behavior. They do **not** explain why the exact decimal `.5` was chosen.
+The safest interpretation is therefore:
+
+- **disclosed:** K2.5 is a major K2-lineage continuation, not the fifth public
+  patch after four missing releases;
+- **inferred:** `.5` communicates a substantial intermediate-generation or
+  “half-step toward the next generation” position; and
+- **unknown:** whether Moonshot used K2.1–K2.4 as private experiment names,
+  checkpoints, or internal milestones.
+
+Model-family decimals are product/research labels, not a promise to publish
+every intervening number. By contrast, `0905` is explicitly a date-stamped
+instruct refresh and `Thinking` is a capability label; neither needs to be
+renumbered as K2.1.
+
 Earlier names such as Kimi k1.5 and Kimi-VL are related research/product
 ancestors, not K2 decimal checkpoints. Kimi-Audio is a separate modality branch.
 
@@ -302,6 +333,9 @@ public checkpoint/API boundary rather than guessing about internal products.
 
 ## Primary sources
 
+- Moonshot AI, [official research timeline](https://www.kimi.com/en/blog/),
+  [Kimi API model catalog](https://platform.kimi.com/docs/models), and
+  [official Hugging Face model inventory](https://huggingface.co/moonshotai/models).
 - Moonshot AI, [Kimi K2: Open Agentic Intelligence](https://arxiv.org/abs/2507.20534)
   and [official repository](https://github.com/MoonshotAI/Kimi-K2).
 - Moonshot AI, [Kimi K2.5: Visual Agentic Intelligence](https://arxiv.org/abs/2602.02276)
