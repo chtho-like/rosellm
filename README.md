@@ -11,6 +11,7 @@ kernels, and agentic reinforcement learning.
 [Live documentation](https://www.wineandchord.com/rosellm/) ·
 [Documentation source](docs/index.md) ·
 [Learning roadmap](docs/learning-roadmap.md) ·
+[Coding-agent systems](docs/coding-agents/index.md) ·
 [Multimodal architecture](docs/multimodal/index.md) ·
 [Agentic RL curriculum](docs/agentic-rl/index.md) ·
 [Serving benchmarks](benchmarks/serving/README.md)
@@ -33,7 +34,7 @@ experimentation over API stability.
 | **RoseRLHF** | Auditable trajectories, return and advantage estimators, PPO/GRPO-style clipping, SAO/DIS, GSPO, GSPO-token, and SAPO objectives | [`rosellm/roserlhf/`](rosellm/roserlhf/) |
 | **Kernel & distributed labs** | CUDA and Triton implementations of attention, FlashAttention, GEMM, softmax, normalization, KV-cache operations, and collective communication | [`notebooks/`](notebooks/) |
 | **Benchmarks** | Reproducible online/offline harnesses for RoseInfer, vLLM, SGLang, and TensorRT-LLM, plus profiling and plotting tools | [`benchmarks/serving/`](benchmarks/serving/) |
-| **Knowledge base** | A dependency-ordered LLM roadmap, multimodal architecture and generation, a full Agentic RL curriculum, mathematical derivations, source labs, and evidence-graded frontier-model case studies | [`docs/`](docs/) |
+| **Knowledge base** | A dependency-ordered LLM roadmap, coding-agent system archaeology, multimodal architecture and generation, a full Agentic RL curriculum, mathematical derivations, source labs, and evidence-graded frontier-model case studies | [`docs/`](docs/) |
 
 ## Quick start
 
@@ -131,13 +132,16 @@ dependency graph:
    method in the [LLM learning roadmap](docs/learning-roadmap.md).
 2. Move from mathematics and transformer foundations through pretraining,
    alignment, inference systems, evaluation, agents, and safety.
-3. Use the [multimodal foundation-model map](docs/multimodal/index.md) to trace
+3. Use the [coding-agent systems map](docs/coding-agents/index.md) to separate
+   models from agent runtimes, clients, and control planes, then follow the
+   Reasonix/OpenCode/Pi/Codex/Claude Code source comparison.
+4. Use the [multimodal foundation-model map](docs/multimodal/index.md) to trace
    images, video, documents, and audio from representation through shared
    reasoning and media generation.
-4. Study the [Agentic RL curriculum](docs/agentic-rl/index.md) from terminology
+5. Study the [Agentic RL curriculum](docs/agentic-rl/index.md) from terminology
    and POMDP foundations to algorithms, data, rollout systems, evaluation, and
    executable objectives.
-5. Read the [research standard](docs/research-method.md) before the
+6. Read the [research standard](docs/research-method.md) before the
    [frontier-model case studies](docs/agentic-rl/case-studies/index.md).
 
 The research notes distinguish **disclosed facts**, **confirmed artifacts**,

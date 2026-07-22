@@ -206,7 +206,11 @@ visible.
 | Term | Full name | Meaning |
 |---|---|---|
 | **agent scaffold** | — | Runtime prompt construction, tool schema, context management, retries, stopping, and persistence around the model. |
+| **agent harness** | — | The executable loop and policy substrate that connects a model to context, tools, state, and host effects. “Harness” often emphasizes a reusable or modifiable runtime rather than a sealed end-user product. |
+| **ACP** | Agent Client Protocol | A protocol boundary through which an editor or other client can start, observe, and steer an agent implemented by a separate process. It is distinct from MCP, which primarily exposes tools and context to the agent. |
 | **MCP** | Model Context Protocol | An open protocol exposing tools and contextual resources to AI applications. |
+| **provider abstraction** | — | A runtime interface that normalizes model endpoints and streaming responses. A common interface does not erase vendor differences in reasoning fields, tool calls, caching, limits, or error behavior. |
+| **project trust** | — | A decision about whether project-local configuration, instructions, plugins, or executable extensions may load. It is an input-loading boundary, not automatically an operating-system sandbox. |
 | **GUI / CLI** | Graphical User Interface / Command-Line Interface | Visual point-and-type interaction / textual command interaction. |
 | **sandbox** | — | Isolation limiting filesystem, network, process, or credential access. |
 | **prompt injection** | — | Untrusted content that attempts to redirect an agent away from authorized instructions. |

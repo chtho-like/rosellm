@@ -171,7 +171,10 @@ effective sample size, entropy, and held-out success.
 ## Level 7 — Agentic reinforcement learning
 
 An agentic episode includes state-changing environment interaction rather than
-only one prompt and one response. Study the complete
+only one prompt and one response. First use the
+[Coding-Agent Systems map](coding-agents/index.md) to separate the deployed
+model from its harness, clients, tools, context policy, permissions, sandbox,
+and hosted control plane. Then study the complete
 [Agentic RL curriculum](agentic-rl/index.md):
 
 Before the curriculum's systems phase, complete the Level 8 topics on

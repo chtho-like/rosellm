@@ -28,6 +28,13 @@ and production cascades. Its Kimi and DeepSeek studies distinguish input
 understanding from media generation and technical disclosure from labels such
 as “native multimodal.”
 
+The [Coding-Agent Systems section](coding-agents/index.md) separates models,
+agent harnesses, interaction surfaces, and hosted control planes. Its first
+source-level reconstruction follows both Reasonix Git roots and compares the
+current Go system with OpenCode, Pi Coding Agent, OpenAI Codex, and Claude Code
+across provider coupling, agent loops, persistence, extension boundaries,
+permissions, sandboxing, and core-source visibility.
+
 ### Where a new reader should begin
 
 Use this dependency order rather than jumping directly to the newest model
@@ -36,14 +43,17 @@ report:
 1. **Orientation and prerequisites:** this page, then the roadmap's five-pass
    loop and Levels 0–6. Use the [annotated bibliography](agentic-rl/bibliography.md)
    as a reading side rail.
-2. **Multimodal architecture:** representation/fusion first, then Kimi and
+2. **Coding-agent architecture:** systems map, then the Reasonix history and
+   cross-project source comparison. Keep model capability separate from harness
+   and product behavior.
+3. **Multimodal architecture:** representation/fusion first, then Kimi and
    DeepSeek lineages, and finally image-generation architectures.
-3. **Agentic RL foundations:** curriculum map, terminology, history,
+4. **Agentic RL foundations:** curriculum map, terminology, history,
    mathematical foundations, step-by-step derivations, and algorithm families.
-4. **The actual training system:** data and environments, end-to-end pipeline,
+5. **The actual training system:** data and environments, end-to-end pipeline,
    inference prerequisites, rollout/training systems, evaluation and safety,
    then the source-level lab.
-5. **Research reconstruction:** research standard, evidence matrix, then
+6. **Research reconstruction:** research standard, evidence matrix, then
    DeepSeek → GLM → Kimi → OpenAI/Anthropic/Google → Qwen/Meta/Mistral → open
    industry and community.
 
@@ -61,6 +71,7 @@ Use the implementation as a set of progressively more realistic laboratories:
 | GPU kernels | `notebooks/cuda/` | Where do memory traffic, tiling, fusion, and numerical precision determine performance? |
 | Distributed primitives | `notebooks/` | What do all-reduce, reduce-scatter, bucketing, and sharding actually do? |
 | Multimodal models | `docs/multimodal/` | How do media become model positions, when is integration “native,” and how can a language-centered model emit images or speech? |
+| Coding-agent systems | `docs/coding-agents/` | How do models, agent loops, tools, context, clients, permissions, and sandboxes combine into coding products? |
 | Agentic RL | `docs/agentic-rl/` and `rosellm/roserlhf/` | How does an interactive trajectory become an unbiased, stable policy update? |
 
 ## The standard of evidence
@@ -86,8 +97,11 @@ protocol.
 
 ## Current focus
 
-The knowledge base currently has two deep, source-cited focus areas:
+The knowledge base currently has three deep, source-cited focus areas:
 
+- **Coding-agent systems:** runtime lineage, model/provider coupling, agent
+  loops, tools, state, extensibility, permissions, sandboxing, and open-source
+  boundaries, beginning with a Reasonix/OpenCode/Pi/Codex/Claude Code study;
 - **Multimodal foundation models:** modality representation, fusion, native
   integration, understanding versus generation, and the Kimi/DeepSeek model
   lineages; and

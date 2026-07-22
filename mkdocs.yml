@@ -48,6 +48,9 @@ nav:
   - Glossary: glossary.md
   - Research Standard: research-method.md
   - Documentation Quality: documentation-quality.md
+  - Coding-Agent Systems:
+      - Architecture and Evidence Map: coding-agents/index.md
+      - Reasonix History and System Comparison: coding-agents/reasonix.md
   - Multimodal Foundation Models:
       - Architecture and Evidence Map: multimodal/index.md
       - Representation, Fusion, and Native Multimodality: multimodal/architecture.md
