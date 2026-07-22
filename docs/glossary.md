@@ -111,6 +111,12 @@ visible.
 | **ESS** | Effective Sample Size | For nonnegative, not-all-zero importance weights, $(\sum_i w_i)^2/\sum_i w_i^2$; it equals the sample count when weights are equal and falls toward 1 as a few samples dominate. |
 | **IPT** | Isomorphic Perturbation Test | A metamorphic reward audit that applies a meaning-preserving renaming or transformation and checks whether a genuinely general solution transforms consistently. |
 | **LLM judge** | Large Language Model judge | A model prompted or trained to evaluate another output; it is fallible and not automatically ground truth. |
+| **instruction following** | — | A family of capabilities for carrying out explicit or implied directives under scope, order, format, context, and trust constraints. Always identify whether the claim concerns atomic rules, multi-turn retention, hierarchy, tools, or end-to-end task behavior. |
+| **steerability** | — | How predictably a model's behavior changes in response to legitimate instructions or controls. It includes instruction following but also sensitivity, literalness, style, refusal boundaries, and stability across runs. |
+| **instruction hierarchy** | — | A trust ordering among instruction sources. In OpenAI's documented hierarchy, system instructions outrank developer, user, and tool content; correct behavior can require ignoring a conflicting lower-priority command. |
+| **IFEval** | Instruction-Following Evaluation | A reproducible benchmark of roughly 500 prompts and 25 program-verifiable instruction types. Its strict and loose scores measure precise constraints, not complete product reliability. |
+| **IFBench** | Instruction-Following Benchmark | Ai2's harder benchmark with 58 new out-of-distribution, program-verifiable constraints combined with held-out user prompts; the standard score remains narrower than multi-turn, hierarchy, or tool-policy reliability. |
+| **MultiChallenge** | — | Scale's multi-turn benchmark covering instruction retention, inferred user memory, versioned editing, and self-coherence; it uses instance-specific rubrics and an LLM judge. The authors do not expand the name as an acronym. |
 | **KL** | Kullback–Leibler divergence | A directional mismatch, $D_{\mathrm{KL}}(p\Vert q)=\mathbb E_p[\log p-\log q]$, often used to limit policy drift. |
 | **TV** | Total Variation distance | A symmetric distance, $\tfrac12\sum_x\lvert p(x)-q(x)\rvert$. |
 | **pass@k** | pass at $k$ | Probability that at least one of $k$ sampled candidates passes; it requires a sampling protocol. |

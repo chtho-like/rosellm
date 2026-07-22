@@ -35,6 +35,12 @@ current Go system with OpenCode, Pi Coding Agent, OpenAI Codex, and Claude Code
 across provider coupling, agent loops, persistence, extension boundaries,
 permissions, sandboxing, and core-source visibility.
 
+The [Instruction Following and Steerability chapter](evaluation/instruction-following.md)
+separates atomic constraints, multi-turn retention, instruction hierarchy,
+tool-policy compliance, structured decoding, and end-to-end product behavior.
+It maps the major public benchmarks and gives a dated GPT-versus-DeepSeek
+evidence review plus a production evaluation design.
+
 ### Where a new reader should begin
 
 Use this dependency order rather than jumping directly to the newest model
@@ -48,12 +54,15 @@ report:
    and product behavior.
 3. **Multimodal architecture:** representation/fusion first, then Kimi and
    DeepSeek lineages, and finally image-generation architectures.
-4. **Agentic RL foundations:** curriculum map, terminology, history,
+4. **Model evaluation:** instruction-following taxonomy, benchmark map, and
+   private production-evaluation design. Keep checkpoint behavior separate from
+   constrained decoding and agent-harness behavior.
+5. **Agentic RL foundations:** curriculum map, terminology, history,
    mathematical foundations, step-by-step derivations, and algorithm families.
-5. **The actual training system:** data and environments, end-to-end pipeline,
+6. **The actual training system:** data and environments, end-to-end pipeline,
    inference prerequisites, rollout/training systems, evaluation and safety,
    then the source-level lab.
-6. **Research reconstruction:** research standard, evidence matrix, then
+7. **Research reconstruction:** research standard, evidence matrix, then
    DeepSeek → GLM → Kimi → OpenAI/Anthropic/Google → Qwen/Meta/Mistral → open
    industry and community.
 
@@ -71,6 +80,7 @@ Use the implementation as a set of progressively more realistic laboratories:
 | GPU kernels | `notebooks/cuda/` | Where do memory traffic, tiling, fusion, and numerical precision determine performance? |
 | Distributed primitives | `notebooks/` | What do all-reduce, reduce-scatter, bucketing, and sharding actually do? |
 | Multimodal models | `docs/multimodal/` | How do media become model positions, when is integration “native,” and how can a language-centered model emit images or speech? |
+| Model evaluation | `docs/evaluation/` | Which instruction-following surface failed, what did the benchmark score, and which guarantees came from the model, decoder, or harness? |
 | Coding-agent systems | `docs/coding-agents/` | How do models, agent loops, tools, context, clients, permissions, and sandboxes combine into coding products? |
 | Agentic RL | `docs/agentic-rl/` and `rosellm/roserlhf/` | How does an interactive trajectory become an unbiased, stable policy update? |
 
@@ -97,7 +107,11 @@ protocol.
 
 ## Current focus
 
-The knowledge base currently has three deep, source-cited focus areas:
+The knowledge base currently has four deep, source-cited focus areas:
+
+- **Model evaluation and reliability:** instruction-following taxonomy,
+  benchmark methodology, dated GPT/DeepSeek evidence, community failure modes,
+  and application-specific acceptance suites;
 
 - **Coding-agent systems:** runtime lineage, model/provider coupling, agent
   loops, tools, state, extensibility, permissions, sandboxing, and open-source

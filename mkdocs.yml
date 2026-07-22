@@ -48,6 +48,8 @@ nav:
   - Glossary: glossary.md
   - Research Standard: research-method.md
   - Documentation Quality: documentation-quality.md
+  - Model Evaluation and Reliability:
+      - Instruction Following and Steerability: evaluation/instruction-following.md
   - Coding-Agent Systems:
       - Architecture and Evidence Map: coding-agents/index.md
       - Reasonix History and System Comparison: coding-agents/reasonix.md
