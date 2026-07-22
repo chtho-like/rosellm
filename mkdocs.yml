@@ -48,6 +48,12 @@ nav:
   - Glossary: glossary.md
   - Research Standard: research-method.md
   - Documentation Quality: documentation-quality.md
+  - Multimodal Foundation Models:
+      - Architecture and Evidence Map: multimodal/index.md
+      - Representation, Fusion, and Native Multimodality: multimodal/architecture.md
+      - Kimi Model Lineage and Native Vision: multimodal/kimi.md
+      - DeepSeek VL, Janus, and OCR: multimodal/deepseek.md
+      - LLM-Centered Image Generation: multimodal/generation.md
   - Agentic Reinforcement Learning:
       - Curriculum and Knowledge Map: agentic-rl/index.md
       - Terminology and Boundaries: agentic-rl/terminology.md

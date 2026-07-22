@@ -145,6 +145,17 @@ visible.
 |---|---|---|
 | **BPE / BBPE** | Byte Pair Encoding / Byte-Level Byte Pair Encoding | Frequent-pair subword merging / the byte-based variant that can represent any input. |
 | **OCR** | Optical Character Recognition | Converts pixels or scanned pages into text. |
+| **VLM / LMM** | Vision-Language Model / Large Multimodal Model | A model that jointly processes language and one or more non-text modalities; the exact input and output modalities must still be stated. |
+| **ViT** | Vision Transformer | Divides an image into patches, embeds them as a sequence, and applies transformer attention to produce visual representations. |
+| **visual token** | — | An overloaded term for a continuous visual embedding occupying a sequence position or a discrete image-code identifier; always state which. |
+| **projector / adaptor** | — | Maps a modality encoder's feature width and sometimes token count into the language backbone's embedding space. |
+| **NaViT** | Native-resolution Vision Transformer | A variable-resolution approach that packs patch sequences from differently sized images rather than forcing every image to one square resolution. |
+| **SigLIP** | Sigmoid Loss for Language-Image Pre-training | A contrastively trained vision-language representation model using independent sigmoid pair losses rather than a batch softmax. |
+| **VQ / VQ-VAE** | Vector Quantization / Vector-Quantized Variational Autoencoder | Maps continuous image/audio latents to discrete codebook entries and decodes predicted codes back into media. |
+| **VAE** | Variational Autoencoder | Encodes media into a compact continuous latent distribution and decodes latent samples or generated latents back into media. |
+| **DiT** | Diffusion Transformer | Uses a transformer as the denoising network over noisy image or video latent patches; it is not automatically a language model. |
+| **rectified flow** | — | Learns a continuous velocity field that transports noise toward data, then generates by integrating that field, often in a compressed latent space. |
+| **native multimodal** | — | An ambiguous integration claim; specify API, sequence, training, shared-backbone, and media-generation levels instead of treating it as a binary architecture. |
 | **LSH / MinHash** | Locality-Sensitive Hashing / Minimum Hashing | Approximate similarity indexing / Jaccard-similarity estimation, often used in deduplication. |
 | **PII** | Personally Identifiable Information | Data that can identify or link to a person. |
 | **AST** | Abstract Syntax Tree | A tree representation of program syntax. |

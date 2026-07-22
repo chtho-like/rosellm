@@ -1,8 +1,12 @@
 # DeepSeek: From Domain Data to Million-Token Agentic Reinforcement Learning
 
-**Verified through:** 2026-07-19. **Sources:** DeepSeek papers, official model
+**Verified through:** 2026-07-22. **Sources:** DeepSeek papers, official model
 cards, repositories, and release notes. Benchmark results are vendor-reported
 unless marked reproduced.
+
+For the separate DeepSeek-VL, Janus, DeepSeek-OCR/OCR 2, and current text-only
+V4 modality boundaries, see the
+[DeepSeek multimodal architecture chapter](../../multimodal/deepseek.md).
 
 ## Reader's terminology key
 

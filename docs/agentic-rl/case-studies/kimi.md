@@ -1,8 +1,12 @@
 # Moonshot AI / Kimi: Long Context, Muon, Tool Reinforcement Learning, and Agent Swarms
 
-**Verified through:** 2026-07-19. Sources are Moonshot papers, repositories,
+**Verified through:** 2026-07-22. Sources are Moonshot papers, repositories,
 model cards, and official product/research posts. Vendor benchmark claims are
 not independent reproductions.
+
+For a component-level explanation of MoonViT-3D, visual token projection, K2
+suffixes, K3's “native vision” boundary, and media generation, see the
+[Kimi multimodal architecture chapter](../../multimodal/kimi.md).
 
 ## Reader's terminology key
 
@@ -712,7 +716,7 @@ intended operating scale, not the training environments that produced it.
 
 ### Release boundary [D/U]
 
-At 2026-07-19, K3 was available in products/API, full weights were promised for
+At 2026-07-22, K3 was available in products/API, full weights were promised for
 2026-07-27, and architecture/training/evaluation reports were promised later.
 Therefore pretraining tokens/data, active params, optimizer, post-training, RL,
 rewards, environments, hardware, duration, and cost remain **[U]**.
