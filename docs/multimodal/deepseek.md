@@ -976,6 +976,211 @@ infer that VL2, OCR 2, Janus, and V4 are already one hidden omni checkpoint. The
 public evidence shows a portfolio of related experiments and services, not one
 fully consolidated model lineage.
 
+### 8.8 How a flagship can absorb multimodality
+
+“Merge vision into the flagship” is not one binary architecture change. It can
+refer to at least five progressively deeper forms of integration:
+
+| Integration depth | What is actually shared | What remains specialized | Resulting product boundary |
+|---|---|---|---|
+| 1. orchestration | prompts, tool calls, and application state | OCR/VLM and text LLM are separate services and checkpoints | one chat product can accept an image, but the flagship model receives only serialized text |
+| 2. input representation | visual embeddings enter the language-model context | image/video encoder and projector remain modality-specific | a VLM checkpoint sees pixels indirectly; a small adaptor-only retrofit is possible but is not deep native training |
+| 3. backbone and training | attention, semantic state, reasoning layers, and post-training are jointly optimized across modalities | front-end encoders still convert pixels, frames, or waveforms into tractable representations | one reasoning checkpoint can use visual evidence throughout its computation |
+| 4. modality-aware computation | shared context and some parameters connect every modality | routed FFN/transformer experts, codecs, and decoders preserve modality-specific capacity | one model can avoid making text reasoning, perception, and reconstruction compete for every parameter |
+| 5. input/output and serving | model identity, conversation state, tools, safety policy, and API are unified | image flow/diffusion decoder, speech Talker, and exact-OCR verifier can still be separate branches | an “omni” product may look monolithic outside while remaining deliberately modular inside |
+
+The boundary between levels 2 and 3 is the important one. A model does not
+become deeply multimodal merely because a ViT and MLP can inject embeddings.
+The shared backbone must be trained for long enough, on the right text/visual
+mixture, to make vision part of its learned reasoning distribution. Conversely,
+“early fusion” does **not** imply feeding raw RGB values into a text transformer
+or eliminating all specialist encoders. Meta describes Llama 4 as early-fusing
+text and vision tokens after a separately initialized vision encoder; Kimi K2.5
+uses MoonViT-3D plus a projector in front of the K2 MoE while jointly continuing
+pretraining on text and visual data. Native integration is primarily a statement
+about shared training and computation, not the absence of a ViT.
+
+#### A practical input-side architecture
+
+A credible flagship input path has the following shape:
+
+```text
+image/video/audio
+  -> modality encoder and token-budget controller
+  -> continuous modality features
+  -> projector/resampler to the backbone width
+  -> modality delimiters plus 1D/2D/3D positions
+  -> shared attention and MoE reasoning backbone
+  -> text, tool, coordinate, or action head
+```
+
+For an image encoder $E_v$ and projector $P_v$, the language backbone does not
+receive token IDs for pixels. It receives a mixed embedding sequence such as
+
+$$
+X = [e_{\mathrm{BOI}},\ P_v(E_v(I))_1,\ldots,
+P_v(E_v(I))_{N_v},\ e_{\mathrm{EOI}},\ E_t(w_1),\ldots,E_t(w_T)].
+$$
+
+The $N_v$ term is a systems constraint, not an incidental detail. Dense
+self-attention over the combined sequence scales approximately with
+$(T+N_v)^2$. Sparse MoE reduces the active FFN cost per position but does not by
+itself remove this attention cost. A production model therefore needs dynamic
+or native-resolution packing, tiling, resampling, spatial pooling, learned
+queries, or hierarchical attention. Video additionally needs tubelets or frame
+groups, temporal pooling, and hard frame/token budgets. Kimi K2.5 and Qwen2-VL
+both make variable visual-token allocation central rather than forcing every
+image into one fixed square; Qwen also extends position encoding across time,
+height, and width.
+
+The backbone must distinguish ordering semantics without isolating the
+modalities. Text has a 1D causal order; an image has 2D spatial coordinates; a
+video has time plus 2D space. A multimodal RoPE or related position scheme can
+encode these axes while shared attention permits text to retrieve visual
+evidence. Cross-attention blocks are another valid boundary, but interleaving
+projected visual positions with text makes arbitrary image-text-image turns and
+shared KV state easier to express.
+
+#### What a multimodal MoE should and should not share
+
+One universal dense parameter set is not necessarily the end state. It can
+produce negative transfer because language abstraction, OCR detail, temporal
+perception, speech acoustics, and pixel reconstruction impose different loss
+landscapes. A more plausible scalable design is:
+
+- shared attention and a small set of shared experts for cross-modal concepts,
+  reference resolution, reasoning, tool policy, and long-context state;
+- routed visual, document, video, audio, and media-generation experts for
+  modality-heavy computation;
+- router inputs that include hidden state, modality identity, position type,
+  and possibly task identity;
+- per-modality load-balancing and capacity constraints so abundant text tokens
+  do not monopolize experts and bursts of visual tokens do not overflow them;
+- text-only replay and separate regression gates so a visual upgrade cannot
+  silently degrade coding, mathematics, or instruction following.
+
+This is a design recommendation, not a disclosed DeepSeek V4 architecture.
+There are, however, public precedents. Qwen3-Omni uses a Thinker-Talker MoE
+organization for perception/reasoning and streaming speech. BAGEL uses shared
+self-attention with modality-specific transformer experts, routing semantic
+text/vision states and image-generation states through different parameter
+branches. These systems illustrate a broader trend: share the state needed for
+cross-modal reasoning while specializing the high-bandwidth transformations.
+
+#### Training is the real merge operation
+
+A robust training sequence is likely to contain six stages:
+
+1. pretrain or initialize each modality encoder on high-signal perception data;
+2. freeze most of the language backbone and align projectors/resamplers, so new
+   feature distributions do not immediately destabilize the text model;
+3. unfreeze the relevant backbone and perform long joint continued pretraining
+   on text-only, image-text, interleaved document, and later video/audio data;
+4. increase resolution and sequence duration after basic alignment, with
+   explicit text replay and modality-balanced sampling;
+5. supervised-tune grounded QA, OCR, charts, coordinates, tool calls, GUI
+   actions, temporal questions, and refusal behavior; and
+6. perform outcome-based multimodal RL, including tasks whose reward requires
+   actually consulting the pixels or taking a correct action.
+
+Stage 3 is what separates a capable adaptor demo from a flagship multimodal
+foundation model. Kimi K2.5 reports that, under a fixed continued-pretraining
+budget, introducing a moderate visual mixture earlier and maintaining it
+outperformed delaying vision and compensating with a much higher late-stage
+ratio. Qwen2-VL similarly uses an alignment stage, a jointly unfrozen stage, and
+multimodal instruction tuning while retaining pure-text data. The exact mixture
+is model- and data-dependent; copying a published token ratio would not remove
+the need to measure text forgetting and genuine visual dependence.
+
+Training must also prevent four false successes:
+
+- **linguistic shortcutting:** the answer is guessed from the question or
+  dataset prior instead of the image;
+- **serialization loss:** a separate OCR pass drops layout, uncertainty, color,
+  or spatial relationships that later reasoning requires;
+- **objective interference:** reconstruction or speech losses distort language
+  representations or expert routing;
+- **loss-scale dominance:** vastly different token counts and objective scales
+  let one modality dominate shared gradients.
+
+Counterfactual images, image-question swaps, occlusion tests, exact
+transcription checks, modality-specific gradient/routing telemetry, and full
+text regression suites are therefore as important as aggregate multimodal
+benchmarks.
+
+#### Understanding will unify before high-fidelity generation
+
+Input understanding and media generation should not be conflated. Text can be
+generated autoregressively from a vocabulary head. High-fidelity images are
+usually better represented by continuous VAE latents and optimized with a
+diffusion or flow objective; speech commonly uses an acoustic encoder plus a
+streaming codec/Talker. A shared backbone can coordinate these branches without
+forcing all outputs into the text vocabulary.
+
+Transfusion demonstrates one transformer trained with next-token language loss
+and diffusion loss over continuous image patches. BAGEL combines an
+understanding expert with a rectified-flow image-generation expert. Qwen3-Omni
+lets its Thinker produce high-level representations while a separate Talker
+autoregressively predicts speech-code streams and a lightweight decoder produces
+the waveform. Janus and JanusFlow express the same underlying engineering
+choice in different forms: a checkpoint can unify reasoning and generation
+while still retaining distinct visual representations and a media decoder.
+
+This makes the likely deployment order asymmetric:
+
+1. add image understanding to the main reasoning checkpoint;
+2. add video, screenshots, grounding, and computer-use actions;
+3. add streaming audio perception and a specialist speech output branch;
+4. expose image/video generation behind the same API first as routed tools; and
+5. share deeper backbone state with generation branches only when quality,
+   latency, training stability, and safety justify it.
+
+#### A plausible DeepSeek path: disclosure versus forecast
+
+The only direct DeepSeek disclosure about a more unified future in this
+portfolio is OCR 2's “Towards Native Multimodality” discussion: it proposes an
+LLM-style encoder whose projections, attention, and FFNs could be shared across
+modalities while learned query embeddings remain modality-specific. It suggests
+possible text compression, speech extraction, and visual reordering. This is a
+research direction, not evidence of a released omni V4 checkpoint or a public
+schedule.
+
+The following sequence is an engineering forecast derived from the portfolio,
+not a product claim:
+
+1. **Image-native reasoning checkpoint.** Initialize from the flagship MoE,
+   connect a dynamic-resolution visual front end, then jointly continue
+   pretraining rather than shipping only an OCR-to-text wrapper.
+2. **Document and UI specialists behind shared state.** Reuse OCR 2/VL lessons
+   for token compression, exact reading, grounding, and crop refinement, while
+   allowing a verifier or specialist route when a serial number must be exact.
+3. **Image-video unification and visual-agent RL.** Share the visual encoder and
+   add temporal compression, screenshot interaction, coordinates, and
+   observe-reason-act training. This has more direct synergy with DeepSeek's
+   reasoning, coding, and agent positioning than image aesthetics alone.
+4. **Modality-aware MoE routing.** Preserve shared semantic experts while adding
+   capacity for perception and high-bandwidth modalities, with routing audits
+   and text-regression gates.
+5. **Omni I/O as a layered system.** Add audio and media-generation branches,
+   initially as separately scalable services and later with shared hidden state
+   where it produces measured transfer.
+
+At the serving layer, one API should accept typed content blocks rather than
+forcing clients to pre-caption images. The service can cache immutable visual
+embeddings or prefill KV state across turns, batch media encoding separately
+from autoregressive decoding, enforce per-media token budgets, and route exact
+OCR or media generation to specialists. Safety must treat text rendered inside
+an image as untrusted data rather than automatically as an instruction, and it
+must add visual prompt-injection, privacy, adversarial-image, provenance, and
+generated-media checks.
+
+The long-run trend is therefore not “ViT disappears and one transformer does
+everything.” It is **one jointly trained reasoning and action system, exposed as
+one product, with modality-specific tokenizers, encoders, experts, codecs, and
+decoders wherever specialization buys fidelity or efficiency**. The most native
+systems will be unified at the level of learned state, training, policy, memory,
+and API while remaining heterogeneous at the signal-processing boundaries.
+
 ## 9. Current capability and planning matrix
 
 | Question | Evidence-bounded answer |
@@ -1012,6 +1217,8 @@ fully consolidated model lineage.
 - Qwen Team, [Qwen2-VL](https://arxiv.org/abs/2409.12191); OpenGVLab,
   [InternVL 2.5](https://arxiv.org/abs/2412.05271); and Kimi Team,
   [Kimi K2.5](https://arxiv.org/abs/2602.02276).
+- Meta, [Llama 4: natively multimodal models with early fusion](https://ai.meta.com/blog/llama-4-multimodal-intelligence/),
+  and Qwen Team, [Qwen3-Omni](https://arxiv.org/abs/2509.17765).
 - Kim et al., [Donut](https://arxiv.org/abs/2111.15664); Wei et al.,
   [GOT-OCR2.0](https://arxiv.org/abs/2409.01704); Cui et al.,
   [PaddleOCR-VL](https://arxiv.org/abs/2510.14528); and Niu et al.,
@@ -1019,6 +1226,7 @@ fully consolidated model lineage.
 - Meta, [Chameleon](https://arxiv.org/abs/2405.09818); Wang et al.,
   [Emu3](https://arxiv.org/abs/2409.18869); and Zhou et al.,
   [Transfusion](https://arxiv.org/abs/2408.11039).
+- Deng et al., [BAGEL](https://arxiv.org/abs/2505.14683).
 - Liang et al.,
   [Visual Merit or Linguistic Crutch?](https://arxiv.org/abs/2601.03714), an
   independent DeepSeek-OCR robustness study rather than a DeepSeek disclosure.
