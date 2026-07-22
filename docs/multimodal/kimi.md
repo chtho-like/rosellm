@@ -192,14 +192,124 @@ ordinary attention and MoE layers. The text output head remains autoregressive,
 which is why OCR, boxes, code, and actions can be serialized, but pixels are not
 directly emitted.
 
+### 4.4 API transport is not visual tokenization
+
+The OpenAI-compatible request schema uses fields named `image_url` and
+`video_url`, but the word `url` is easy to misread. In the current
+[Kimi visual-input guide](https://platform.kimi.com/docs/guide/use-kimi-vision-model),
+the dependable payload forms are:
+
+| Client-side form | Value placed in `image_url.url` or `video_url.url` | Suitable use |
+|---|---|---|
+| inline data URL | `data:image/png;base64,...` or `data:video/mp4;base64,...` | small, one-off media |
+| uploaded-media reference | `ms://<file_id>` after `POST /v1/files` with `purpose="image"` or `purpose="video"` | large or repeatedly referenced media |
+
+The guide explicitly says arbitrary HTTP or HTTPS image URLs are not currently
+supported. The generic
+[chat schema](https://platform.kimi.com/docs/api/chat) likewise documents
+base64 data URLs and `ms://` file references as the two supported media forms.
+`ms://` is an internal Moonshot Storage reference, not a public URL that the
+model downloads from the Internet. The field name is inherited from an API
+content-block convention; it does not prove URL fetching.
+
+For native visual input, uploading with `purpose="image"` or `purpose="video"`
+is different from `purpose="file-extract"`. The former preserves media for the
+vision path. The latter asks the file service to extract text that an application
+then places in a prompt, which is a text cascade rather than native visual
+inference.
+
+The two equivalent request shapes are conceptually:
+
+```json
+{"type":"video_url","video_url":{"url":"data:video/mp4;base64,..."}}
+```
+
+and, after a separate multipart upload:
+
+```json
+{"type":"video_url","video_url":{"url":"ms://file-id"}}
+```
+
+The `message.content` value must remain an array of typed content blocks; JSON
+stringifying that entire array into an ordinary text message loses the media
+type. Base64 increases the transmitted size and request parsing cost, so upload
+plus `file_id` is the practical path for large videos and media reuse. The
+current guide caps the request body at 100 MB, the file API caps an individual
+upload at 100 MB, recommends no more than 4K for images and 1080p for video, and
+offers a token-count endpoint because media token cost is dynamic.
+
+#### Who selects the video frames?
+
+The basic API caller sends a video container, not a manually prepared list of
+JPEG frames. Nevertheless, a model cannot consume MP4/H.264 bytes directly.
+Ordinary media and model-serving code must still perform the following work on
+Moonshot's side:
+
+```text
+MP4/MOV/WebM bytes or ms:// object
+  -> demux and decode the compressed video stream
+  -> select timestamped frames under a visual-token budget
+  -> resize/canonicalize and retain timing metadata
+  -> group up to four consecutive selected frames
+  -> spatial patching and spatiotemporal packing
+  -> MoonViT-3D attention
+  -> patch-wise temporal pooling
+  -> MLP projection into K2 width
+  -> interleave visual embeddings with text
+  -> K2 MoE prefill and autoregressive text/tool output
+```
+
+There are therefore **two distinct temporal reductions**:
+
+1. **clip-level sampling** chooses a bounded set of frames from the complete
+   decoded video; and
+2. **model-level compression** groups up to four consecutive retained frames and
+   temporally pools corresponding patches before the MLP projector.
+
+The API guide confirms the first boundary indirectly by saying that a video is
+represented by a variable number of key frames and that cost grows with key-frame
+count and resolution. It does not publish the production sampling policy, frame
+rate, scene-change logic, maximum retained-frame count, or whether “key frame”
+means codec I-frames versus model-selected frames. K2.5's paper discloses a
+specific uniform-frame policy for benchmark evaluation, but that is not evidence
+for the production API policy.
+
+The paper discloses the second boundary directly: MoonViT-3D treats up to four
+consecutive frames as one spatiotemporal volume, jointly packs their 2D patches,
+and applies lightweight temporal pooling before projection. This is reported to
+reduce temporal positions by up to fourfold. It does not recover an event that
+the earlier sampling stage omitted.
+
+#### Is MoonViT a separate model at inference time?
+
+It is a separately parameterized vision-encoder submodule—about 400M parameters
+for K2.5—not a captioning API that returns prose to K2. The MLP passes its
+continuous outputs directly into the jointly trained K2 backbone. A serving
+system may schedule this submodule on separate workers or co-locate it with the
+language prefill workers; either way, it remains one end-to-end model graph from
+media to answer.
+
+Moonshot publicly describes a Decoupled Encoder Process for **training**: the
+small vision encoder is replicated, visual work is load-balanced by patch count,
+its outputs are gathered to pipeline stage zero, and its forward pass is later
+recomputed for backpropagation. That is evidence that the encoder is
+computationally separable, but it does not disclose the exact production API
+topology. K3's current API exposes the same media abstraction while its visual
+encoder and serving internals remain undisclosed.
+
+The disclosed K2.5 path is visual-only. Neither the MoonViT-3D architecture nor
+the current visual API guide establishes that the audio track inside a video is
+encoded. Applications that require speech or sound should not assume it is heard;
+they need a documented audio-capable path or an explicit ASR/audio-model branch.
+
 ## 5. Why K2.5 is more than a bolted-on adapter
 
 ### 5.1 Vision-tower training and bridge alignment
 
 The report describes an initial MoonViT-3D stage over image-text and video-text
 pairs. Targets include captions, alternative text, grounding boxes, and OCR.
-Training combines a SigLIP-style contrastive objective with conditional caption
-generation.
+Unlike Kimi-VL's earlier recipe, the K2.5 report explicitly says this stage omits
+contrastive loss and uses conditional caption-generation cross-entropy alone.
 
 The first alignment stage updates the ViT while aligning it with the smaller
 Moonlight-16B-A3B language model and consumes about 1T caption-style tokens. A
@@ -344,6 +454,8 @@ public checkpoint/API boundary rather than guessing about internal products.
 - Moonshot AI, [Kimi K3 technical blog](https://www.kimi.com/blog/kimi-k3),
   [K3 API guide](https://platform.kimi.com/docs/guide/kimi-k3-quickstart), and
   [visual-input guide](https://platform.kimi.com/docs/guide/use-kimi-vision-model).
+- Moonshot AI, [chat content-block schema](https://platform.kimi.com/docs/api/chat)
+  and [media file upload API](https://platform.kimi.com/docs/api/files-upload).
 - Moonshot AI, [Kimi-Audio](https://github.com/MoonshotAI/Kimi-Audio).
 
 For the broader training, optimizer, long-context, and agent lineage, see the
