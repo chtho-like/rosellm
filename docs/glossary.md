@@ -149,8 +149,12 @@ visible.
 | **ViT** | Vision Transformer | Divides an image into patches, embeds them as a sequence, and applies transformer attention to produce visual representations. |
 | **visual token** | — | An overloaded term for a continuous visual embedding occupying a sequence position or a discrete image-code identifier; always state which. |
 | **projector / adaptor** | — | Maps a modality encoder's feature width and sometimes token count into the language backbone's embedding space. |
+| **Q-Former** | Querying Transformer | Uses a small learned query set to cross-attend to a larger visual feature grid, producing a fixed-size bridge into a language model. |
+| **pixel unshuffle / space-to-depth** | — | Deterministically moves each local spatial block into the channel dimension, reducing spatial positions without averaging them; it is the downsampling inverse of pixel shuffle. |
 | **NaViT** | Native-resolution Vision Transformer | A variable-resolution approach that packs patch sequences from differently sized images rather than forcing every image to one square resolution. |
+| **M-RoPE** | Multimodal Rotary Position Embedding | Extends rotary position coordinates across modality-appropriate axes such as time, height, and width while retaining a text sequence axis. |
 | **SigLIP** | Sigmoid Loss for Language-Image Pre-training | A contrastively trained vision-language representation model using independent sigmoid pair losses rather than a batch softmax. |
+| **optical context compression** | — | Renders or receives text-rich content as pixels and represents it with fewer continuous visual positions before a language decoder reconstructs or reasons over it; compression is lossy and does not eliminate decoding cost. |
 | **VQ / VQ-VAE** | Vector Quantization / Vector-Quantized Variational Autoencoder | Maps continuous image/audio latents to discrete codebook entries and decodes predicted codes back into media. |
 | **VAE** | Variational Autoencoder | Encodes media into a compact continuous latent distribution and decodes latent samples or generated latents back into media. |
 | **DiT** | Diffusion Transformer | Uses a transformer as the denoising network over noisy image or video latent patches; it is not automatically a language model. |
