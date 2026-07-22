@@ -390,45 +390,393 @@ The paper therefore reveals research intent more clearly than product schedule.
 ## 7. Janus: understanding and image generation in one system
 
 DeepSeek's [Janus repository](https://github.com/deepseek-ai/Janus) contains
-Janus, Janus-Pro, and JanusFlow. These models are the answer to “does DeepSeek
-have an LLM-centered model that can generate images?”—yes, as a separate
-research family.
+Janus, Janus-Pro, and JanusFlow. These models answer “does DeepSeek have an
+LLM-centered model that can generate images?”—yes, as a separate research
+family. They do not show that the current flagship text endpoint accepts pixels.
 
-### 7.1 Janus and Janus-Pro
+The name is architectural: the paper invokes the two-faced Roman god Janus to
+describe two opposing requirements. Understanding benefits from high-level,
+semantically invariant features; reconstruction needs local texture, color, and
+spatial detail. Janus gives those requirements different visual encoders while
+letting them meet in one language-centered transformer.
 
-Janus deliberately decouples two visual representations:
+### 7.1 The public line is a fork, not one linear upgrade path
 
-- an understanding encoder supplies continuous semantic visual features; and
-- a vector-quantized image tokenizer supplies discrete codes for generation.
+As of the verification cutoff, the official repository lists exactly four
+public checkpoints, all with a reported 4,096-token sequence length:
 
-Both paths connect to one autoregressive transformer. For understanding, image
-features condition text-token prediction. For generation, the transformer
-predicts discrete image codebook entries, which a VQ decoder converts back to
-pixels. The released
-[multimodal model assembly](https://github.com/deepseek-ai/Janus/blob/1daa72fa409002d40931bd7b36a9280362469ead/janus/models/modeling_vlm.py#L190-L263)
-contains separate understanding vision/alignment modules, generation vision and
-alignment modules, a generation embedding table and head, and one shared causal
-language model.
+| Public checkpoint | Release branch | Language-core scale | Understanding | Image generation |
+|---|---|---:|---|---|
+| Janus-1.3B | original | 1.3B label | SigLIP continuous features | 576 autoregressive VQ codes |
+| JanusFlow-1.3B | continuous-generation fork | 1.3B label | SigLIP continuous features | rectified flow over SDXL-VAE latents |
+| Janus-Pro-1B | scaled original branch | 1B public label; the report calls the underlying class 1.5B | same basic SigLIP path | same VQ-code mechanism as Janus |
+| Janus-Pro-7B | scaled original branch | 7B label | same basic SigLIP path | same VQ-code mechanism as Janus |
 
-The separate encoders solve a real conflict: a representation invariant enough
-for semantic understanding is not necessarily detailed enough for pixel
-reconstruction. “Unified model” therefore does not mean one identical encoder
-for every operation.
+The chronology can mislead. JanusFlow was released in November 2024 and
+Janus-Pro in January 2025, but Pro does **not** build on Flow's continuous image
+generator. The [Janus-Pro report](https://arxiv.org/abs/2501.17811) explicitly
+says its architecture is the same as Janus. A more accurate lineage is:
 
-Janus-Pro scales data and model size and refines training, but its public 1B/7B
-checkpoints remain far smaller and separate from DeepSeek V4.
+```text
+Janus-1.3B: separate semantic and reconstructive encoders, discrete AR images
+  |-- JanusFlow-1.3B: keep the separation, replace VQ-code AR with latent flow
+  `-- Janus-Pro-1B/7B: keep VQ-code AR, improve schedule/data/model scale
+```
 
-### 7.2 JanusFlow
+There is no released Janus video or audio checkpoint in the official list.
+The original paper discusses those modalities only as possible future encoder
+extensions.
 
-JanusFlow replaces discrete autoregressive image generation with rectified flow.
-The language transformer participates in predicting the velocity/noise-removal
-direction for continuous image latents over multiple integration steps, while
-text generation remains autoregressive. A VAE-like image representation and
-flow solver still surround the transformer.
+### 7.2 What is actually unified
 
-This is “image generation in an LLM framework,” but not one forward pass that
-writes a JPEG. The system iteratively evolves continuous latents and decodes
-them into pixels.
+Janus/Pro contain one dense `LlamaForCausalLM`-style DeepSeek-LLM core, not a
+V2/V3/V4 MoE core. The released
+[model assembly](https://github.com/deepseek-ai/Janus/blob/1daa72fa409002d40931bd7b36a9280362469ead/janus/models/modeling_vlm.py#L190-L263)
+instantiates all of the following inside one multimodal checkpoint:
+
+```text
+understanding: SigLIP -> understanding MLP ----+
+                                                   |
+text:          text embedding --------------------+-> shared causal LLM
+                                                   |      |-- text vocabulary head
+generation:    image-code embedding -> generation MLP ---`-- image-code head
+
+predicted image-code IDs -> frozen VQ codebook/decoder -> RGB image
+```
+
+The important sharing boundary is the transformer stack. The visual encoders,
+input adaptors, output heads, token spaces, and final media decoder are
+modality-specific. “Unified” therefore has three bounded meanings:
+
+1. one checkpoint contains both task paths;
+2. one causal transformer supplies most of the reasoning/generation capacity;
+3. mixed text, understanding, and image-generation examples jointly update
+   that transformer during the later training stages.
+
+It does not mean raw pixels and words use one tokenizer, one encoder, or one
+output head. It also does not mean that an unchanged DeepSeek V3/V4 process
+dynamically calls a Janus head.
+
+The suffix is not a complete serving-memory count. The papers' comparison
+tables describe the LLM parameter scale; a deployment also carries SigLIP,
+adaptors, heads, and a visual codec. JanusFlow further loads the pretrained
+SDXL-VAE separately in the official demo.
+
+### 7.3 Understanding path, tensor by tensor
+
+The Janus and Janus-Pro public configurations use
+SigLIP-Large-Patch16-384. For one image:
+
+```text
+RGB image:                         3 x 384 x 384
+SigLIP patch grid:                24 x 24 positions
+flattened semantic sequence:      576 x 1,024
+two-layer GELU understanding MLP: 1,024 -> D -> D
+shared language sequence:         text embeddings interleaved with 576 visual embeddings
+LLM text head:                    D -> 102,400 text-token logits
+```
+
+Here $D=2,048$ for Janus-1.3B/Janus-Pro-1B and $D=4,096$ for
+Janus-Pro-7B. The processor expands an image placeholder into 576 reserved
+positions. The implementation first embeds the ordinary text IDs, then
+[replaces those positions](https://github.com/deepseek-ai/Janus/blob/1daa72fa409002d40931bd7b36a9280362469ead/janus/models/modeling_vlm.py#L221-L260)
+with aligned SigLIP features. From that point onward, ordinary causal
+self-attention lets later text positions attend to the visual prefix, and the
+standard text head autoregressively emits an answer.
+
+This direction is architecturally close to a simple fixed-resolution VLM. It is
+not VL2's dynamic thumbnail-plus-local-tile path and is not OCR's
+high-resolution document compressor. Consequently, the fact that Janus can
+answer questions about an image does not make it the natural substitute for
+VL2 on large images or OCR 2 on dense pages.
+
+### 7.4 Janus/Pro image generation, tensor by tensor
+
+The reverse direction uses a separate reconstructive representation. The
+pretrained VQ model downsamples by 16, has a 16,384-entry codebook, and stores
+an eight-dimensional vector per code. The released
+[VQ implementation](https://github.com/deepseek-ai/Janus/blob/1daa72fa409002d40931bd7b36a9280362469ead/janus/models/vq_model.py#L31-L43)
+also exposes the convolutional encoder/decoder configuration. A 384 by 384
+training image becomes
+
+$$
+384/16=24,
+\qquad 24\times24=576
+$$
+
+discrete target IDs. Generation proceeds as follows:
+
+```text
+prompt text -> text embeddings -> shared causal LLM
+  -> hidden state h_1 -> image head -> 16,384 logits -> sample code c_1
+  -> code-ID embedding + generation MLP -> next LLM input
+  -> ... repeat autoregressively through c_576
+  -> reshape 576 IDs to a 24 x 24 code grid
+  -> VQ lookup and convolutional decoder
+  -> 3 x 384 x 384 RGB image
+```
+
+The released dimensions make the two modality boundaries explicit:
+
+| Component | Janus/Pro 1B path | Janus-Pro 7B path |
+|---|---:|---:|
+| image code vocabulary | 16,384 | 16,384 |
+| learned code-ID input embedding | 16,384 x 8 | 16,384 x 8 |
+| generation MLP | 8 -> 2,048 -> 2,048 | 8 -> 4,096 -> 4,096 |
+| image head | 2,048 -> 2,048 -> 16,384 | 4,096 -> 4,096 -> 16,384 |
+| generated positions | 576 | 576 |
+| native released resolution | 384 x 384 | 384 x 384 |
+
+The code-ID input embedding is a learned table in the multimodal model; the VQ
+decoder has its own quantizer codebook. Equal dimensionality does not establish
+that those two tables are tied. The source constructs them as separate modules.
+
+During sampling, Janus uses classifier-free guidance (CFG). Training removes
+the text condition on 10% of text-to-image examples so the model learns both
+conditional and unconditional logits. At each image position, inference forms
+
+$$
+\ell_{\mathrm{cfg}}
+=\ell_{\mathrm{uncond}}
++s\left(\ell_{\mathrm{cond}}-\ell_{\mathrm{uncond}}\right),
+$$
+
+with $s=5$ in the reported default, applies temperature and softmax, and samples
+the next code. The [official loop](https://github.com/deepseek-ai/Janus/blob/1daa72fa409002d40931bd7b36a9280362469ead/generation_inference.py#L57-L99)
+duplicates the batch for conditional/unconditional passes, uses the KV cache,
+and still has 576 serial sampling dependencies. The VQ decoder runs only after
+the code sequence is complete.
+
+This is direct image-representation prediction by the shared transformer, not
+a text LLM merely producing a Stable Diffusion prompt. It is nevertheless not
+raw-byte or raw-pixel emission: the VQ codec is indispensable.
+
+### 7.5 Why split the understanding and generation encoders
+
+A SigLIP feature is trained to keep semantics useful across nuisance changes.
+That is desirable when answering “what object is this?” but harmful if a decoder
+must reproduce the precise background texture. A VQ code is trained for local
+reconstruction, but an index such as 8,217 has no naturally rich linguistic
+meaning. Using only the VQ path for understanding made the original paper's
+understanding baseline markedly worse; distilling semantics into one shared
+tokenizer improved it but retained an understanding/generation trade-off.
+
+Janus therefore does not pursue maximum representational elegance. It chooses
+specialized information bottlenecks and shares the expensive transformer. This
+is less token-unified than Chameleon/Emu3, but it avoids forcing one visual
+tokenizer to be simultaneously invariant and pixel-faithful.
+
+### 7.6 The three-stage Janus training recipe
+
+The original Janus paper discloses a simple loss and a staged unfreezing policy:
+
+1. **Adaptor alignment:** freeze both visual encoders and the LLM; train the
+   understanding adaptor, generation adaptor, and image head. Original Janus
+   uses 1.25M ShareGPT4V caption pairs and about 1.2M ImageNet-1k examples.
+2. **Unified pretraining:** unfreeze the LLM while retaining frozen visual
+   encoders. Mix multimodal understanding, pure text, and visual-generation data
+   in a 2:3:5 ratio. Original Janus spends its first 120K of 180K steps on
+   ImageNet category-to-image examples and the last 60K on general text-to-image
+   data.
+3. **Supervised fine-tuning:** train all components except the VQ generation
+   encoder, mix text dialogue, visual instruction data, and text-to-image data,
+   and mask prompt-side loss so responses are supervised.
+
+For text and image-understanding samples, cross-entropy is applied only to the
+answer text. For generation samples, cross-entropy is applied only to the image
+code sequence. The original formulation gives the task losses no additional
+manual weighting beyond the data mixture:
+
+$$
+\mathcal{L}_{\mathrm{AR}}
+=-\sum_i\log p_\theta(x_i\mid x_{<i}).
+$$
+
+The common symbol hides two different vocabularies and heads: text examples
+score text-token logits, whereas image-generation examples score VQ-code
+logits. Joint training is what moves the shared language core away from being a
+plain text checkpoint and makes Janus a standalone multimodal checkpoint.
+
+### 7.7 What Janus-Pro actually changes
+
+Janus-Pro is principally a recipe-and-scale release, not a new media interface.
+Its disclosed changes are concrete:
+
+| Axis | Original Janus | Janus-Pro |
+|---|---|---|
+| architecture | SigLIP + VQ, shared dense AR LLM | same basic architecture |
+| Stage I | 10K steps; understanding:text:generation = 1:0:1 | 20K steps; 1:0:3, letting frozen-LLM adaptor training learn more ImageNet pixel dependence |
+| Stage II | 180K; ImageNet for 120K then open-domain generation for 60K | nominal 360K but early-stopped at 270K; drops ImageNet and uses ordinary text-to-image data directly |
+| Stage III mixture | 7:3:10 | 5:1:4, reducing generation share while improving understanding |
+| understanding data | original corpus | adds about 90M Stage-II samples following VL2, including captions, documents, tables, and charts, plus VL2-derived SFT categories |
+| generation data | noisier real-image mixture | adds about 72M synthetic aesthetic samples; reported real:synthetic ratio 1:1 in unified pretraining |
+| language scale | one 1.3B-class core | public 1B and 7B checkpoints |
+| image representation | 576 VQ codes at 384 square | unchanged in the disclosed release |
+
+The VL2 connection is therefore mostly **data-recipe reuse**. Janus-Pro did not
+adopt VL2's dynamic tiling, SigLIP-SO400M connector, MLA, or MoE language
+architecture. Likewise, original Janus reused DeepSeek-VL chart/table data, but
+that does not turn either model into a runtime VL-to-Janus pipeline.
+
+The larger Pro configuration raises the hidden width from 2,048 to 4,096, heads
+from 16 to 32, and layers from 24 to 30. It improves the shared model's capacity
+to learn both code dependencies and visual-language semantics, but does not
+remove the 576-step autoregressive image bottleneck or raise the native 384
+resolution.
+
+### 7.8 JanusFlow is a different generator, not “Pro plus flow”
+
+JanusFlow keeps the semantic understanding path but replaces discrete image
+classification with a continuous generative trajectory. It uses an enhanced
+1.3B DeepSeek-LLM core with 24 blocks and width 2,048, a roughly 300M-parameter
+SigLIP understanding encoder, and about 70M parameters of lightweight
+generation encoder/decoder modules.
+
+The released generation path is exact enough to trace:
+
+```text
+Gaussian z_0:                    4 x 48 x 48 SDXL-VAE latent
+2 x 2 patchify + ConvNeXt:       768 x 24 x 24
+flatten + linear alignment:      576 x 2,048
+prepend time embedding:          1 + 576 generation positions
+prompt embeddings + causal LLM: hidden states for all 576 latent positions
+RMSNorm + linear:                576 x 768
+reshape + ConvNeXt decoder:      4 x 48 x 48 velocity, with a long encoder skip
+Euler update:                    z <- z + dt * v
+repeat, then SDXL-VAE decode:     3 x 384 x 384 RGB
+```
+
+The module boundary is visible in the released
+[JanusFlow assembly](https://github.com/deepseek-ai/Janus/blob/1daa72fa409002d40931bd7b36a9280362469ead/janus/janusflow/models/modeling_vlm.py#L132-L169),
+and the [official sampling loop](https://github.com/deepseek-ai/Janus/blob/1daa72fa409002d40931bd7b36a9280362469ead/demo/app_janusflow.py#L69-L134)
+shows the 48 by 48 latent, 576 aligned positions, CFG branches, Euler update, and
+final VAE decode.
+
+The SDXL-VAE is a codec and latent space, not an external diffusion denoiser.
+JanusFlow's shared LLM plus its lightweight generation modules predict the
+velocity. This makes it more integrated than a language model handing a prompt
+to an independent Stable Diffusion/DiT generator, even though the pretrained
+VAE is still required.
+
+Rectified flow defines a straight interpolation between noise $z_0$ and the
+training image latent $x$:
+
+$$
+z_t=t x+(1-t)z_0,
+\qquad
+\mathcal{L}_{\mathrm{RF}}
+=\mathbb{E}\left[
+\left\|v_\theta(z_t,t\mid c)-(x-z_0)\right\|_2^2
+\right].
+$$
+
+At inference, Euler integration starts at noise and repeatedly applies
+
+$$
+z_{t+\Delta t}=z_t+\Delta t\,v_\theta(z_t,t).
+$$
+
+The official example uses 30 steps and CFG. Unlike Janus's 576 serial code
+samples, JanusFlow predicts velocity values for all 576 spatial positions in
+each solver pass. It therefore trades a long token-by-token chain for roughly
+30 repeated full latent-sequence passes. The latent patches are parallel within
+a pass, although the inherited causal attention still imposes an ordering in
+the transformer.
+
+JanusFlow adds a representation-alignment regularizer. On generation examples,
+it compares stop-gradient SigLIP features of the clean target image with a
+three-layer projection of the shared LLM's sixth-block features for the noisy
+latent. Mean cosine alignment injects semantic structure into the flow path:
+
+$$
+\mathcal{L}_{\mathrm{gen}}
+=\mathcal{L}_{\mathrm{RF}}+\mathcal{L}_{\mathrm{REPA}}.
+$$
+
+The target SigLIP branch receives no gradient from this term. The model uses a
+logit-normal time distribution, drops 10% of text conditions for CFG, and uses
+an exponential moving average of 0.99 for training stability.
+
+Its three training stages also differ from discrete Janus:
+
+1. train only newly initialized linear layers and generation encoder/decoder;
+2. train the unified model while keeping the pretrained visual encoder frozen,
+   first biasing the mix toward understanding and then toward the slower-to-
+   converge generation objective;
+3. supervised-fine-tune and unfreeze SigLIP, while the SDXL-VAE remains a
+   pretrained codec.
+
+The paper trains and evaluates native 384-square images. Enlarging a demo image
+to 1,024 with ordinary interpolation is not native 1,024 generation.
+
+### 7.9 Why VL, VL2, OCR, and Janus feel like different systems
+
+They are different systems. Their conditional distributions and required
+modules are not the same:
+
+| Line | Learned direction | Visual input representation | Media output representation | Missing or additional subsystem |
+|---|---|---|---|---|
+| VL | $p(\text{text}\mid\text{image},\text{text})$ | continuous fixed-resolution SigLIP/SAM features | none; text only | no image vocabulary, image head, or media decoder |
+| VL2 | $p(\text{text}\mid\text{image},\text{text})$ | continuous dynamic tiles compressed by space-to-depth | none; text/grounding serialization only | no image-generation objective or decoder |
+| OCR/OCR 2 | $p(\text{Markdown/layout}\mid\text{page},\text{prompt})$ | document-specialized compressed continuous features | none; serialized text/layout only | optimized for page fidelity and token economy, not synthesis |
+| Janus/Pro | both text conditional prediction and $p(\text{VQ codes}\mid\text{text})$ | continuous SigLIP for understanding | 576 discrete image codes plus VQ decoder | adds a second visual path, image head, generation data, and CFG |
+| JanusFlow | text conditional prediction plus a conditional velocity field | continuous SigLIP for understanding | continuous SDXL-VAE latent trajectory | adds flow encoder/decoder, solver, VAE, RF loss, and alignment loss |
+
+An understanding-only VLM cannot acquire image generation merely by changing a
+prompt. The training target, output head, media representation, decoder, and
+sampling algorithm are all absent. Conversely, Janus's simple fixed 384 input
+path does not inherit VL2's high-resolution policy just because both models use
+DeepSeek-branded language backbones.
+
+### 7.10 How Janus can “work with the base model”
+
+There are two meanings, and conflating them causes most confusion.
+
+**Training-time inheritance.** Janus starts from pretrained DeepSeek-LLM
+weights. New visual modules are aligned while the LLM is frozen; later mixed
+pretraining and SFT update the shared transformer. The resulting checkpoint is
+no longer a detachable projector over an unchanged base model. Its language
+weights have been co-adapted to visual inputs and image targets.
+
+**Runtime composition with a flagship text model.** A product can use separate
+services:
+
+```text
+image/page -> VL2 or OCR -> text/Markdown -> V4 reasoning/tools
+V4 planning/prompt rewrite -> text prompt -> Janus/JanusFlow -> image artifact
+```
+
+This is useful orchestration, but no continuous visual states or shared weights
+cross the service boundary. The first cascade loses any image information not
+serialized into text; the second gives V4 no differentiable control over the
+image generator. There is no public evidence that V3/V4 internally load Janus,
+that Janus is a V4 adapter, or that their checkpoints can be merged directly.
+
+Porting the idea to a new MoE flagship would require more than matching tensor
+widths: new connectors and media heads, multimodal continued pretraining,
+generation objectives, SFT/preference data, and validation of attention, MoE
+routing, context budgets, and media sampling. A runtime tool call is much
+easier, but architecturally weaker.
+
+### 7.11 Practical limitations and evidence boundary
+
+- Janus/Pro's native image path is fixed at 384 square and requires 576 serial
+  code decisions; quantization and error accumulation can harm small text,
+  texture, and exact geometry.
+- CFG doubles conditional/unconditional model work. KV caching reduces repeated
+  prefix computation but cannot remove the next-code dependency.
+- JanusFlow avoids discrete code classification and updates all spatial latent
+  positions per step, but still needs repeated solver passes, a VAE decoder, and
+  two CFG branches.
+- The released training and demos establish image understanding and
+  text-to-image generation. They do not establish a general image editor,
+  arbitrary image-text-image interleaving, video generation, or audio output.
+- The visual checkpoint label should not be read as total loaded parameters or
+  as parity with a current 7B text-only reasoning model. Components, training
+  objectives, and benchmarks differ.
+- Vendor benchmark tables validate the research direction under their reported
+  protocols; they do not prove that a 384-square unified model supersedes
+  dedicated high-resolution diffusion/flow generators or document parsers.
 
 ## 8. Industry comparison: where the designs actually differ
 
@@ -652,7 +1000,11 @@ fully consolidated model lineage.
 - DeepSeek-AI, [Janus](https://arxiv.org/abs/2410.13848),
   [Janus-Pro](https://arxiv.org/abs/2501.17811),
   [JanusFlow](https://arxiv.org/abs/2411.07975), and the
-  [Janus repository](https://github.com/deepseek-ai/Janus).
+  [Janus repository and public checkpoint list](https://github.com/deepseek-ai/Janus#2-model-download).
+- Released configuration artifacts for
+  [Janus-Pro-1B](https://huggingface.co/deepseek-ai/Janus-Pro-1B/blob/main/config.json),
+  [Janus-Pro-7B](https://huggingface.co/deepseek-ai/Janus-Pro-7B/blob/main/config.json),
+  and [JanusFlow-1.3B](https://huggingface.co/deepseek-ai/JanusFlow-1.3B/blob/main/config.json).
 - DeepSeek, [V4 official release](https://api-docs.deepseek.com/news/news260424/)
   and [text-only vision-proxy statement](https://api-docs.deepseek.com/quick_start/agent_integrations/github_copilot).
 - Liu et al., [LLaVA: Visual Instruction Tuning](https://arxiv.org/abs/2304.08485),

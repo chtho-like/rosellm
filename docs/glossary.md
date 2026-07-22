@@ -159,6 +159,7 @@ visible.
 | **VAE** | Variational Autoencoder | Encodes media into a compact continuous latent distribution and decodes latent samples or generated latents back into media. |
 | **DiT** | Diffusion Transformer | Uses a transformer as the denoising network over noisy image or video latent patches; it is not automatically a language model. |
 | **rectified flow** | — | Learns a continuous velocity field that transports noise toward data, then generates by integrating that field, often in a compressed latent space. |
+| **CFG** | Classifier-Free Guidance | Combines conditional and unconditional predictions during media sampling to strengthen prompt alignment; it usually requires both branches and therefore adds inference work. |
 | **native multimodal** | — | An ambiguous integration claim; specify API, sequence, training, shared-backbone, and media-generation levels instead of treating it as a binary architecture. |
 | **LSH / MinHash** | Locality-Sensitive Hashing / Minimum Hashing | Approximate similarity indexing / Jaccard-similarity estimation, often used in deduplication. |
 | **PII** | Personally Identifiable Information | Data that can identify or link to a person. |
