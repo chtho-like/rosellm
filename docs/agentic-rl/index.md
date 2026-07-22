@@ -304,9 +304,14 @@ table from being mistaken for a newly disclosed training recipe.
 
 ## Recommended learning sequence
 
+Use the [must-read syllabus and priority map](reading-list.md) alongside this
+sequence. It identifies the exact report chapters, paper sections, deferrable
+material, role-specific routes, expected reading time, and concrete exit
+artifact for each P0–P3 source.
+
 | Phase | Read | Build | Exit criterion |
 |---|---|---|---|
-| 0 | The [repository roadmap](../learning-roadmap.md), especially the five-pass loop and Levels 0–6 | the prerequisite mastery checks | Identify every missing probability, optimization, transformer, and classical-RL dependency before specialization. The levels are checklists, not complete prerequisite textbooks; use the [bibliography](bibliography.md) as a source rail. |
+| 0 | The [repository roadmap](../learning-roadmap.md), especially the five-pass loop and Levels 0–6, plus the [P0 reading spine](reading-list.md#p0-spine) | the prerequisite mastery checks | Identify every missing probability, optimization, transformer, and classical-RL dependency before specialization. The levels are checklists, not complete prerequisite textbooks; use the [bibliography](bibliography.md) as a source rail. |
 | 1 | [Curriculum map](index.md), [terminology](terminology.md), and [history](history.md) | a timeline and concept map | Explain why a multi-turn tool task is not a contextual bandit and place each algorithm in its historical setting. |
 | 2 | [Mathematical foundations](mathematical-foundations.md) and [step-by-step derivations](derivations-and-code.md) | REINFORCE on a toy sequence task | Derive the estimator, trace its tensor implementation, and measure its variance. |
 | 3 | [Algorithms](algorithms.md) | PPO, RLOO, and GRPO on identical samples | Explain every normalization, mask, ratio, and estimator assumption. |

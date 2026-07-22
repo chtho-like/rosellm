@@ -4,6 +4,11 @@ This bibliography is a reading map, not a popularity ranking. Primary sources
 are grouped by the question they answer. Read the cited section before relying
 on a claim; abstracts are insufficient for implementation details.
 
+For a dependency-ordered course with P0–P3 priorities, exact sections,
+deferrable material, role-specific routes, time budgets, and required reading
+artifacts, use the [Agentic RL must-read syllabus](reading-list.md). This page
+remains the wider reference shelf.
+
 The scope is **Agentic Reinforcement Learning (Agentic RL)** for **Large
 Language Models (LLMs)**.
 
@@ -287,6 +292,55 @@ cataloged separately under [Training systems](#training-systems).
 5. **Mialon et al. — “GAIA” (2023).** Real-world questions requiring reasoning,
    tools, browsing, and multimodal information.
    [arXiv](https://arxiv.org/abs/2311.12983)
+6. **Xie et al. — “OSWorld” (2024).** A real computer environment with
+   screenshot/accessibility observations, primitive computer actions,
+   reproducible initial states, and execution-based evaluators.
+   [arXiv](https://arxiv.org/abs/2404.07972)
+7. **Yao et al. — “$\tau$-bench” (2024).** Stateful tool–agent–user interaction
+   with hidden database state, policies, a user simulator, rule-based terminal
+   evaluation, and the repeated-trial reliability metric `pass^k`.
+   [arXiv](https://arxiv.org/abs/2406.12045)
+
+## Reward failure and evaluation science
+
+1. **Gao et al. — “Scaling Laws for Reward Model Overoptimization” (2022).**
+   Measures proxy-reward optimization against a synthetic gold reward and
+   separates Reinforcement Learning (RL), best-of-N, KL distance, and several
+   Goodhart mechanisms. Read Sections 2–4.
+   [arXiv](https://arxiv.org/abs/2210.10760)
+2. **Denison et al. — “Sycophancy to Subterfuge” (2024).** Trains on a
+   curriculum of increasingly gameable environments and tests generalization
+   toward reward tampering. Read Sections 2–5 and Appendix D.
+   [arXiv](https://arxiv.org/abs/2406.10162)
+3. **Miller — “Adding Error Bars to Evals” (2024).** Independent versus
+   clustered questions, variance reduction, paired model comparison, and
+   prospective power analysis. Read Sections 2–5.
+   [arXiv](https://arxiv.org/abs/2411.00640)
+
+## Explanatory and implementation companions
+
+These sources can make a primary paper operational, but they do not supersede
+its evidence.
+
+1. **OpenAI — Spinning Up PPO documentation.** A compact derivation,
+   pseudocode, implementation, and hyperparameter interface for classical
+   actor–critic PPO. It is an educational continuous-control implementation,
+   not an LLM Agentic RL recipe.
+   [documentation](https://spinningup.openai.com/en/latest/algorithms/ppo.html)
+2. **Hugging Face — “The N Implementation Details of RLHF with PPO” (2023).**
+   A reproduction-oriented audit of response generation, padding, position
+   identifiers, reward/value extraction, normalization, rejection sampling,
+   and optimizer differences in an early language-model PPO stack.
+   [blog](https://huggingface.co/blog/the_n_implementation_details_of_rlhf_with_ppo)
+3. **Hugging Face — “Open R1: Update #3” (2025).** Code-data construction,
+   verifiability failures, sample packing, learning-rate and long-reasoning
+   lessons from an open reproduction effort. Much of the reported work is
+   distillation or SFT rather than online RL.
+   [blog](https://huggingface.co/blog/open-r1/update-3)
+4. **Google DeepMind — “Specification gaming: the flip side of AI ingenuity”
+   (2020).** An illustrated case catalog for reward loopholes and the gap
+   between a specified proxy and intended outcome.
+   [blog](https://deepmind.google/blog/specification-gaming-the-flip-side-of-ai-ingenuity/)
 
 ## How to add a paper
 
