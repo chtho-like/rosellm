@@ -1,8 +1,14 @@
 # DeepSeek: From Domain Data to Million-Token Agentic Reinforcement Learning
 
-**Verified through:** 2026-07-22. **Sources:** DeepSeek papers, official model
+**Verified through:** 2026-07-23. **Sources:** DeepSeek papers, official model
 cards, repositories, and release notes. Benchmark results are vendor-reported
 unless marked reproduced.
+
+For release dates across the main text lineage, code/math/prover branches,
+vision/generation/OCR branches, and API aliases, see the
+[DeepSeek release timeline](../../deepseek-release-timeline.md). For a
+cross-vendor accounting of fresh, continued, and multimodal token exposure, see
+the [model training token ledger](../../model-training-token-ledger.md).
 
 For the separate DeepSeek-VL, Janus, DeepSeek-OCR/OCR 2, and current text-only
 V4 modality boundaries, see the
@@ -67,7 +73,7 @@ These terms recur throughout this chapter:
 | 2024-01-05 | DeepSeek LLM | Dense 7B/67B, 2T tokens | SFT + DPO; no online RL disclosed |
 | 2024-01-25 | DeepSeek Coder | Repository-level code, FIM, 16K | Executable-code data foundation |
 | 2024-02-05 | DeepSeekMath | Domain continued pretraining + GRPO | First public DeepSeek GRPO |
-| 2024-05-07 | DeepSeek-V2 | 236B/21B MoE, MLA | Two-stage GRPO and hybrid rollout/training |
+| 2024-05-06 | DeepSeek-V2 | 236B/21B MoE, MLA | Two-stage GRPO and hybrid rollout/training |
 | 2024-06-17 | DeepSeek-Coder-V2 | V2 branch + 6T code-heavy tokens | Code/math verifier-based RL |
 | 2024-09-05 | DeepSeek-V2.5 | Chat/coder capability combination | Update recipe unknown |
 | 2024-12-26 | DeepSeek-V3 | 671B/37B, FP8, MTP, loss-free balancing | Specialist distillation + mixed GRPO |
@@ -77,7 +83,7 @@ These terms recur throughout this chapter:
 | 2025-08-21 | V3.1 | hybrid thinking + agent training | Explicit search/coding/tool post-training |
 | 2025-09-29 | V3.2-Exp | DeepSeek Sparse Attention | Specialists + mixed GRPO disclosed |
 | 2025-12-01 | V3.2 | scaled agent environments | 85,267 tasks; >10% pretraining-equivalent post-training budget |
-| 2026-04-24 | V4 Preview | 284B/13B Flash; 1.6T/49B Pro; 1M context | GRPO specialists consolidated by OPD |
+| 2026-04-24 | DeepSeek-V4 preview release | 284B/13B Flash; 1.6T/49B Pro; 1M context | GRPO specialists consolidated by OPD |
 
 ## 3. DeepSeek LLM: dense baseline and global deduplication
 
@@ -636,7 +642,7 @@ but gives no absolute GPU-hour or dollar figure.
 
 ## 14. DeepSeek-V4 Preview: million-token models and OPD
 
-Primary sources: [V4 Pro report](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/DeepSeek_V4.pdf),
+Primary sources: [V4 report snapshot](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/a7aaed80dd2df27620eb534454253ea25eb11c7a/DeepSeek_V4.pdf),
 especially Sections 2, 4, and 5; [official release](https://api-docs.deepseek.com/news/news260424/).
 
 ### 14.1 Models [D]

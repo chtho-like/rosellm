@@ -20,6 +20,11 @@ repositories, release notes, and first-party engineering posts. A chapter may
 explain a mechanism from first principles, but it attributes that mechanism to
 a laboratory only when a primary source does.
 
+For a cross-vendor quantitative view, start with the
+[model training token ledger](../../model-training-token-ledger.md). For dated
+DeepSeek checkpoint, specialist, and API events, use the
+[DeepSeek release timeline](../../deepseek-release-timeline.md).
+
 The word “actual” has a strict meaning here: **actually disclosed by a primary
 source**. A technically plausible pipeline is not evidence that a company used
 it. Public weights do not reveal data lineage, internal ablations, production
@@ -52,7 +57,7 @@ independent reproductions.
 
 | Lab | Latest public generation | Disclosed architecture | Context window | Agentic post-training disclosure | Critical unknown |
 |---|---|---|---:|---|---|
-| DeepSeek | V4 Preview (2026-04-24) | Flash 284B total / 13B active; Pro 1.6T / 49B mixture of experts (MoE) | 1M tokens | >10 Group Relative Policy Optimization (GRPO) specialists merged by full-vocabulary multi-teacher on-policy distillation; million-token fault-tolerant rollouts and the DeepSeek Elastic Compute (DSec) sandbox platform described | accelerator count, duration, cost, exact task/reward volumes |
+| DeepSeek | V4 preview release (2026-04-24) | Flash 284B total / 13B active; Pro 1.6T / 49B mixture of experts (MoE) | 1M tokens | >10 Group Relative Policy Optimization (GRPO) specialists merged by full-vocabulary multi-teacher on-policy distillation; million-token fault-tolerant rollouts and the DeepSeek Elastic Compute (DSec) sandbox platform described | accelerator count, duration, cost, exact task/reward volumes |
 | Zhipu AI | GLM-5.2 (2026-06-16) | 753B hosted checkpoint; SAO paper rounds to 750B total / 40B active; earlier family convention 744B / 40B | 1M tokens | SAO is explicitly reported as deployed; critic Proximal Policy Optimization (PPO) for variable compacted sub-traces; token-level advantages/loss; >10 domain-specialist models merged with parallel on-policy distillation; online anti-hack guard | GLM-specific SAO/PPO hyperparameters and stage scope, task volume, hardware and cost |
 | Moonshot AI | K3 (2026-07-17) | 2.8T total; 896 experts, 16 selected per token; Kimi Delta Attention (KDA) + Attention Residuals (AttnRes) + LatentMoE | 1M tokens | product demonstrations disclose long agent runs, but K3 training/RL report was still pending | active parameters, data/tokens, RL algorithm, environments, hardware and cost |
 

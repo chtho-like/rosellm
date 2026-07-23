@@ -21,6 +21,14 @@ training, distributed rollout systems, and source-level implementation. Read
 the [research standard](research-method.md) before using the
 [frontier-lab and open-industry evidence matrix](agentic-rl/case-studies/index.md).
 
+For a quantitative orientation before entering the case studies, use the
+[model training token ledger](model-training-token-ledger.md). It separates
+fresh pretraining, continued pretraining, post-training, corpus size, and
+context length across DeepSeek, Kimi, GLM, Qwen, other Chinese lineages, and
+international reference families. The companion
+[DeepSeek release timeline](deepseek-release-timeline.md) distinguishes
+mainline checkpoints, specialist branches, API aliases, and temporary modes.
+
 The [Multimodal Foundation Models section](multimodal/index.md) is a second
 evidence-grounded specialization. It traces image, video, document, and audio
 representations through encoders, projectors, shared backbones, media decoders,

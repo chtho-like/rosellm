@@ -48,6 +48,8 @@ nav:
   - Glossary: glossary.md
   - Research Standard: research-method.md
   - Documentation Quality: documentation-quality.md
+  - Model Training Token Ledger: model-training-token-ledger.md
+  - DeepSeek Release Timeline: deepseek-release-timeline.md
   - Model Evaluation and Reliability:
       - Instruction Following and Steerability: evaluation/instruction-following.md
   - Coding-Agent Systems:

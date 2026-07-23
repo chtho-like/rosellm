@@ -15,6 +15,7 @@ answers the more important question, “what does this object do here?”
 | **RL** | Reinforcement Learning | Learning a behavior policy from scalar rewards produced through interaction. |
 | **agentic RL** | Agentic Reinforcement Learning | RL in which an LLM acts over multiple steps, often using tools and receiving delayed environment feedback. It is a setting, not one algorithm. |
 | **SFT** | Supervised Fine-Tuning | Maximum-likelihood training on supplied target responses or trajectories. It imitates demonstrations rather than directly maximizing a reward. |
+| **CPT** | Continual Pretraining | Additional next-token training of an existing checkpoint, often on a new domain, higher-quality mixture, or longer context. A CPT token count is an incremental stage, not automatically the model's total lifetime exposure. |
 | **RLHF** | Reinforcement Learning from Human Feedback | RL in which human judgments directly or indirectly define reward, often through a learned reward model. |
 | **RLAIF** | Reinforcement Learning from AI Feedback | RL whose labels, critiques, or rewards are produced by another AI system. |
 | **CAI** | Constitutional AI | Uses written principles to generate critiques, revisions, or AI preference labels; the cited Anthropic pipeline combines these stages with SFT and RL. |
@@ -153,6 +154,7 @@ visible.
 
 | Term | Full name | Meaning |
 |---|---|---|
+| **training-token exposure** | — | The number of token positions processed by an optimizer stage. Repeated epochs and resampled documents count again, so exposure is not necessarily unique corpus size; fresh pretraining, CPT, multimodal stages, and post-training must be identified separately. |
 | **BPE / BBPE** | Byte Pair Encoding / Byte-Level Byte Pair Encoding | Frequent-pair subword merging / the byte-based variant that can represent any input. |
 | **OCR** | Optical Character Recognition | Converts pixels or scanned pages into text. |
 | **VLM / LMM** | Vision-Language Model / Large Multimodal Model | A model that jointly processes language and one or more non-text modalities; the exact input and output modalities must still be stated. |
