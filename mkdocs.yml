@@ -55,7 +55,11 @@ nav:
       - LLM Hallucination and Mitigation: evaluation/hallucination.md
       - Disclosed Vendor Practices: evaluation/hallucination-vendors.md
       - Evaluation and Production Operations: evaluation/hallucination-operations.md
-      - Instruction Following and Steerability: evaluation/instruction-following.md
+      - Instruction Following and Steerability:
+          - Overview, Benchmarks, and GPT vs DeepSeek: evaluation/instruction-following.md
+          - Improvement Method Map: evaluation/instruction-following-methods.md
+          - Disclosed Vendor Practices: evaluation/instruction-following-vendors.md
+          - Evaluation and Production Operations: evaluation/instruction-following-operations.md
   - Coding-Agent Systems:
       - Architecture and Evidence Map: coding-agents/index.md
       - Reasonix History and System Comparison: coding-agents/reasonix.md

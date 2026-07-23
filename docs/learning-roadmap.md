@@ -235,9 +235,13 @@ trace rather than aggregate throughput alone.
 - Instruction following as a vector of atomic constraints, negative and ordered
   instructions, multi-turn retention, versioned editing, instruction hierarchy,
   tool-policy compliance, calibration, and repeated-run reliability. Use the
-  [instruction-following evaluation chapter](evaluation/instruction-following.md)
-  to keep deterministic format checks separate from task success and product
-  scaffolding.
+  [instruction-following overview](evaluation/instruction-following.md), then
+  the [improvement method map](evaluation/instruction-following-methods.md),
+  [vendor evidence audit](evaluation/instruction-following-vendors.md), and
+  [production operations
+  chapter](evaluation/instruction-following-operations.md) to keep model
+  training, deterministic format checks, task success, authorization, and
+  product scaffolding separate.
 - Large Language Model judges, pairwise evaluation,
   position/verbosity/self-preference bias, and
   human validation.

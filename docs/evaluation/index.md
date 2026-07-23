@@ -19,6 +19,17 @@ Use this dependency-ordered reading path:
 4. [Instruction following and steerability](instruction-following.md) covers
    constraint retention, role hierarchy, tool-policy compliance, and
    multi-turn reliability. Those failures can coexist with perfect factuality.
+5. [Instruction-following improvement methods](instruction-following-methods.md)
+   spans data construction, SFT, preference/RL, hierarchy training, tool
+   trajectories, constrained decoding, verification, memory, and product
+   controls.
+6. [Disclosed instruction-following vendor
+   practices](instruction-following-vendors.md) audits named models and
+   products without inferring proprietary training from an API feature.
+7. [Instruction-following production
+   operations](instruction-following-operations.md) defines a versioned
+   contract, rule-level evaluation, release gates, telemetry, and incident
+   response.
 
 The repository-wide [research standard](../research-method.md) defines the
 evidence labels used throughout:

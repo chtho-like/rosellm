@@ -1,6 +1,6 @@
 # Instruction Following, Steerability, and Production Reliability
 
-**Verified through:** 2026-07-22.
+**Verified through:** 2026-07-23.
 
 Instruction following is not one scalar capability. A model can satisfy a word
 count while forgetting a rule from five turns earlier; call the correct tool
@@ -10,14 +10,23 @@ priority developer rule. This chapter separates those cases and explains why a
 model can rank highly on an instruction-following leaderboard yet still feel
 unreliable in a real product.
 
-Use this reading order:
+Use this topic in dependency order:
 
-1. define the instruction-following surface being tested;
-2. locate every failure in the model, decoder, API, or agent harness;
-3. choose a benchmark for each surface rather than one aggregate ranking;
-4. read GPT and DeepSeek disclosures under matched model and inference modes;
-5. treat forum reports as failure-mode discovery, not prevalence estimates;
-6. finish with a private, versioned application evaluation.
+1. This page defines the behavioral surfaces, explains end-to-end attribution,
+   maps benchmarks, and preserves a dated GPT-versus-DeepSeek comparison.
+2. The [instruction-following method map](instruction-following-methods.md)
+   catalogs data, SFT, preference/RL, hierarchy, tool, inference, decoder,
+   memory, verification, and product controls.
+3. The [vendor evidence audit](instruction-following-vendors.md) separates
+   named training disclosures from research prototypes, API controls, product
+   orchestration, and unknown proprietary details.
+4. The [production operations
+   chapter](instruction-following-operations.md) defines the instruction
+   contract, test suite, metrics, release gates, telemetry, and incident loop.
+
+Within this page, first define the surface being tested, locate the failure in
+the model or surrounding system, choose a matched benchmark, and treat forum
+reports as failure-mode discovery rather than prevalence measurement.
 
 The general [research standard](../research-method.md) defines the evidence
 labels used below. The [agent evaluation chapter](../agentic-rl/evaluation-and-safety.md)
@@ -195,7 +204,7 @@ behavior were not the same optimization problem. See the
 
 ### 4.2 V4 explicitly trains an instruction-following expert
 
-The April 2026 [DeepSeek-V4 technical report](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/resolve/main/DeepSeek_V4.pdf)
+The April 2026 [DeepSeek-V4 technical report](https://arxiv.org/abs/2606.19348)
 discloses a two-stage post-training system. Separate domain experts for
 mathematics, coding, agents, instruction following, and other areas each receive
 supervised fine-tuning followed by Group Relative Policy Optimization (GRPO)
@@ -266,11 +275,15 @@ suite covers orthogonal failure surfaces.
 |---|---|---|---|---|
 | [IFEval](https://arxiv.org/abs/2311.07911) | About 500 prompts using 25 verifiable instruction types | Programmatic strict/loose, prompt/instruction level | Objective, cheap, reproducible | Public, narrow, increasingly saturated; easy to mistake formatting for general reliability |
 | [IFBench](https://github.com/allenai/IFBench) | 58 new out-of-distribution constraints combined with held-out WildChat prompts | Programmatic; paper normally reports prompt-level loose accuracy | Harder and more diverse precise constraints; open code and data | Mostly synthetic/verifiable constraints; standard score is not long-horizon product behavior |
+| [InFoBench](https://arxiv.org/abs/2401.03601) | 500 instructions decomposed into about 2,250 fine-grained requirements | LLM-based decomposition and Decomposed Requirements Following Ratio | Makes omitted requirements visible instead of assigning one opaque answer score | Decomposition and semantic grading inherit judge error |
 | [FollowBench](https://github.com/YJiangcm/FollowBench) | Content, situation, style, format, and example constraints at increasing levels | LLM judge with constraint-evolution context | Diagnoses degradation as constraints accumulate | Judge quality and open-ended rubrics matter |
 | [ComplexBench](https://github.com/thu-coai/ComplexBench) | Multiple constraints and their dependency/composition structure | Rules plus LLM evaluators | Tests composition rather than isolated rules | Evaluation is more complex and partly judge-dependent |
+| [CFBench](https://aclanthology.org/2025.acl-long.1581/) | 1,000 Chinese prompts across 200-plus real scenarios, 50-plus tasks, and a 10-category constraint taxonomy | Multi-dimensional constraint, instruction, and fulfillment scoring with requirement priority | Tests realistic Chinese constraint composition beyond a small rule set | Language and judge-dependent open-ended scoring limit generalization |
 | [IFScale](https://distylai.github.io/IFScale/) | Adherence as the number of simultaneous instructions grows | Constraint-specific evaluation | Exposes scaling curves hidden by one aggregate | Still a controlled constraint proxy |
 | [MultiChallenge](https://labs.scale.com/papers/multichallenge) | Instruction retention, inferred user memory, versioned editing, and self-coherence across turns | Instance rubrics with an LLM judge | Much closer to conversational failure | Scores are judge-sensitive; OpenAI reports its default GPT-4o judge sometimes mis-scored responses |
 | [Multi-IF](https://arxiv.org/abs/2410.15553) | Three-turn instruction following across eight languages | Hybrid programmatic/LLM/human construction and evaluation | Reveals turn and language degradation | Limited dialogue depth and benchmark language set |
+| [LIFBench](https://arxiv.org/abs/2411.07037) | 2,766 expanded instructions over three long-context scenarios, 11 tasks, and six length intervals | Rubric-based automated LIFEval without human or LLM judging | Exposes length-dependent performance and stability hidden in short prompts | Synthetic expansion and controlled lengths may not match a live product's compaction |
+| [SysBench](https://proceedings.iclr.cc/paper_files/paper/2025/file/b917f916e7eed84ffe8f5e63492b2be8-Paper-Conference.pdf) | 500 system messages, each paired with five user turns, covering constraint violations, priority conflicts, and instability | Checklist-guided LLM verifier at three granularities | Separates higher-priority system compliance from ordinary user obedience | Judge error and a five-turn setting do not cover every tool injection or domain authorization rule |
 | [MMMT-IF](https://research.google/pubs/mmmt-if-a-challenging-multi-modal-multi-turn-instruction-following-foundation-model-benchmark/) | Global text rules dispersed through image-grounded multi-turn dialogue | Program-verifiable Programmatic Instruction Following metrics | Separates rule retrieval from visual reasoning and tests repeated-run robustness | Narrow multimodal task design and older model set |
 | [IH-Challenge](https://openai.com/index/instruction-hierarchy-challenge/) and System IFEval | Conflicts across system, developer, user, and tool roles | Programmatic | Tests obedience to the correct source and prompt-injection robustness | Simple conflicts do not cover every real malicious document or agent trajectory |
 | [BFCL V4](https://gorilla.cs.berkeley.edu/leaderboard) | Single-turn, multi-turn, memory, hallucination, and tool-call correctness | Abstract-syntax-tree, execution, and task-specific checks | Reproducible tool-interface diagnostics with released responses | Tool syntax success is not complete domain-policy compliance |
@@ -480,7 +493,7 @@ vector of matched, repeated measurements on the user's actual workflow.
    [“DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning”](https://arxiv.org/abs/2501.12948),
    v2, 2026.
 10. DeepSeek,
-    [“DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence”](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/resolve/main/DeepSeek_V4.pdf),
+    [“DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence”](https://arxiv.org/abs/2606.19348),
     2026, especially Sections 1 and 5.4 and Tables 13–14.
 11. UC Berkeley,
     [Berkeley Function-Calling Leaderboard V4](https://gorilla.cs.berkeley.edu/leaderboard),
@@ -491,3 +504,12 @@ vector of matched, repeated measurements on the user's actual workflow.
 13. Elliot Epstein et al.,
     [“MMMT-IF”](https://research.google/pubs/mmmt-if-a-challenging-multi-modal-multi-turn-instruction-following-foundation-model-benchmark/),
     2024.
+14. Yiwei Qin et al.,
+    [“InFoBench”](https://arxiv.org/abs/2401.03601), 2024.
+15. Tao Zhang et al.,
+    [“CFBench”](https://aclanthology.org/2025.acl-long.1581/), ACL 2025.
+16. Xiaodong Wu et al.,
+    [“LIFBench”](https://arxiv.org/abs/2411.07037), 2024.
+17. Yanzhao Qin et al.,
+    [“SysBench”](https://proceedings.iclr.cc/paper_files/paper/2025/file/b917f916e7eed84ffe8f5e63492b2be8-Paper-Conference.pdf),
+    ICLR 2025.

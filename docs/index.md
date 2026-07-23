@@ -46,8 +46,13 @@ permissions, sandboxing, and core-source visibility.
 The [Instruction Following and Steerability chapter](evaluation/instruction-following.md)
 separates atomic constraints, multi-turn retention, instruction hierarchy,
 tool-policy compliance, structured decoding, and end-to-end product behavior.
-It maps the major public benchmarks and gives a dated GPT-versus-DeepSeek
-evidence review plus a production evaluation design.
+Its companion [method map](evaluation/instruction-following-methods.md),
+[vendor evidence audit](evaluation/instruction-following-vendors.md), and
+[production operations chapter](evaluation/instruction-following-operations.md)
+span data construction, post-training, inference, agent controls, the disclosed
+practices of 27 leading developers, and a rule-level release system. The
+overview maps the major public benchmarks and preserves a dated
+GPT-versus-DeepSeek comparison.
 
 ### Where a new reader should begin
 
@@ -119,8 +124,8 @@ The knowledge base currently has four deep, source-cited focus areas:
 
 - **Model evaluation and reliability:** factuality and grounding controls,
   vendor-disclosed practices, claim-level production operations,
-  instruction-following taxonomy, benchmark methodology, and
-  application-specific acceptance suites;
+  instruction-following training and control methods, 27-developer evidence
+  audit, benchmark methodology, and application-specific acceptance suites;
 
 - **Coding-agent systems:** runtime lineage, model/provider coupling, agent
   loops, tools, state, extensibility, permissions, sandboxing, and open-source
