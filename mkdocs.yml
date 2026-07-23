@@ -51,6 +51,10 @@ nav:
   - Model Training Token Ledger: model-training-token-ledger.md
   - DeepSeek Release Timeline: deepseek-release-timeline.md
   - Model Evaluation and Reliability:
+      - Reliability and Factuality Map: evaluation/index.md
+      - LLM Hallucination and Mitigation: evaluation/hallucination.md
+      - Disclosed Vendor Practices: evaluation/hallucination-vendors.md
+      - Evaluation and Production Operations: evaluation/hallucination-operations.md
       - Instruction Following and Steerability: evaluation/instruction-following.md
   - Coding-Agent Systems:
       - Architecture and Evidence Map: coding-agents/index.md

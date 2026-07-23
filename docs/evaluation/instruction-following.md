@@ -22,7 +22,10 @@ Use this reading order:
 The general [research standard](../research-method.md) defines the evidence
 labels used below. The [agent evaluation chapter](../agentic-rl/evaluation-and-safety.md)
 covers stochastic environments, judges, confidence intervals, and deployment
-gates in more detail.
+gates in more detail. For factual errors, unsupported claims, citations,
+retrieval sufficiency, and abstention, start with the
+[reliability and factuality map](index.md); a response can follow every
+instruction and still be false.
 
 ## 1. What practitioners mean by “follows instructions”
 

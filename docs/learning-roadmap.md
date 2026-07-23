@@ -224,6 +224,14 @@ trace rather than aggregate throughput alone.
 
 - Static benchmarks, dynamic benchmarks, capability elicitation, contamination,
   and statistical uncertainty.
+- Factuality, faithfulness, citation entailment, retrieval sufficiency,
+  calibration, selective prediction, tool-result integrity, and claim-level
+  verification. Use the
+  [hallucination and mitigation map](evaluation/hallucination.md), then the
+  [vendor evidence audit](evaluation/hallucination-vendors.md) and
+  [production runbook](evaluation/hallucination-operations.md) to separate
+  checkpoint training from retrieval, tools, verifiers, product controls, and
+  human review.
 - Instruction following as a vector of atomic constraints, negative and ordered
   instructions, multi-turn retention, versioned editing, instruction hierarchy,
   tool-policy compliance, calibration, and repeated-run reliability. Use the

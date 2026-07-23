@@ -123,6 +123,27 @@ visible.
 | **pass@k** | pass at $k$ | Probability that at least one of $k$ sampled candidates passes; it requires a sampling protocol. |
 | **IoU / F1** | Intersection over Union / harmonic mean of precision and recall | Overlap metric for regions / class metric $2PR/(P+R)$. |
 
+## Factuality, grounding, and uncertainty
+
+| Term | Full name | Meaning |
+|---|---|---|
+| **hallucination** | — | An imprecise umbrella for plausible but false, unsupported, or source-unfaithful generation. A useful report names the failed reference: world fact, supplied context, citation, tool result, image, code, or another authority. |
+| **factuality** | — | Whether a claim agrees with the best available evidence about the world. This differs from faithfulness to a supplied source. |
+| **faithfulness / grounding** | — | Whether an output is supported by the supplied document, retrieved passage, image, database value, or tool observation. A response can be grounded in a source that is itself false. |
+| **attribution** | — | A trace from a generated claim to a source and location. Attribution is useful only when the source exists, the cited span entails the claim, material claims are covered, and the source is appropriate. |
+| **parametric knowledge** | — | Information represented in model weights. It lacks the simple record identity, update, access-control, and provenance properties of a database. |
+| **non-parametric memory** | — | An external corpus, index, database, or other store consulted at inference; “non-parametric” does not mean error-free or unlearned. |
+| **evidence sufficiency** | — | Whether the available evidence directly covers every material part of a request with the correct entity, date, version, authority, and qualifiers. Retrieval relevance alone is insufficient. |
+| **citation entailment** | — | Whether the meaning of a cited span actually supports the nearby claim, including its negation, magnitude, population, date, and qualifiers. |
+| **calibration** | — | Agreement between stated or scored confidence and empirical correctness over a defined distribution. A confident tone is not a calibrated probability. |
+| **selective prediction / abstention** | — | A policy that answers only above a calibrated evidence or confidence threshold and otherwise asks, abstains, or escalates; reliability improves by trading some coverage. |
+| **coverage / selective risk** | — | The fraction of requests answered / the error rate among those answered. Report them together so refusing everything cannot appear perfectly reliable. |
+| **semantic entropy** | — | Uncertainty measured over clusters of semantically equivalent sampled answers rather than surface word sequences. It detects instability-like confabulations but not every consistent falsehood. |
+| **RARR** | Retrofit Attribution using Research and Revision | A post-generation method that searches for supporting sources and minimally revises unsupported text. |
+| **Self-RAG / CRAG** | Self-Reflective Retrieval-Augmented Generation / Corrective Retrieval-Augmented Generation | Self-RAG trains retrieval and reflection decisions into generation; CRAG evaluates retrieval quality and triggers correction or broader search. |
+| **FActScore** | Factual precision in Atomicity Score | Decomposes long-form output into atomic claims and measures the fraction supported by a knowledge source. |
+| **SAFE** | Search-Augmented Factuality Evaluator | Uses a search-capable LLM agent to decompose and verify long-form claims; search and evaluator errors still require audit. |
+
 ## Transformer architecture
 
 | Term | Full name | Meaning |

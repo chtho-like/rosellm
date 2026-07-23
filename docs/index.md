@@ -88,7 +88,7 @@ Use the implementation as a set of progressively more realistic laboratories:
 | GPU kernels | `notebooks/cuda/` | Where do memory traffic, tiling, fusion, and numerical precision determine performance? |
 | Distributed primitives | `notebooks/` | What do all-reduce, reduce-scatter, bucketing, and sharding actually do? |
 | Multimodal models | `docs/multimodal/` | How do media become model positions, when is integration “native,” and how can a language-centered model emit images or speech? |
-| Model evaluation | `docs/evaluation/` | Which instruction-following surface failed, what did the benchmark score, and which guarantees came from the model, decoder, or harness? |
+| Model evaluation | `docs/evaluation/` | Which factuality, grounding, citation, calibration, tool-integrity, or instruction surface failed, what is the reference, and which guarantee came from the model or surrounding system? |
 | Coding-agent systems | `docs/coding-agents/` | How do models, agent loops, tools, context, clients, permissions, and sandboxes combine into coding products? |
 | Agentic RL | `docs/agentic-rl/` and `rosellm/roserlhf/` | How does an interactive trajectory become an unbiased, stable policy update? |
 
@@ -117,9 +117,10 @@ protocol.
 
 The knowledge base currently has four deep, source-cited focus areas:
 
-- **Model evaluation and reliability:** instruction-following taxonomy,
-  benchmark methodology, dated GPT/DeepSeek evidence, community failure modes,
-  and application-specific acceptance suites;
+- **Model evaluation and reliability:** factuality and grounding controls,
+  vendor-disclosed practices, claim-level production operations,
+  instruction-following taxonomy, benchmark methodology, and
+  application-specific acceptance suites;
 
 - **Coding-agent systems:** runtime lineage, model/provider coupling, agent
   loops, tools, state, extensibility, permissions, sandboxing, and open-source
@@ -147,6 +148,14 @@ system:
 7. evaluation against contamination, judge bias, reward hacking, and
    non-deterministic environments; and
 8. disclosed practices from DeepSeek, Zhipu GLM, Moonshot Kimi, and other labs.
+
+The [Model Evaluation, Factuality, and Reliability
+map](evaluation/index.md) adds a separate production path for unsupported
+generation. It distinguishes open-world factuality, source faithfulness,
+citation entailment, calibration, tool-result integrity, and instruction
+following; catalogs controls from data and post-training through retrieval,
+tools, verification, abstention, monitoring, and human review; and audits which
+parts leading vendors have actually disclosed.
 
 ## Contribution standard
 
