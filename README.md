@@ -22,6 +22,13 @@ same repository lets you derive an objective, inspect its PyTorch
 implementation, trace the serving path down to KV-cache operations, and audit
 the primary evidence behind a frontier-model claim.
 
+The documentation is maintained as a connected, cumulative LLM reference
+rather than a dated stream of notes. New evidence is integrated into canonical
+chapters, prerequisites and cross-links remain explicit, and explanations
+progress from intuition to mathematics, source code, worked examples, and
+failure boundaries. Time-sensitive claims retain provenance and dates;
+undisclosed details remain unknown.
+
 This is a learning and research codebase, not a drop-in production serving
 framework. The implementations favor visibility, instrumentation, and
 experimentation over API stability.

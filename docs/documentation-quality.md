@@ -5,6 +5,42 @@ exists because a successful Markdown build does not prove that mathematics is
 visible, semantically correct, responsive, or re-rendered after client-side
 navigation.
 
+## Cumulative knowledge-base contract
+
+RoseLLM is maintained as a connected, cumulative LLM reference rather than a
+chronological stream of notes. A useful change should improve not only one
+paragraph but also the reader's path through the surrounding subject.
+
+Every substantial addition follows these editorial rules:
+
+1. **Find the canonical home first.** Extend or reorganize the existing topic
+   before creating a parallel explanation. Separate model lineage,
+   architecture, training, data, inference, evaluation, deployment, and open
+   questions instead of collapsing them into a single product narrative.
+2. **Make dependencies navigable.** A new topic needs the prerequisites,
+   landing-page placement, navigation entry, cross-links, and glossary support
+   required to reach it and understand it in order.
+3. **Explain at progressive depth.** Begin with the problem and plain-language
+   intuition, then add precise definitions, assumptions, mechanisms,
+   mathematics, source-level or worked examples, failure modes, and operational
+   limits. A newcomer should get a correct mental model before an expert reaches
+   the implementation detail.
+4. **Preserve evidence boundaries.** Prefer primary sources; identify exact
+   versions, artifacts, dates, and experimental settings; distinguish disclosed
+   facts, confirmed artifacts, reproduced results, inferences, and unknowns.
+   Time-sensitive claims need a verified-through date.
+5. **Repair the whole concept, not only the new sentence.** Reconcile dependent
+   summaries, tables, terminology, examples, and links when evidence changes.
+   Keep dated disagreements visible when authoritative sources conflict.
+6. **Write for the reader.** Public prose must stand on its own and explain the
+   subject directly. Private prompts, personal intent, conversation history,
+   credentials, and internal execution or compliance traces do not belong in
+   documentation or any other published project surface.
+
+An addition is not complete merely because it builds. It should be accurate,
+non-duplicative, placed at the right conceptual level, and easier to use than
+the material it replaces.
+
 ## The rendering contract
 
 One expression passes only when every layer agrees:
