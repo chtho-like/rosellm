@@ -18,6 +18,9 @@ The first complete specialization is the
 [Agentic Reinforcement Learning curriculum](agentic-rl/index.md). It begins with
 probability and Markov decision processes, then reaches long-horizon agent
 training, distributed rollout systems, and source-level implementation. Read
+the [long-horizon capability synthesis](agentic-rl/long-horizon-capability.md)
+to separate what laboratories train into model weights from what context
+management, tools, memory, verification, and multi-agent runtimes add. Read
 the [research standard](research-method.md) before using the
 [frontier-lab and open-industry evidence matrix](agentic-rl/case-studies/index.md).
 
@@ -70,8 +73,9 @@ report:
 4. **Model evaluation:** instruction-following taxonomy, benchmark map, and
    private production-evaluation design. Keep checkpoint behavior separate from
    constrained decoding and agent-harness behavior.
-5. **Agentic RL foundations:** curriculum map, terminology, history,
-   mathematical foundations, step-by-step derivations, and algorithm families.
+5. **Agentic RL foundations:** curriculum map, terminology, long-horizon
+   capability synthesis, history, mathematical foundations, step-by-step
+   derivations, and algorithm families.
 6. **The actual training system:** data and environments, end-to-end pipeline,
    inference prerequisites, rollout/training systems, evaluation and safety,
    then the source-level lab.

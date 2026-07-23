@@ -184,6 +184,13 @@ labels before transferring a hyperparameter from one model or stage to another.
     increased RL compute, and RL from human and critic feedback, while leaving
     the optimizer and exact mixture undisclosed.
     [technical report](https://storage.googleapis.com/deepmind-media/gemini/gemini_v2_5_report.pdf)
+18. **Hubert et al. — “AlphaProof: Formal Mathematical Reasoning Through
+    Reinforcement Learning” (2025).** A verifier-rich specialist system:
+    autoformalized problems, Lean states and tactics, kernel-checked rewards,
+    value-guided AND-OR search, reinforcement learning, and target-specific
+    test-time adaptation. Do not transfer its exact recipe to a general Gemini
+    agent.
+    [Nature](https://www.nature.com/articles/s41586-025-09833-y)
 
 ## Open reproduction and diagnostic artifacts
 
@@ -242,6 +249,28 @@ cataloged separately under [Training systems](#training-systems).
 7. **Feng et al. — “ReTool” (2025).** Reinforcement learning for strategic
    code-interpreter calls in mathematical reasoning.
    [arXiv](https://arxiv.org/abs/2504.11536)
+8. **Ross, Gordon, and Bagnell — “A Reduction of Imitation Learning and
+   Structured Prediction to No-Regret Online Learning” (DAgger, 2011).**
+   Explains why behavior cloning accumulates error under policy-induced state
+   shift and how iteratively aggregating current-policy states with expert
+   actions changes the horizon dependence.
+   [paper](https://proceedings.mlr.press/v15/ross11a.html)
+9. **Li et al. — “CompactionRL” (2026).** Treats model-generated context
+   summaries as trainable policy actions under downstream task reward; uses
+   token-level critic PPO and cross-segment Generalized Advantage Estimation
+   for variable compacted traces.
+   [arXiv](https://arxiv.org/abs/2607.05378)
+10. **Anthropic — “Effective Harnesses for Long-Running Agents” (2025).**
+    Runtime evidence for incremental work, external progress artifacts,
+    version-control state, and structured handoff across context windows. It is
+    harness engineering, not a Claude training-recipe disclosure.
+    [engineering post](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)
+11. **Anthropic — “Teaching Claude Why” (2026).** Negative and positive
+    evidence on agentic alignment generalization: chat-only alignment does not
+    automatically cover tool settings, principle-rich data can outperform
+    much larger in-distribution sets, and diverse system/tool environments
+    improve held-out behavior.
+    [research post](https://www.anthropic.com/research/teaching-claude-why)
 
 ## Agentic RL formalization and surveys
 
@@ -300,6 +329,12 @@ cataloged separately under [Training systems](#training-systems).
    with hidden database state, policies, a user simulator, rule-based terminal
    evaluation, and the repeated-trial reliability metric `pass^k`.
    [arXiv](https://arxiv.org/abs/2406.12045)
+8. **METR — “Task-Completion Time Horizons of Frontier AI Models” (updated
+   2026).** Fits success probability against skilled-human task duration over a
+   principally software/ML/cyber task suite. Use its 50%/80% horizon as a
+   protocol-specific task-difficulty measure, not agent wall-clock duration or
+   universal automation.
+   [report, data, and code](https://metr.org/time-horizons/)
 
 ## Reward failure and evaluation science
 
@@ -316,6 +351,12 @@ cataloged separately under [Training systems](#training-systems).
    clustered questions, variance reduction, paired model comparison, and
    prospective power analysis. Read Sections 2–5.
    [arXiv](https://arxiv.org/abs/2411.00640)
+4. **OpenAI — “Safety and Alignment in an Era of Long-Horizon Models”
+   (2026).** Deployment-derived evidence that persistent models can compose
+   individually plausible actions into an unauthorized trajectory; motivates
+   incident-derived evaluations, instruction-persistence training,
+   trajectory-level monitors, and pause/rollback controls.
+   [research post](https://openai.com/index/safety-alignment-long-horizon-models/)
 
 ## Explanatory and implementation companions
 

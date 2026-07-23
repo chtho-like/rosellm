@@ -1,6 +1,6 @@
 # Zhipu AI / GLM: From Blank Infilling to Compaction-Aware Agentic Reinforcement Learning
 
-**Verified through:** 2026-07-19. Sources are official papers, repositories,
+**Verified through:** 2026-07-23. Sources are official papers, repositories,
 configs, model cards, and Zhipu/Z.ai releases. Vendor benchmarks are labeled as
 such.
 
@@ -22,6 +22,9 @@ such.
 - **Single-Rollout Asynchronous Optimization (SAO):** one-rollout-per-prompt
   actor–critic training with direct double-sided importance masking; its authors
   report deployment in GLM-5.2.
+- **CompactionRL:** critic-based Proximal Policy Optimization that jointly
+  trains ordinary agent actions and model-generated context summaries under the
+  final task reward; its authors report deployment in GLM-5.2.
 - **Token-In, Token-Out (TITO):** GLM-5's exact-token/log-probability transport
   between rollout and training services.
 - **Mixture of Experts (MoE):** sparse activation of a few feed-forward experts
@@ -551,6 +554,7 @@ environments, algorithm changes, reward, and compute are **[U]**.
 Sources: [official release](https://z.ai/blog/glm-5.2) (2026-06-16),
 [config](https://huggingface.co/zai-org/GLM-5.2/blob/main/config.json),
 [IndexCache paper](https://arxiv.org/abs/2603.12201),
+[CompactionRL paper](https://arxiv.org/abs/2607.05378),
 [SAO paper](https://arxiv.org/abs/2607.07508),
 [GLM-5 repository](https://github.com/zai-org/GLM-5).
 
@@ -594,9 +598,90 @@ GLM-5.2 moved to:
 - all compacted sub-traces retained;
 - token-level loss to handle length imbalance.
 
-**[U]** critic architecture, GAE $\gamma/\lambda$, clipping, value/entropy
-coefficients, batch, optimizer. “Uses PPO” is not enough to reconstruct the
-update.
+Li et al.'s 2026
+[CompactionRL](https://arxiv.org/abs/2607.05378) states that the method was
+deployed in GLM-5.2's reinforcement-learning (RL) pipeline **[D]**. Its
+controlled experiments use GLM-4.7-Flash (30B-A3B) and a
+Supervised Fine-Tuning (SFT) checkpoint derived from GLM-4.5-Air (106B-A30B),
+not GLM-5.2 itself. This distinction is essential: the paper discloses a
+mechanism and smaller-scale configuration, not the flagship's complete
+resolved run.
+
+#### Trainable compaction [D]
+
+Let the current interaction history contain assistant actions and environment
+observations. When the unused context budget drops below
+$T_{\mathrm{comp}}$, the policy samples a summary
+
+$$
+S_t\sim\pi_\theta\!\left(
+\cdot\mid\operatorname{concat}(h_t,q_{\mathrm{sum}})
+\right)
+$$
+
+and reconstructs context from the system prompt, original user goal, summary,
+and the most recent action-observation pairs. The paper keeps the last two
+pairs by default. It treats each action plus its observation as atomic so a
+tool call is not separated from its result.
+
+The summary is not an external fixed model. Summary tokens and ordinary
+execution tokens are sampled by the same trainable policy and receive the same
+terminal task reward. The authors do not add a handcrafted summary-quality
+reward. Holding the execution model fixed while swapping three summary models
+moved reported SWE-bench Verified pass@1 from 49.0% to 55.5%, establishing that
+the summary policy alone can materially change downstream success under this
+scaffold **[D]**.
+
+#### Token loss and cross-trajectory GAE [D]
+
+One complete rollout becomes a variable sequence
+
+$$
+\tau=(\sigma_1,\ldots,\sigma_K)
+$$
+
+of execution and summary segments. Treating these segments as independent
+group members would overrepresent episodes with more compactions. CompactionRL
+therefore uses group-size-one critic PPO and normalizes the policy loss across
+all generated tokens rather than averaging segments.
+
+A naive segment-local Generalized Advantage Estimation (GAE) calculation makes
+terminal reward appear artificially close to every earlier segment. If
+$N_{>s}$ trainable tokens occur after segment $s$, CompactionRL applies
+
+$$
+\widehat A_{s,i}
+=(\gamma\lambda)^{N_{>s}}A^{\mathrm{loc}}_{s,i},
+$$
+
+so credit reflects approximate distance to the end of the concatenated
+rollout.
+
+The disclosed experimental configuration is:
+
+| Item | Published value |
+|---|---|
+| global batch / group | 128 / 1 |
+| policy / critic learning rate | $2\times10^{-6}$ / $3\times10^{-6}$ |
+| critic initialization | same checkpoint as actor; 50 value-pretraining steps |
+| actor/critic updates | one / two per batch |
+| peak context | 64K for 30B-A3B; 80K for 106B-A30B |
+| response/compaction limit | 10,240 tokens per assistant response; at most three compactions |
+| evaluation | temperature 1.0, top-$p=1.0$, at most 250 turns |
+
+On the 106B-A30B experiment, removing token-level loss normalization changes
+reported compacted evaluation from 66.8% to 60.0% on SWE-bench Verified and
+24.5% to 21.3% on Terminal-Bench 2.0; removing cross-trajectory GAE changes
+them to 63.0% and 22.5% **[D]**. These are vendor-author ablations on a sampled
+SWE-bench set and a named harness, not independent product measurements.
+
+The paper also reports an important negative boundary: CompactionRL gains do
+not consistently transfer to single-window evaluation with compaction disabled,
+and its cross-trajectory GAE is still an approximation. **[U]** for GLM-5.2:
+critic architecture, resolved $\gamma/\lambda$, clipping, value/entropy
+coefficients, batch, optimizer, task mixture, and how CompactionRL interacts
+with SAO. “Uses PPO” and “deployed in the pipeline” do not reconstruct the
+flagship update.
 
 ### 11.3 SAO: the missing algorithmic link [D/U]
 

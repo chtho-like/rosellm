@@ -312,7 +312,7 @@ artifact for each P0–P3 source.
 | Phase | Read | Build | Exit criterion |
 |---|---|---|---|
 | 0 | The [repository roadmap](../learning-roadmap.md), especially the five-pass loop and Levels 0–6, plus the [P0 reading spine](reading-list.md#p0-spine) | the prerequisite mastery checks | Identify every missing probability, optimization, transformer, and classical-RL dependency before specialization. The levels are checklists, not complete prerequisite textbooks; use the [bibliography](bibliography.md) as a source rail. |
-| 1 | [Curriculum map](index.md), [terminology](terminology.md), and [history](history.md) | a timeline and concept map | Explain why a multi-turn tool task is not a contextual bandit and place each algorithm in its historical setting. |
+| 1 | [Curriculum map](index.md), [terminology](terminology.md), [long-horizon capability synthesis](long-horizon-capability.md), and [history](history.md) | a timeline and model/training/runtime concept map | Explain why a multi-turn tool task is not a contextual bandit, separate checkpoint capability from harness behavior, and place each mechanism in its historical setting. |
 | 2 | [Mathematical foundations](mathematical-foundations.md) and [step-by-step derivations](derivations-and-code.md) | REINFORCE on a toy sequence task | Derive the estimator, trace its tensor implementation, and measure its variance. |
 | 3 | [Algorithms](algorithms.md) | PPO, RLOO, and GRPO on identical samples | Explain every normalization, mask, ratio, and estimator assumption. |
 | 4 | [Data and environments](data-and-environments.md) | deterministic tool sandbox | Reset and replay a trajectory bit-for-bit and prove split isolation. |

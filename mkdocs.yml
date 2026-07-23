@@ -74,6 +74,7 @@ nav:
       - Curriculum and Knowledge Map: agentic-rl/index.md
       - Must-Read Syllabus and Priorities: agentic-rl/reading-list.md
       - Terminology and Boundaries: agentic-rl/terminology.md
+      - Long-Horizon Task Capability: agentic-rl/long-horizon-capability.md
       - Historical Development: agentic-rl/history.md
       - Mathematical Foundations: agentic-rl/mathematical-foundations.md
       - Step-by-Step Derivations and Code: agentic-rl/derivations-and-code.md

@@ -16,6 +16,7 @@ answers the more important question, “what does this object do here?”
 | **agentic RL** | Agentic Reinforcement Learning | RL in which an LLM acts over multiple steps, often using tools and receiving delayed environment feedback. It is a setting, not one algorithm. |
 | **SFT** | Supervised Fine-Tuning | Maximum-likelihood training on supplied target responses or trajectories. It imitates demonstrations rather than directly maximizing a reward. |
 | **CPT** | Continual Pretraining | Additional next-token training of an existing checkpoint, often on a new domain, higher-quality mixture, or longer context. A CPT token count is an incremental stage, not automatically the model's total lifetime exposure. |
+| **agentic continued pretraining** | — | Continued next-token training on serialized goals, actions, tool calls, observations, and revisions. It teaches interaction-shaped priors at scale but remains likelihood training rather than online environment RL. |
 | **RLHF** | Reinforcement Learning from Human Feedback | RL in which human judgments directly or indirectly define reward, often through a learned reward model. |
 | **RLAIF** | Reinforcement Learning from AI Feedback | RL whose labels, critiques, or rewards are produced by another AI system. |
 | **CAI** | Constitutional AI | Uses written principles to generate critiques, revisions, or AI preference labels; the cited Anthropic pipeline combines these stages with SFT and RL. |
@@ -60,6 +61,7 @@ visible.
 | **policy** $\pi_\theta(a\mid h)$ | A parameterized probability distribution over actions given observable history $h$. |
 | **trajectory** $\tau$ | One ordered record of observations, actions, rewards, and termination signals. |
 | **episode / horizon** | One complete or truncated interaction / its maximum or realized number of decision steps. |
+| **task-completion time horizon** | The human-task duration at which an evaluated agent is predicted to achieve a stated success probability over a specified task distribution. It measures task difficulty under one protocol, not agent wall-clock duration or universal job automation. |
 | **return** $G_t$ | Discounted future reward, $G_t=\sum_{k\ge0}\gamma^k r_{t+k}$. |
 | **value** $V^\pi(s)$ | Expected return from a state under policy $\pi$. |
 | **action value** $Q^\pi(s,a)$ | Expected return after action $a$, then following $\pi$. |
@@ -87,6 +89,7 @@ visible.
 | **GSPO** | Group Sequence Policy Optimization | Uses a sequence-level importance ratio rather than independently clipping token ratios. |
 | **SAPO** | Soft Adaptive Policy Optimization | Replaces hard ratio clipping with a sigmoid-shaped token gate whose gradient decays smoothly away from the behavior policy; it uses separate positive/negative-advantage temperatures. |
 | **SAO** | Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning | Consumes each long trajectory when it finishes, uses direct double-sided importance masking, and restores a critic for group-size-one training. The 2026 authors report deployment in GLM-5.2. |
+| **CompactionRL** | Reinforcement Learning with Context Compaction for Long-Horizon Agents | Jointly optimizes ordinary agent actions and model-generated context summaries under downstream task reward, using token-level PPO loss and cross-segment GAE for variable compacted traces. |
 | **DIS** | Direct Double-Sided Importance Sampling | SAO's direct rollout-to-current-policy importance ratio with strict two-sided rejection outside a permitted interval. It is masking, not PPO's saturated clipping. |
 | **PARL** | Parallel-Agent Reinforcement Learning | Moonshot's Kimi K2.5 method for learning an orchestrator that delegates to parallel subagents and aggregates their results. |
 | **RoC / GRPO-RoC** | Resample-on-Correct / GRPO with Resample-on-Correct | rStar2-Agent oversamples a rollout group, preserves a failure subset, and selects cleaner successful tool trajectories before the GRPO update. |
@@ -257,6 +260,8 @@ visible.
 |---|---|---|
 | **agent scaffold** | — | Runtime prompt construction, tool schema, context management, retries, stopping, and persistence around the model. |
 | **agent harness** | — | The executable loop and policy substrate that connects a model to context, tools, state, and host effects. “Harness” often emphasizes a reusable or modifiable runtime rather than a sealed end-user product. |
+| **context compaction** | — | Replaces older interaction history with a shorter generated or structured state so an agent can continue within a bounded context window. It is lossy unless the original session remains recoverable. |
+| **context reset / structured handoff** | — | Starts a fresh model context while carrying forward an explicit task-state artifact, such as active requirements, completed work, evidence, failures, and next steps. It trades continuity for a clean attention state. |
 | **ACP** | Agent Client Protocol | A protocol boundary through which an editor or other client can start, observe, and steer an agent implemented by a separate process. It is distinct from MCP, which primarily exposes tools and context to the agent. |
 | **MCP** | Model Context Protocol | An open protocol exposing tools and contextual resources to AI applications. |
 | **provider abstraction** | — | A runtime interface that normalizes model endpoints and streaming responses. A common interface does not erase vendor differences in reasoning fields, tool calls, caching, limits, or error behavior. |

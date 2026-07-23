@@ -14,6 +14,7 @@ kernels, and agentic reinforcement learning.
 [Coding-agent systems](docs/coding-agents/index.md) ·
 [Multimodal architecture](docs/multimodal/index.md) ·
 [Agentic RL curriculum](docs/agentic-rl/index.md) ·
+[Long-horizon capability](docs/agentic-rl/long-horizon-capability.md) ·
 [Serving benchmarks](benchmarks/serving/README.md)
 
 RoseLLM connects ideas that are often taught or implemented in isolation. The
